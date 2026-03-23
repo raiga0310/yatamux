@@ -95,11 +95,12 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("list-panes") => cli::list_panes(DEFAULT_SESSION).await,
         Some("send-keys") => {
-            let pane_id = args.iter()
-                .position(|a| a == "--pane")
+            let pane_pos = args.iter().position(|a| a == "--pane");
+            let pane_id = pane_pos
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse::<u32>().ok());
-            let text = args.last().filter(|_| args.len() >= 5).cloned();
+            // text は --pane <id> の直後の引数
+            let text = pane_pos.and_then(|i| args.get(i + 2)).cloned();
             match (pane_id, text) {
                 (Some(id), Some(t)) => {
                     cli::send_keys(DEFAULT_SESSION, id, &t).await

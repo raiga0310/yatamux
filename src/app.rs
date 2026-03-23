@@ -51,7 +51,9 @@ pub async fn run() -> Result<()> {
 
     // ── IPC サーバー起動（外部 CLI からの接続を受け付ける）────────────────
     tokio::spawn(async move {
-        let _ = run_ipc_server(DEFAULT_SESSION, ipc_in_tx, ipc_out_rx).await;
+        if let Err(e) = run_ipc_server(DEFAULT_SESSION, ipc_in_tx, ipc_out_rx).await {
+            tracing::error!("IPC server exited with error: {:#}", e);
+        }
     });
 
     // ── ワークスペース → サーフェス → 初期ペイン 作成 ───────────────────

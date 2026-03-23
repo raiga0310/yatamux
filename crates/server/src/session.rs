@@ -154,7 +154,7 @@ impl Server {
                         }
                         (_, _, existing) => {
                             s.pane_tree = Some(existing.unwrap_or(PaneTree::Leaf(id)));
-                            if s.pane_tree.as_ref().is_none_or(|t| matches!(t, PaneTree::Leaf(_))) {
+                            if s.pane_tree.as_ref().map_or(true, |t| matches!(t, PaneTree::Leaf(_))) {
                                 s.pane_tree = Some(PaneTree::Leaf(id));
                             }
                         }
