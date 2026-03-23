@@ -1,5 +1,5 @@
 [package]
-name = "cmux-renderer"
+name = "yatamux-renderer"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,8 +9,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 unicode-width = { workspace = true }
 
-cmux-terminal = { path = "../terminal" }
-cmux-protocol = { path = "../protocol" }
+yatamux-terminal = { path = "../terminal" }
+yatamux-protocol = { path = "../protocol" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

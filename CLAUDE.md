@@ -13,8 +13,8 @@ cargo build                          # ビルド
 cargo run                            # 実行（デバッグビルド、コンソールウィンドウあり）
 $env:RUST_LOG="info"; cargo run      # ログ付き実行
 cargo test                           # 全テスト
-cargo test -p cmux-terminal          # クレート単体テスト
-cargo test -p cmux-client            # window.rs のキーマップテスト等
+cargo test -p yatamux-terminal          # クレート単体テスト
+cargo test -p yatamux-client            # window.rs のキーマップテスト等
 cargo test -- test_name              # 単一テスト
 ```
 
@@ -44,26 +44,26 @@ src/app.rs         起動オーケストレーション。
 
 ### クレート責務
 
-**`cmux-terminal`** — ターミナルエミュレーション層（Win32 依存なし）
+**`yatamux-terminal`** — ターミナルエミュレーション層（Win32 依存なし）
 - `Grid`: 仮想スクリーンバッファ。`dirty: Vec<bool>` で差分描画フラグを管理。オルタネートスクリーンは `saved_main: Option<MainScreenSnapshot>` で実装。
 - `VtProcessor`: `vte::Perform` 実装。パース結果を `Grid` メソッド呼び出しに変換。
 - `TerminalSink`: `Grid + vte::Parser` をまとめたラッパー。`feed(&[u8])` で VT バイト列を受け取りグリッドを更新。
 - `PtySession`: `portable-pty` ラッパー。ConPTY を起動し PTY 読み書きを管理。
 - `CjkWidthConfig`: East Asian Ambiguous 幅の設定。ConPTY のカーソル位置を信用せずこちらで計算する。
 
-**`cmux-server`** — ペイン・セッション管理
+**`yatamux-server`** — ペイン・セッション管理
 - `Server::run()`: tokio `select!` で `ClientMessage` 受信とペイン出力転送を並行処理。
 - 階層: `Workspace` → `Surface`（タブ）→ `PaneTree`（二分木）→ `Pane`
 - `Pane::spawn()`: tokio タスクを2つ起動（PTY 読み取り・書き込み）。読み取り側は VT パース後 `Grid` を更新し、生バイト列を `pane_output_tx` へも転送する。
 - `PaneTree` は `session.rs` 内のローカル型（`LayoutNode` とは別物）。
 
-**`cmux-client`** — Win32 ウィンドウ・レンダリング
+**`yatamux-client`** — Win32 ウィンドウ・レンダリング
 - `window.rs`: `WndProc` 実装。`SetWindowLongPtrW(GWLP_USERDATA)` で `ClientState` ポインタを保持。
 - `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。
 - `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
 
-**`cmux-protocol`** — メッセージ型定義のみ。ロジックなし。
+**`yatamux-protocol`** — メッセージ型定義のみ。ロジックなし。
 
 ### レンダリングの仕組み
 

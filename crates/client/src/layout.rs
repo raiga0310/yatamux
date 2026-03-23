@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cmux_protocol::types::{PaneId, SplitDirection};
-use cmux_terminal::Grid;
+use yatamux_protocol::types::{PaneId, SplitDirection};
+use yatamux_terminal::Grid;
 
 /// ペインのピクセル矩形（PADDING 適用前のコンテンツ領域内の相対座標）
 #[derive(Clone, Copy, Debug)]

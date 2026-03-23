@@ -8,9 +8,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use cmux_client::connection::ServerConnection;
-use cmux_protocol::{ClientMessage, ServerMessage};
-use cmux_server::ipc::run_ipc_server;
+use yatamux_client::connection::ServerConnection;
+use yatamux_protocol::{ClientMessage, ServerMessage};
+use yatamux_server::ipc::run_ipc_server;
 use tokio::sync::mpsc;
 
 /// テストごとにユニークなセッション名を生成する
@@ -26,7 +26,7 @@ fn unique_session() -> String {
 fn start_ipc_server(
     session: &str,
 ) -> (mpsc::Sender<ClientMessage>, mpsc::Receiver<ServerMessage>) {
-    use cmux_server::Server;
+    use yatamux_server::Server;
 
     let (server_msg_tx, server_msg_rx) = mpsc::channel::<ServerMessage>(256);
     let (client_msg_tx, client_msg_rx) = mpsc::channel::<ClientMessage>(256);
@@ -58,7 +58,7 @@ async fn test_ipc_server_accepts_connection() {
     let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
     let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
 
-    use cmux_server::Server;
+    use yatamux_server::Server;
     let logic = Server::new(server_out_tx);
     tokio::spawn(logic.run(server_event_rx));
 
@@ -85,7 +85,7 @@ async fn test_ipc_send_receive_message() {
     let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
     let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
 
-    use cmux_server::Server;
+    use yatamux_server::Server;
     let logic = Server::new(server_out_tx);
     tokio::spawn(logic.run(server_event_rx));
 
@@ -125,7 +125,7 @@ async fn test_ipc_multiple_clients() {
     let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
     let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
 
-    use cmux_server::Server;
+    use yatamux_server::Server;
     let logic = Server::new(server_out_tx);
     tokio::spawn(logic.run(server_event_rx));
 
@@ -187,7 +187,7 @@ async fn test_ipc_invalid_json_does_not_drop_connection() {
     let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
     let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
 
-    use cmux_server::Server;
+    use yatamux_server::Server;
     let logic = Server::new(server_out_tx);
     tokio::spawn(logic.run(server_event_rx));
 
@@ -198,7 +198,7 @@ async fn test_ipc_invalid_json_does_not_drop_connection() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let pipe_name = format!(r"\\.\pipe\cmux-win-{}", session);
+    let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
     let mut pipe = ClientOptions::new().open(&pipe_name).unwrap();
 
     // 不正 JSON を送信

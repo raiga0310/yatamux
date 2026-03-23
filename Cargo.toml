@@ -51,12 +51,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [package]
-name = "cmux-win"
+name = "yatamux"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "cmux-win"
+name = "yatamux"
 path = "src/main.rs"
 
 [dependencies]
@@ -67,7 +67,7 @@ tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 
-cmux-server = { path = "crates/server" }
-cmux-client = { path = "crates/client" }
-cmux-protocol = { path = "crates/protocol" }
-cmux-terminal = { path = "crates/terminal" }
+yatamux-server = { path = "crates/server" }
+yatamux-client = { path = "crates/client" }
+yatamux-protocol = { path = "crates/protocol" }
+yatamux-terminal = { path = "crates/terminal" }

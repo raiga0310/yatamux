@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
-use cmux_protocol::types::TermSize;
-use cmux_terminal::PtySession;
+use yatamux_protocol::types::TermSize;
+use yatamux_terminal::PtySession;
 use tokio::sync::mpsc;
 
 fn default_size() -> TermSize {

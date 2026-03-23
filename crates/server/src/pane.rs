@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, Mutex};
 use anyhow::Result;
 use tracing::{debug, info};
 
-use cmux_protocol::types::{PaneId, TermSize};
-use cmux_terminal::{Grid, CjkWidthConfig};
+use yatamux_protocol::types::{PaneId, TermSize};
+use yatamux_terminal::{Grid, CjkWidthConfig};
 
 /// ペイン書き込みタスクへの制御コマンド
 enum PtyCmd {
@@ -44,7 +44,7 @@ impl Pane {
         let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<Vec<u8>>(256);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCmd>(64);
 
-        let mut pty = cmux_terminal::PtySession::spawn(size, None, pty_output_tx)?;
+        let mut pty = yatamux_terminal::PtySession::spawn(size, None, pty_output_tx)?;
 
         // PTY 書き込み / リサイズタスク
         tokio::spawn(async move {
@@ -78,8 +78,8 @@ impl Pane {
                 // Grid 更新
                 {
                     let mut g = grid_clone.lock().await;
-                    let mut proc = cmux_terminal::vt::VtProcessor::new(&mut g);
-                    cmux_terminal::vt::feed_bytes(&mut parser, &mut proc, &data);
+                    let mut proc = yatamux_terminal::vt::VtProcessor::new(&mut g);
+                    yatamux_terminal::vt::feed_bytes(&mut parser, &mut proc, &data);
 
                     if let Some(t) = proc.title.take() {
                         *title_clone.lock().await = t;

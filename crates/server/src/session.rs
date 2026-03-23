@@ -8,9 +8,9 @@ use tokio::sync::mpsc;
 use anyhow::{Context, Result};
 use tracing::info;
 
-use cmux_protocol::types::{PaneId, SplitDirection, SurfaceId, WorkspaceId};
-use cmux_protocol::{ClientMessage, ServerMessage};
-use cmux_terminal::CjkWidthConfig;
+use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId, WorkspaceId};
+use yatamux_protocol::{ClientMessage, ServerMessage};
+use yatamux_terminal::CjkWidthConfig;
 
 use crate::pane::Pane;
 
@@ -217,8 +217,8 @@ fn split_pane_tree(tree: PaneTree, parent: PaneId, child: PaneId, dir: SplitDire
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cmux_protocol::{ClientMessage, ServerMessage};
-    use cmux_protocol::types::{SurfaceId, TermSize, WorkspaceId};
+    use yatamux_protocol::{ClientMessage, ServerMessage};
+    use yatamux_protocol::types::{SurfaceId, TermSize, WorkspaceId};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -313,7 +313,7 @@ mod tests {
         match recv_one(&mut rx).await {
             ServerMessage::PaneCreated { id, surface } => {
                 assert_eq!(surface, surf_id);
-                assert_eq!(id, cmux_protocol::types::PaneId(1));
+                assert_eq!(id, yatamux_protocol::types::PaneId(1));
             }
             other => panic!("unexpected: {:?}", other),
         }

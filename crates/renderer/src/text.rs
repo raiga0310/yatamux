@@ -3,8 +3,8 @@
 //! Grid の内容を ANSI エスケープシーケンスとして stdout に出力する。
 //! 実際の GPU レンダリングが完成するまでのプレースホルダ。
 
-use cmux_terminal::Grid;
-use cmux_terminal::cell::CellContent;
+use yatamux_terminal::Grid;
+use yatamux_terminal::cell::CellContent;
 
 /// グリッドをターミナルに出力（デバッグ用）
 pub fn render_to_stdout(grid: &Grid) {

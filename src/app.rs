@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use cmux_client::{run_window, PaneStore};
-use cmux_protocol::types::{PaneId, SplitDirection, TermSize};
-use cmux_protocol::{ClientMessage, ServerMessage};
-use cmux_server::Server;
-use cmux_terminal::TerminalSink;
+use yatamux_client::{run_window, PaneStore};
+use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
+use yatamux_protocol::{ClientMessage, ServerMessage};
+use yatamux_server::Server;
+use yatamux_terminal::TerminalSink;
 
 /// デフォルトのターミナルサイズ
 const DEFAULT_COLS: u16 = 220;

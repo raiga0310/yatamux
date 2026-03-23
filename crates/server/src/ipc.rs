@@ -1,17 +1,17 @@
 //! Windows 名前付きパイプ IPC サーバー
 //!
 //! 要件定義書 §5「IPC: Windows 名前付きパイプ」に対応。
-//! パイプ名: \\.\pipe\cmux-win-{session_name}
+//! パイプ名: \\.\pipe\yatamux-{session_name}
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-use cmux_protocol::{ClientMessage, ServerMessage};
+use yatamux_protocol::{ClientMessage, ServerMessage};
 
 /// 名前付きパイプのベース名
-pub const PIPE_PREFIX: &str = r"\\.\pipe\cmux-win-";
+pub const PIPE_PREFIX: &str = r"\\.\pipe\yatamux-";
 
 /// IPC サーバーを起動し、クライアント接続を受け付ける
 ///

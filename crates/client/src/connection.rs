@@ -1,10 +1,10 @@
 //! サーバーへの IPC 接続
 //!
 //! Windows 名前付きパイプ経由でサーバーに接続する。
-//! パイプ名は ipc.rs の PIPE_PREFIX と同じ規則: \\.\pipe\cmux-win-{session}
+//! パイプ名は ipc.rs の PIPE_PREFIX と同じ規則: \\.\pipe\yatamux-{session}
 
 use anyhow::{Context, Result};
-use cmux_protocol::{ClientMessage, ServerMessage};
+use yatamux_protocol::{ClientMessage, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -20,7 +20,7 @@ impl ServerConnection {
         {
             use tokio::net::windows::named_pipe::ClientOptions;
 
-            let pipe_name = format!(r"\\.\pipe\cmux-win-{}", session);
+            let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
             let pipe = ClientOptions::new()
                 .open(&pipe_name)
                 .with_context(|| format!("Failed to connect to named pipe: {}", pipe_name))?;

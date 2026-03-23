@@ -32,10 +32,10 @@ mod win32 {
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     use std::collections::HashMap;
-    use cmux_terminal::{Cell, Grid};
-    use cmux_terminal::cell::CellContent;
-    use cmux_protocol::types::{PaneId, SplitDirection, TermSize};
-    use cmux_protocol::ClientMessage;
+    use yatamux_terminal::{Cell, Grid};
+    use yatamux_terminal::cell::CellContent;
+    use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
+    use yatamux_protocol::ClientMessage;
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
     use crate::layout::{PaneRect, PaneStore};
@@ -43,7 +43,7 @@ mod win32 {
     // ── 定数 ────────────────────────────────────────────────────────────────
 
     /// ウィンドウクラス名（ワイド文字列）
-    const CLASS_NAME: &str = "CmuxWin\0";
+    const CLASS_NAME: &str = "Yatamux\0";
 
     /// 再描画タイマー ID
     const TIMER_REPAINT: usize = 1;
@@ -1055,7 +1055,7 @@ mod win32 {
             // ── ウィンドウ作成 ───────────────────────────────────────────
             let win_width = initial_size.cols as i32 * cell_width + PADDING_X * 2;
             let win_height = initial_size.rows as i32 * cell_height + PADDING_Y * 2;
-            let title: Vec<u16> = "cmux-win\0".encode_utf16().collect();
+            let title: Vec<u16> = "yatamux\0".encode_utf16().collect();
 
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -1403,9 +1403,9 @@ pub use win32::{run_window, ClientState};
 #[cfg(not(windows))]
 pub fn run_window(
     _panes: std::sync::Arc<std::sync::Mutex<crate::layout::PaneStore>>,
-    _msg_tx: tokio::sync::mpsc::Sender<cmux_protocol::ClientMessage>,
-    _split_tx: tokio::sync::mpsc::Sender<(cmux_protocol::types::PaneId, cmux_protocol::types::SplitDirection)>,
-    _initial_size: cmux_protocol::types::TermSize,
+    _msg_tx: tokio::sync::mpsc::Sender<yatamux_protocol::ClientMessage>,
+    _split_tx: tokio::sync::mpsc::Sender<(yatamux_protocol::types::PaneId, yatamux_protocol::types::SplitDirection)>,
+    _initial_size: yatamux_protocol::types::TermSize,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }

@@ -1,4 +1,4 @@
-//! # cmux-win — CJK 対応 Windows ターミナルマルチプレクサ
+//! # yatamux — CJK 対応 Windows ターミナルマルチプレクサ
 //!
 //! ## 背景
 //!
@@ -11,7 +11,7 @@
 //! - **半角カタカナ濁点 (U+FF9E / U+FF9F) の扱い**: 結合マークと誤認識され幅計算が狂う
 //! - **罫線文字のフォント依存**: neovim 等のボックスボーダー UI がフォントによっては描画崩れを起こす
 //!
-//! cmux-win はこれらの問題を Windows ネイティブの実装で解決するために作られた。
+//! yatamux はこれらの問題を Windows ネイティブの実装で解決するために作られた。
 //! ConPTY / Win32 GDI / IMM32 をすべてネイティブに利用し、CJK 環境での動作を第一に設計している。
 //!
 //! [ghostty]: https://ghostty.org/
@@ -32,12 +32,12 @@
 //! ## アーキテクチャ
 //!
 //! ```text
-//! cmux-win (bin)
-//! ├── cmux-server   PTY 管理・ペイン生成（ConPTY ラッパー、セッション木）
-//! ├── cmux-client   Win32 ウィンドウ・GDI レンダリング・IME ハンドラ・レイアウト計算
-//! ├── cmux-protocol クライアント ↔ サーバー メッセージ型（ClientMessage / ServerMessage）
-//! ├── cmux-terminal VT パーサ・グリッド・CJK 幅テーブル・PTY セッション
-//! └── cmux-renderer テキストモードデバッグレンダラー（フェーズ 2 で GPU 化予定）
+//! yatamux (bin)
+//! ├── yatamux-server   PTY 管理・ペイン生成（ConPTY ラッパー、セッション木）
+//! ├── yatamux-client   Win32 ウィンドウ・GDI レンダリング・IME ハンドラ・レイアウト計算
+//! ├── yatamux-protocol クライアント ↔ サーバー メッセージ型（ClientMessage / ServerMessage）
+//! ├── yatamux-terminal VT パーサ・グリッド・CJK 幅テーブル・PTY セッション
+//! └── yatamux-renderer テキストモードデバッグレンダラー（フェーズ 2 で GPU 化予定）
 //! ```
 //!
 //! サーバーとクライアントは同一プロセス内で動作し、名前付きパイプは使用しない。

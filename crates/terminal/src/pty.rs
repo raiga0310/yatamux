@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tokio::sync::mpsc;
 
-use cmux_protocol::types::TermSize;
+use yatamux_protocol::types::TermSize;
 
 /// PTY セッションへの制御インターフェース
 pub struct PtySession {

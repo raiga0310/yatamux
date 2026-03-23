@@ -1,5 +1,5 @@
 [package]
-name = "cmux-client"
+name = "yatamux-client"
 version = "0.1.0"
 edition = "2021"
 
@@ -11,9 +11,9 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-cmux-protocol = { path = "../protocol" }
-cmux-terminal = { path = "../terminal" }
-cmux-renderer = { path = "../renderer" }
+yatamux-protocol = { path = "../protocol" }
+yatamux-terminal = { path = "../terminal" }
+yatamux-renderer = { path = "../renderer" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

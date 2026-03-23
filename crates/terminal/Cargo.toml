@@ -1,5 +1,5 @@
 [package]
-name = "cmux-terminal"
+name = "yatamux-terminal"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,7 +15,7 @@ tracing = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 
-cmux-protocol = { path = "../protocol" }
+yatamux-protocol = { path = "../protocol" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
