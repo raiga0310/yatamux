@@ -152,13 +152,13 @@ impl<'a> Perform for VtProcessor<'a> {
                 let cols = self.grid.cols() as usize;
                 if col < cols {
                     let shift = n.min(cols - col);
-                    self.grid.row_mut(row).map(|r| {
+                    if let Some(r) = self.grid.row_mut(row) {
                         let rlen = r.len();
                         r[col..].rotate_right(shift.min(rlen - col));
                         for c in r[col..col + shift].iter_mut() {
                             *c = Cell::blank();
                         }
-                    });
+                    }
                     self.grid.mark_dirty(row);
                 }
             }
@@ -170,13 +170,13 @@ impl<'a> Perform for VtProcessor<'a> {
                 let cols = self.grid.cols() as usize;
                 if col < cols {
                     let del = n.min(cols - col);
-                    self.grid.row_mut(row).map(|r| {
+                    if let Some(r) = self.grid.row_mut(row) {
                         let rlen = r.len();
                         r[col..].rotate_left(del.min(rlen - col));
                         for c in r[cols - del..].iter_mut() {
                             *c = Cell::blank();
                         }
-                    });
+                    }
                     self.grid.mark_dirty(row);
                 }
             }
@@ -208,11 +208,11 @@ impl<'a> Perform for VtProcessor<'a> {
                 let col = self.grid.cursor().col as usize;
                 let cols = self.grid.cols() as usize;
                 let end = (col + n).min(cols);
-                self.grid.row_mut(row).map(|r| {
+                if let Some(r) = self.grid.row_mut(row) {
                     for c in r[col..end].iter_mut() {
                         *c = Cell::blank();
                     }
-                });
+                }
                 self.grid.mark_dirty(row);
             }
             // カーソル位置保存 (CSI s)

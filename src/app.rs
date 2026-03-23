@@ -26,7 +26,6 @@ pub async fn run() -> Result<()> {
     let size = TermSize { cols: DEFAULT_COLS, rows: DEFAULT_ROWS };
 
     // ── サーバーをインプロセスで起動 ────────────────────────────────────
-    let (client_tx, client_rx) = mpsc::channel::<ClientMessage>(256);
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(256);
 
     // サーバー出力は window と IPC 両方へファンアウトする

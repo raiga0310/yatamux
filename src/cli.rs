@@ -44,7 +44,7 @@ pub async fn list_panes(session: &str) -> Result<()> {
 ///
 /// `\n` は LF (0x0A)、`\r` は CR (0x0D) として解釈する。
 pub async fn send_keys(session: &str, pane_id: u32, text: &str) -> Result<()> {
-    let mut conn = ServerConnection::connect(session)
+    let conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
 

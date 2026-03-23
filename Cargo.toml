@@ -59,6 +59,9 @@ edition = "2021"
 name = "yatamux"
 path = "src/main.rs"
 
+[features]
+cli = []
+
 [dependencies]
 tokio = { workspace = true }
 anyhow = { workspace = true }
