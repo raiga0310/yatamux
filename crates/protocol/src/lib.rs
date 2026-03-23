@@ -32,4 +32,49 @@ pub mod message;
 pub mod types;
 
 pub use message::{ClientMessage, ServerMessage};
-pub use types::{PaneId, SplitDirection, SurfaceId, TermSize, WorkspaceId};
+pub use types::{PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // P-1: ListPanes が {"type":"list_panes"} にシリアライズされる
+    #[test]
+    fn list_panes_message_serializes() {
+        let msg = ClientMessage::ListPanes;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"list_panes"}"#);
+    }
+
+    // P-2: PanesListed が正しくデシリアライズされる
+    #[test]
+    fn panes_listed_message_deserializes() {
+        let json = r#"{"type":"panes_listed","panes":[{"id":1,"surface":1,"title":"bash","cols":80,"rows":24}]}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ServerMessage::PanesListed { panes } => {
+                assert_eq!(panes.len(), 1);
+                assert_eq!(panes[0].title, "bash");
+                assert_eq!(panes[0].cols, 80);
+                assert_eq!(panes[0].rows, 24);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // P-3: PaneInfo のフィールドが保持される
+    #[test]
+    fn pane_info_has_required_fields() {
+        let info = PaneInfo {
+            id: PaneId(3),
+            surface: SurfaceId(1),
+            title: "nvim".to_string(),
+            cols: 120,
+            rows: 40,
+        };
+        assert_eq!(info.id, PaneId(3));
+        assert_eq!(info.cols, 120);
+        assert_eq!(info.rows, 40);
+        assert_eq!(info.title, "nvim");
+    }
+}

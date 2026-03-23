@@ -25,3 +25,13 @@ pub enum SplitDirection {
     Horizontal,
     Vertical,
 }
+
+/// ペイン情報（list-panes レスポンス用）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    pub id: PaneId,
+    pub surface: SurfaceId,
+    pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+}

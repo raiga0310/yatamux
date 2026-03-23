@@ -70,19 +70,51 @@
 //! コンソールウィンドウは表示せず、独自の Win32 ウィンドウを開く。
 //! リリースビルドでは `windows_subsystem = "windows"` によりコンソールを持たない。
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "cli")),
+    windows_subsystem = "windows"
+)]
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 mod app;
+mod cli;
+
+/// デフォルトセッション名（IPC パイプ名のサフィックス）
+pub const DEFAULT_SESSION: &str = "default";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // デバッグビルドのみロギング有効（リリースビルドではコンソール非表示のため不要）
     #[cfg(debug_assertions)]
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    app::run().await
+    let args: Vec<String> = std::env::args().collect();
+
+    match args.get(1).map(String::as_str) {
+        Some("list-panes") => cli::list_panes(DEFAULT_SESSION).await,
+        Some("send-keys") => {
+            let pane_id = args.iter()
+                .position(|a| a == "--pane")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse::<u32>().ok());
+            let text = args.last().filter(|_| args.len() >= 4).cloned();
+            match (pane_id, text) {
+                (Some(id), Some(t)) => {
+                    cli::send_keys(DEFAULT_SESSION, id, &t).await
+                }
+                _ => {
+                    eprintln!("Usage: yatamux send-keys --pane <id> <text>");
+                    bail!("missing arguments");
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!("Unknown subcommand: {other}");
+            eprintln!("Usage: yatamux [list-panes | send-keys --pane <id> <text>]");
+            bail!("unknown subcommand");
+        }
+        None => app::run().await,
+    }
 }

@@ -12,8 +12,10 @@ use tokio::sync::mpsc;
 use yatamux_client::{run_window, PaneStore};
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::{ClientMessage, ServerMessage};
-use yatamux_server::Server;
+use yatamux_server::{ipc::run_ipc_server, Server};
 use yatamux_terminal::TerminalSink;
+
+use crate::DEFAULT_SESSION;
 
 /// デフォルトのターミナルサイズ
 const DEFAULT_COLS: u16 = 220;
@@ -27,8 +29,31 @@ pub async fn run() -> Result<()> {
     let (client_tx, client_rx) = mpsc::channel::<ClientMessage>(256);
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(256);
 
-    let server = Server::new(server_tx);
-    tokio::spawn(server.run(client_rx));
+    // サーバー出力は window と IPC 両方へファンアウトする
+    // Server は単一の server_out_tx へ出力 → fan_out タスクが振り分ける
+    let (server_out_tx, mut server_out_rx) = mpsc::channel::<ServerMessage>(256);
+    let (ipc_out_tx, ipc_out_rx) = mpsc::channel::<ServerMessage>(256);
+
+    // 入力は window と IPC を merged_tx でマージ → server へ
+    let (merged_tx, merged_rx) = mpsc::channel::<ClientMessage>(256);
+    let client_tx = merged_tx.clone(); // window 用
+    let ipc_in_tx = merged_tx.clone(); // IPC 用
+
+    // server_out_rx → server_rx（window 用）と ipc_out_tx（IPC 用）へファンアウト
+    tokio::spawn(async move {
+        while let Some(msg) = server_out_rx.recv().await {
+            let _ = server_tx.send(msg.clone()).await;
+            let _ = ipc_out_tx.send(msg).await;
+        }
+    });
+
+    let server = Server::new(server_out_tx);
+    tokio::spawn(server.run(merged_rx));
+
+    // ── IPC サーバー起動（外部 CLI からの接続を受け付ける）────────────────
+    tokio::spawn(async move {
+        let _ = run_ipc_server(DEFAULT_SESSION, ipc_in_tx, ipc_out_rx).await;
+    });
 
     // ── ワークスペース → サーフェス → 初期ペイン 作成 ───────────────────
     client_tx.send(ClientMessage::CreateWorkspace { name: None }).await?;
