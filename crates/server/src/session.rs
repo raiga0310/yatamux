@@ -4,6 +4,7 @@
 //! cmux のワークフローモデルに対応。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use anyhow::{Context, Result};
 use tracing::info;
@@ -53,8 +54,8 @@ pub struct Server {
     /// クライアントへの出力チャネル（IPC 層が設定）
     client_tx: mpsc::Sender<ServerMessage>,
     /// ペインからの出力を受け取るチャネル
-    pane_output_rx: mpsc::Receiver<(PaneId, Vec<u8>)>,
-    pane_output_tx: mpsc::Sender<(PaneId, Vec<u8>)>,
+    pane_output_rx: mpsc::Receiver<(PaneId, Arc<[u8]>)>,
+    pane_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
 }
 
 impl Server {
