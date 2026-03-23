@@ -21,7 +21,7 @@
   SIGINT 相当が子プロセスに伝わっていない可能性
 - **要調査**: ConPTY における Ctrl+C の扱い、GenerateConsoleCtrlEvent の要否
 
-### B-3: Ctrl+Shift+E/O でペイン分割すると ^E / ^O が入力欄に残る
+### ~~B-3: Ctrl+Shift+E/O でペイン分割すると ^E / ^O が入力欄に残る~~ ✅ 対応済み
 - `WM_KEYDOWN` で Ctrl+Shift+E/O を捕捉して `split_tx` に送った後、
   `return LRESULT(0)` しているが、`TranslateMessage` / `WM_CHAR` 経由で
   `\x05`(^E) や `\x0f`(^O) が PTY に送られてしまっている可能性
@@ -38,12 +38,10 @@
 - `CreateWindowExW` の `CW_USEDEFAULT` を見直すか、起動時に最大化する処理を追加
 
 ### F-3: ペイン分割・フォーカス移動のキーバインドを改善したい
-- 現状: 分割 `Ctrl+Shift+E`(縦) / `Ctrl+Shift+O`(横)、移動 `Ctrl+Tab` / `Ctrl+Shift+Tab`
-- 希望:
-  - フォーカス移動を `Ctrl+←↑↓→` および `Ctrl+H/J/K/L`（vim 風）に対応
-  - 分割ショートカットも見直し（B-3 の ^E/^O 混入問題とあわせて再設計）
-- **対応方針**: `keydown_to_vt` の前段で方向キー＋修飾キーの組み合わせを判定し
-  `cycle_pane` または新設の `focus_pane(direction)` を呼ぶ
+- ~~フォーカス移動を `Ctrl+←↑↓→` および `Ctrl+H/J/K/L` に対応~~ ✅ 対応済み
+  - Left/Up/H/K → 前のペイン、Right/Down/L/J → 次のペイン
+- 残課題: 分割ショートカットの再設計（Ctrl+Shift+E/O のままでよいか検討）
+- 残課題: 方向を考慮したレイアウトツリー走査（現状は線形 next/prev）
 
 ### F-2: バイナリの実行が不便
 - `.\target\release\cmux-win.exe` をフルパスで指定しないといけない
