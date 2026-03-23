@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use anyhow::{Context, Result};
 use tracing::info;
 
-use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId, WorkspaceId};
+use yatamux_protocol::types::{PaneId, PaneInfo, SplitDirection, SurfaceId, WorkspaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::CjkWidthConfig;
 
@@ -190,8 +190,48 @@ impl Server {
             ClientMessage::RequestScreen { pane: _ } => {
                 // TODO: グリッドの現在状態を送信
             }
+
+            ClientMessage::ListPanes => {
+                // サーフェスごとに属するペインを収集（非同期ロックのためクロージャ外で処理）
+                let mut panes: Vec<PaneInfo> = Vec::new();
+                for (surf_id, surface) in &self.surfaces {
+                    let ids_in_tree = surface.pane_tree.as_ref()
+                        .map(pane_ids_in_tree)
+                        .unwrap_or_default();
+                    for pane_id in &ids_in_tree {
+                        if let Some(pane) = self.panes.get(pane_id) {
+                            let (cols, rows) = {
+                                let grid = pane.grid.lock().await;
+                                (grid.cols(), grid.rows())
+                            };
+                            let title = pane.title.lock().await.clone();
+                            panes.push(PaneInfo {
+                                id: *pane_id,
+                                surface: *surf_id,
+                                title,
+                                cols,
+                                rows,
+                            });
+                        }
+                    }
+                }
+                self.client_tx.send(ServerMessage::PanesListed { panes }).await
+                    .context("Failed to send PanesListed")?;
+            }
         }
         Ok(())
+    }
+}
+
+/// ツリー内の全 PaneId を収集する
+fn pane_ids_in_tree(tree: &PaneTree) -> Vec<PaneId> {
+    match tree {
+        PaneTree::Leaf(id) => vec![*id],
+        PaneTree::Split { first, second, .. } => {
+            let mut ids = pane_ids_in_tree(first);
+            ids.extend(pane_ids_in_tree(second));
+            ids
+        }
     }
 }
 
@@ -496,6 +536,131 @@ mod tests {
         })
         .await;
         assert!(got_error.is_err(), "Resize should not produce an error");
+    }
+
+    // G-8: ListPanes → PanesListed に全ペインが含まれる (Windows のみ)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_list_panes_returns_all_panes() {
+        let (tx, mut rx) = start_server();
+        tx.send(ClientMessage::CreateWorkspace { name: None }).await.unwrap();
+        let ws_id = match recv_one(&mut rx).await {
+            ServerMessage::WorkspaceCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        tx.send(ClientMessage::CreateSurface { workspace: ws_id }).await.unwrap();
+        let surf_id = match recv_one(&mut rx).await {
+            ServerMessage::SurfaceCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        let size = TermSize { cols: 80, rows: 24 };
+        // ペイン 1 作成
+        tx.send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: None,
+            direction: None,
+            size,
+        }).await.unwrap();
+        let pane1_id = match recv_one(&mut rx).await {
+            ServerMessage::PaneCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        // ペイン 2 作成（分割）
+        tx.send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: Some(pane1_id),
+            direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
+            size: TermSize { cols: 40, rows: 24 },
+        }).await.unwrap();
+        match recv_one(&mut rx).await {
+            ServerMessage::PaneCreated { .. } => {}
+            _ => panic!(),
+        }
+        // ListPanes を送信
+        tx.send(ClientMessage::ListPanes).await.unwrap();
+        let panes = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let ServerMessage::PanesListed { panes } = recv_one(&mut rx).await {
+                    return panes;
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for PanesListed");
+        assert_eq!(panes.len(), 2);
+        assert!(panes.iter().all(|p| p.surface == surf_id));
+    }
+
+    // G-9: ペインなしで ListPanes → 空リストが返る
+    #[tokio::test]
+    async fn test_list_panes_returns_empty_when_no_panes() {
+        let (tx, mut rx) = start_server();
+        tx.send(ClientMessage::ListPanes).await.unwrap();
+        let panes = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let ServerMessage::PanesListed { panes } = recv_one(&mut rx).await {
+                    return panes;
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for PanesListed");
+        assert!(panes.is_empty());
+    }
+
+    // G-10: 非アクティブペインへの Input でエラーが返らない (Windows のみ)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_send_input_to_inactive_pane() {
+        let (tx, mut rx) = start_server();
+        tx.send(ClientMessage::CreateWorkspace { name: None }).await.unwrap();
+        let ws_id = match recv_one(&mut rx).await {
+            ServerMessage::WorkspaceCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        tx.send(ClientMessage::CreateSurface { workspace: ws_id }).await.unwrap();
+        let surf_id = match recv_one(&mut rx).await {
+            ServerMessage::SurfaceCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        let size = TermSize { cols: 80, rows: 24 };
+        // ペイン 1 作成
+        tx.send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: None,
+            direction: None,
+            size,
+        }).await.unwrap();
+        let pane1_id = match recv_one(&mut rx).await {
+            ServerMessage::PaneCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        // ペイン 2 作成（分割）
+        tx.send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: Some(pane1_id),
+            direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
+            size: TermSize { cols: 40, rows: 24 },
+        }).await.unwrap();
+        let pane2_id = match recv_one(&mut rx).await {
+            ServerMessage::PaneCreated { id, .. } => id,
+            _ => panic!(),
+        };
+        let pane_ids = vec![pane1_id, pane2_id];
+        // 2 番目のペイン（非アクティブ）に Input を送信
+        tx.send(ClientMessage::Input {
+            pane: pane_ids[1],
+            data: b"echo hello\r".to_vec(),
+        }).await.unwrap();
+        // エラーが来ないことを確認
+        let got_error = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
+                    return true;
+                }
+            }
+        }).await;
+        assert!(got_error.is_err(), "Input to inactive pane should not produce an error");
     }
 
     // F-4: Detach 後もサーバーが応答する

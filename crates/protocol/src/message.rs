@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::types::{PaneId, SplitDirection, SurfaceId, TermSize, WorkspaceId};
+use crate::types::{PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId};
 
 /// クライアント → サーバー メッセージ
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +33,9 @@ pub enum ClientMessage {
 
     /// セッションをデタッチ（サーバーは継続）
     Detach,
+
+    /// 全ペインの情報一覧を要求
+    ListPanes,
 }
 
 /// サーバー → クライアント メッセージ
@@ -62,4 +65,7 @@ pub enum ServerMessage {
 
     /// エラー
     Error { message: String },
+
+    /// ListPanes への応答
+    PanesListed { panes: Vec<PaneInfo> },
 }

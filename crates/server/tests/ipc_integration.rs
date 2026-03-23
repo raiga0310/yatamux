@@ -175,6 +175,129 @@ async fn test_ipc_multiple_clients() {
     );
 }
 
+// F-6: IPC 経由で ListPanes を送ると PanesListed が返る
+#[tokio::test]
+async fn test_ipc_list_panes_returns_panes_listed() {
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut conn = ServerConnection::connect(&session).await.unwrap();
+    conn.tx.send(ClientMessage::ListPanes).await.unwrap();
+
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(2), conn.rx.recv())
+        .await.expect("timeout").expect("closed");
+    assert!(
+        matches!(resp, ServerMessage::PanesListed { .. }),
+        "expected PanesListed, got {:?}", resp
+    );
+}
+
+// F-7: IPC 経由で Input を送ると対象ペインから Output が返る
+#[tokio::test]
+async fn test_ipc_send_keys_routes_to_pane() {
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut conn = ServerConnection::connect(&session).await.unwrap();
+
+    // ワークスペース → サーフェス → ペイン を作成
+    conn.tx.send(ClientMessage::CreateWorkspace { name: None }).await.unwrap();
+    let ws_id = loop {
+        if let ServerMessage::WorkspaceCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+    conn.tx.send(ClientMessage::CreateSurface { workspace: ws_id }).await.unwrap();
+    let surf_id = loop {
+        if let ServerMessage::SurfaceCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+    use yatamux_protocol::types::TermSize;
+    conn.tx.send(ClientMessage::CreatePane {
+        surface: surf_id,
+        split_from: None,
+        direction: None,
+        size: TermSize { cols: 80, rows: 24 },
+    }).await.unwrap();
+    let pane_id = loop {
+        if let ServerMessage::PaneCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+
+    // Input を送信 → Output が返ってくることを確認
+    conn.tx.send(ClientMessage::Input {
+        pane: pane_id,
+        data: b"echo yatamux\r".to_vec(),
+    }).await.unwrap();
+
+    let got_output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match conn.rx.recv().await.unwrap() {
+                ServerMessage::Output { pane, .. } if pane == pane_id => return true,
+                ServerMessage::Error { message } => panic!("server error: {}", message),
+                _ => continue,
+            }
+        }
+    }).await;
+    assert!(got_output.is_ok(), "should receive Output from pane after Input");
+}
+
+// F-8: 存在しない PaneId に Input を送っても Error は返らない（silently ignore）
+#[tokio::test]
+async fn test_ipc_send_keys_to_unknown_pane_is_ignored() {
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut conn = ServerConnection::connect(&session).await.unwrap();
+    use yatamux_protocol::types::PaneId;
+    conn.tx.send(ClientMessage::Input {
+        pane: PaneId(9999),
+        data: b"hello\r".to_vec(),
+    }).await.unwrap();
+
+    // Error または無応答（サーバーが存在しないペインを無視）を許容
+    // 現実装では存在しないペインへの Input は silently ignore するため
+    // 500ms 以内に Error が来ないことを確認（silently ignore の仕様）
+    let got_error = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            if let ServerMessage::Error { .. } = conn.rx.recv().await.unwrap() {
+                return true;
+            }
+        }
+    }).await;
+    // 現実装は silently ignore: エラーは来ない
+    assert!(got_error.is_err(), "Input to unknown pane should be silently ignored (no Error)");
+}
+
 // F-5: 不正な JSON を送っても接続が維持される（次のメッセージが処理できる）
 // 現状の ipc.rs は warn ログを出して継続するため、切断されないことを確認。
 #[tokio::test]
