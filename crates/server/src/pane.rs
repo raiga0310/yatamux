@@ -24,7 +24,7 @@ pub struct Pane {
     pub id: PaneId,
     pub grid: Arc<Mutex<Grid>>,
     /// クライアントへの出力転送チャネル
-    pub output_tx: mpsc::Sender<(PaneId, Vec<u8>)>,
+    pub output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
     /// PTY コマンドチャネル（入力 / リサイズ）
     cmd_tx: mpsc::Sender<PtyCmd>,
     pub title: Arc<Mutex<String>>,
@@ -36,7 +36,7 @@ impl Pane {
         id: PaneId,
         size: TermSize,
         width_config: CjkWidthConfig,
-        client_output_tx: mpsc::Sender<(PaneId, Vec<u8>)>,
+        client_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
         let title = Arc::new(Mutex::new(String::new()));
@@ -86,7 +86,8 @@ impl Pane {
                     }
                 }
 
-                // クライアントに生データを転送（クライアント側でもレンダリング可能）
+                // クライアントに生データを転送（Arc でラップしてファンアウト時のコピーを回避）
+                let data: Arc<[u8]> = Arc::from(data);
                 if output_tx_clone.send((id, data)).await.is_err() {
                     break;
                 }
