@@ -1065,7 +1065,10 @@ mod win32 {
             let client_w = initial_size.cols as i32 * cell_width + PADDING_X * 2;
             let client_h = initial_size.rows as i32 * cell_height + PADDING_Y * 2;
             let mut wr = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
-            let _ = AdjustWindowRectEx(&mut wr, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE::default());
+            let adjust_ok = AdjustWindowRectEx(&mut wr, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE::default());
+            if !adjust_ok.as_bool() {
+                anyhow::bail!("AdjustWindowRectEx failed while computing initial window size");
+            }
             let win_width = wr.right - wr.left;
             let win_height = wr.bottom - wr.top;
             let title: Vec<u16> = "yatamux\0".encode_utf16().collect();
