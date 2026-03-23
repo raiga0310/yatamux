@@ -1,0 +1,88 @@
+//! # cmux-win — CJK 対応 Windows ターミナルマルチプレクサ
+//!
+//! ## 背景
+//!
+//! [ghostty] や [cmux] をはじめとする、エージェント（AI コーディングアシスタント）向けに
+//! 設計されたモダンなターミナルアプリケーションの多くは **macOS / Linux 向け** に開発されている。
+//! Windows 移植版（WSL 経由の利用を含む）も存在するが、以下の課題が残っていた:
+//!
+//! - **CJK 文字幅の不正確な計算**: 漢字・かな・ハングルが 1 セル幅として扱われ、カーソルがずれる
+//! - **IME（日本語入力）の未対応・不完全対応**: プリエディット文字列の表示が崩れる
+//! - **半角カタカナ濁点 (U+FF9E / U+FF9F) の扱い**: 結合マークと誤認識され幅計算が狂う
+//! - **罫線文字のフォント依存**: neovim 等のボックスボーダー UI がフォントによっては描画崩れを起こす
+//!
+//! cmux-win はこれらの問題を Windows ネイティブの実装で解決するために作られた。
+//! ConPTY / Win32 GDI / IMM32 をすべてネイティブに利用し、CJK 環境での動作を第一に設計している。
+//!
+//! [ghostty]: https://ghostty.org/
+//! [cmux]: https://github.com/nicowillis/cmux
+//!
+//! ## 主な特徴
+//!
+//! | 機能 | 説明 |
+//! |------|------|
+//! | **CJK 幅計算** | UAX #11 + 独自オーバーライドテーブル。ConPTY のカーソル位置は使用しない |
+//! | **IME 対応** | WM_IME_COMPOSITION でプリエディット表示、確定文字列を UTF-8 で PTY に送信 |
+//! | **ペイン分割** | バイナリツリーレイアウト。`Ctrl+Shift+E`（縦）/ `Ctrl+Shift+O`（横） |
+//! | **罫線文字** | U+2500–259F を GDI プリミティブで直接描画（フォント依存なし） |
+//! | **フォント優先順位** | HackGen Console NF → HackGen Console → Cascadia → Consolas |
+//! | **カラーテーマ** | Catppuccin Mocha（背景 `#1e1e2e`、前景 `#cdd6f4`、カーソル `#f5c2e7`） |
+//! | **動作確認済み** | vim、lazygit、claude code |
+//!
+//! ## アーキテクチャ
+//!
+//! ```text
+//! cmux-win (bin)
+//! ├── cmux-server   PTY 管理・ペイン生成（ConPTY ラッパー、セッション木）
+//! ├── cmux-client   Win32 ウィンドウ・GDI レンダリング・IME ハンドラ・レイアウト計算
+//! ├── cmux-protocol クライアント ↔ サーバー メッセージ型（ClientMessage / ServerMessage）
+//! ├── cmux-terminal VT パーサ・グリッド・CJK 幅テーブル・PTY セッション
+//! └── cmux-renderer テキストモードデバッグレンダラー（フェーズ 2 で GPU 化予定）
+//! ```
+//!
+//! サーバーとクライアントは同一プロセス内で動作し、名前付きパイプは使用しない。
+//! [`tokio::sync::mpsc`] チャネルで直結されており、IPC のオーバーヘッドがない。
+//!
+//! ## スレッド構成
+//!
+//! ```text
+//! tokio ランタイム
+//! ├── Server::run()                    PTY 管理・セッション処理
+//! ├── Pane（ペインごと）               PTY 読み取り・書き込みタスク
+//! └── 出力ルーター + 分割ハンドラ      select! ループ
+//!
+//! spawn_blocking
+//! └── Win32 メッセージループ           GDI 描画・キー入力・IME 処理
+//! ```
+//!
+//! Win32 メッセージループはブロッキング API のため `spawn_blocking` で tokio から切り離す。
+//! 共有状態は `Arc<Mutex<PaneStore>>` のみ。
+//!
+//! ## 既知の制限
+//!
+//! - ペイン分割比は 50:50 固定（ドラッグリサイズ未実装）
+//! - スクロールバック未実装
+//! - Windows 10 1903 (Build 18362) 以降が必要（ConPTY API の要件）
+//!
+//! ## 起動
+//!
+//! ダブルクリックまたはスタートメニューから起動する GUI アプリ。
+//! コンソールウィンドウは表示せず、独自の Win32 ウィンドウを開く。
+//! リリースビルドでは `windows_subsystem = "windows"` によりコンソールを持たない。
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use anyhow::Result;
+
+mod app;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // デバッグビルドのみロギング有効（リリースビルドではコンソール非表示のため不要）
+    #[cfg(debug_assertions)]
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    app::run().await
+}

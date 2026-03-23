@@ -1,0 +1,23 @@
+[package]
+name = "cmux-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+vte = { workspace = true }
+
+cmux-protocol = { path = "../protocol" }
+cmux-terminal = { path = "../terminal" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+cmux-client = { path = "../client" }
