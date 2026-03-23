@@ -149,10 +149,22 @@ pub async fn run() -> Result<()> {
                                 let new_sink = TerminalSink::new(new_size.cols, new_size.rows);
                                 let new_grid = Arc::clone(&new_sink.grid);
                                 sinks.insert(new_id, new_sink);
-                                let mut store = pane_store2.lock().unwrap();
-                                store.grids.insert(new_id, new_grid);
-                                store.layout.split_leaf(parent_id, new_id, direction);
-                                store.active = new_id;
+                                {
+                                    let mut store = pane_store2.lock().unwrap();
+                                    // 親ペインのクライアント側グリッドもリサイズ
+                                    // （分割後は幅/高さが半分になるため）
+                                    if let Some(g) = store.grids.get(&parent_id) {
+                                        g.lock().unwrap().resize(new_size.cols, new_size.rows);
+                                    }
+                                    store.grids.insert(new_id, new_grid);
+                                    store.layout.split_leaf(parent_id, new_id, direction);
+                                    store.active = new_id;
+                                }
+                                // 親ペインをサーバー側（ConPTY）でもリサイズ
+                                let _ = client_tx.send(ClientMessage::Resize {
+                                    pane: parent_id,
+                                    size: new_size,
+                                }).await;
                             }
                         }
                         ServerMessage::PaneClosed { pane } => {

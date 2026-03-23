@@ -535,13 +535,16 @@ mod win32 {
                 let grid = grid_arc.lock().unwrap();
                 let off_x = PADDING_X + pane_rect.x;
                 let off_y = PADDING_Y + pane_rect.y;
+                // ペインの表示幅をセル数に変換（グリッドが表示幅より広い場合に
+                // はみ出したセルを隣ペインに描画しないようクリップする）
+                let display_cols = (pane_rect.w / state.cell_width.max(1)).max(1) as usize;
 
                 for row in 0..grid.rows() {
                     let cells = match grid.row(row) { Some(c) => c, None => continue };
                     let y = row as i32 * state.cell_height + off_y;
                     let mut x = off_x;
 
-                    for cell in cells.iter() {
+                    for cell in cells.iter().take(display_cols) {
                         let cell_rect = RECT {
                             left: x, top: y,
                             right: x + state.cell_width,
@@ -1091,8 +1094,21 @@ mod win32 {
             RegisterClassExW(&wc);
 
             // ── ウィンドウ作成 ───────────────────────────────────────────
-            let win_width = initial_size.cols as i32 * cell_width + PADDING_X * 2;
-            let win_height = initial_size.rows as i32 * cell_height + PADDING_Y * 2;
+            // AdjustWindowRectEx でクライアント領域が exactly (cols * cell_w + padding) に
+            // なるようにウィンドウ全体サイズを計算する。
+            // CreateWindowExW に渡す nWidth/nHeight はウィンドウ矩形サイズ（ボーダー・
+            // タイトルバー含む）なので、そのまま cols * cell_w + padding を渡すと
+            // 実際のクライアント幅が数ピクセル小さくなり、WM_SIZE 後の cols が
+            // ConPTY の初期値とずれてしまう。
+            let client_w = initial_size.cols as i32 * cell_width + PADDING_X * 2;
+            let client_h = initial_size.rows as i32 * cell_height + PADDING_Y * 2;
+            let mut wr = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
+            let adjust_ok = AdjustWindowRectEx(&mut wr, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE::default());
+            if !adjust_ok.as_bool() {
+                anyhow::bail!("AdjustWindowRectEx failed while computing initial window size");
+            }
+            let win_width = wr.right - wr.left;
+            let win_height = wr.bottom - wr.top;
             let title: Vec<u16> = "yatamux\0".encode_utf16().collect();
 
             let hwnd = CreateWindowExW(
