@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
                 .position(|a| a == "--pane")
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.parse::<u32>().ok());
-            let text = args.last().filter(|_| args.len() >= 4).cloned();
+            let text = args.last().filter(|_| args.len() >= 5).cloned();
             match (pane_id, text) {
                 (Some(id), Some(t)) => {
                     cli::send_keys(DEFAULT_SESSION, id, &t).await

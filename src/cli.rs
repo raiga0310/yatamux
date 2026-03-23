@@ -19,14 +19,14 @@ pub async fn list_panes(session: &str) -> Result<()> {
     let panes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match conn.rx.recv().await {
-                Some(ServerMessage::PanesListed { panes }) => return panes,
+                Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
                 Some(_) => continue,
-                None => return vec![],
+                None => return Err(anyhow::anyhow!("server closed connection before sending PanesListed")),
             }
         }
     })
     .await
-    .context("timeout waiting for pane list")?;
+    .context("timeout waiting for pane list")??;
 
     if panes.is_empty() {
         println!("(no panes)");

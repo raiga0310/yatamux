@@ -200,14 +200,17 @@ impl Server {
                         .unwrap_or_default();
                     for pane_id in &ids_in_tree {
                         if let Some(pane) = self.panes.get(pane_id) {
-                            let grid = pane.grid.lock().await;
+                            let (cols, rows) = {
+                                let grid = pane.grid.lock().await;
+                                (grid.cols(), grid.rows())
+                            };
                             let title = pane.title.lock().await.clone();
                             panes.push(PaneInfo {
                                 id: *pane_id,
                                 surface: *surf_id,
                                 title,
-                                cols: grid.cols(),
-                                rows: grid.rows(),
+                                cols,
+                                rows,
                             });
                         }
                     }

@@ -262,9 +262,9 @@ async fn test_ipc_send_keys_routes_to_pane() {
     assert!(got_output.is_ok(), "should receive Output from pane after Input");
 }
 
-// F-8: 存在しない PaneId に Input を送ると Error が返る
+// F-8: 存在しない PaneId に Input を送っても Error は返らない（silently ignore）
 #[tokio::test]
-async fn test_ipc_send_keys_to_unknown_pane_returns_error() {
+async fn test_ipc_send_keys_to_unknown_pane_is_ignored() {
     let session = unique_session();
     let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
     let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
