@@ -277,11 +277,16 @@ mod win32 {
                     // IME 変換中の文字は WM_IME_COMPOSITION で処理済み
                     if !state.ime.state.lock().unwrap().composing {
                         let code = wparam.0 as u32;
+                        let ctrl  = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                        let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                         // WM_KEYDOWN で処理済みのキーは WM_CHAR を無視する
                         // (TranslateMessage が二重送信を起こすのを防ぐ)
                         // 8  = Backspace → WM_KEYDOWN が \x7f を送信済み
                         // 9  = Tab / Shift+Tab → WM_KEYDOWN が \t or \x1b[Z を送信済み
-                        let skip = matches!(code, 8 | 9);
+                        // Ctrl+Shift+letter → ペイン分割などのショートカットで処理済み
+                        //   TranslateMessage が先に WM_CHAR(\x05=^E 等) を投入するため
+                        //   こちら側で弾く必要がある
+                        let skip = matches!(code, 8 | 9) || (ctrl && shift);
                         if !skip {
                             if let Some(ch) = char::from_u32(code) {
                                 if ch != '\0' {
@@ -318,6 +323,39 @@ mod win32 {
                         state.cycle_pane(!shift);
                         let _ = InvalidateRect(hwnd, None, false);
                         return LRESULT(0);
+                    }
+
+                    // Ctrl+Arrow: ペインフォーカス移動
+                    //   Left / Up  → 前のペイン
+                    //   Right / Down → 次のペイン
+                    if ctrl && !shift {
+                        let focus_fwd = match wparam.0 as u16 {
+                            k if k == VK_RIGHT.0 || k == VK_DOWN.0 => Some(true),
+                            k if k == VK_LEFT.0  || k == VK_UP.0   => Some(false),
+                            _ => None,
+                        };
+                        if let Some(fwd) = focus_fwd {
+                            state.cycle_pane(fwd);
+                            let _ = InvalidateRect(hwnd, None, false);
+                            return LRESULT(0);
+                        }
+                    }
+
+                    // Ctrl+H/J/K/L: vim 風ペインフォーカス移動（Shift なし限定）
+                    //   H / K → 前のペイン   L / J → 次のペイン
+                    // Note: Ctrl+H=\x08(BS), Ctrl+L=\x0c(FF) などターミナルアプリで
+                    //       使われる場合があるが、ペイン操作を優先する。
+                    if ctrl && !shift {
+                        let focus_fwd = match wparam.0 {
+                            k if k == b'L' as usize || k == b'J' as usize => Some(true),
+                            k if k == b'H' as usize || k == b'K' as usize => Some(false),
+                            _ => None,
+                        };
+                        if let Some(fwd) = focus_fwd {
+                            state.cycle_pane(fwd);
+                            let _ = InvalidateRect(hwnd, None, false);
+                            return LRESULT(0);
+                        }
                     }
 
                     // Ctrl+V: クリップボードからペースト
@@ -1070,7 +1108,7 @@ mod win32 {
                 Some(state_ptr as *const _),
             )?;
 
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
             let _ = UpdateWindow(hwnd);
 
             // ── メッセージループ ──────────────────────────────────────────

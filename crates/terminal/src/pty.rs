@@ -80,9 +80,13 @@ impl PtySession {
     }
 
     /// PTY に書き込む（キーボード入力 → ConPTY）
+    ///
+    /// write_all の後に flush することで、Ctrl+C (`\x03`) などの制御文字が
+    /// バッファに残らず ConPTY に即座に届くようにする。
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         use std::io::Write;
-        self.writer.write_all(data).context("Failed to write to PTY")
+        self.writer.write_all(data).context("Failed to write to PTY")?;
+        self.writer.flush().context("Failed to flush PTY")
     }
 
     /// PTY をリサイズする
