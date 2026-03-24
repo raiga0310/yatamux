@@ -1070,7 +1070,7 @@ mod win32 {
                 Some(state_ptr as *const _),
             )?;
 
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
             let _ = UpdateWindow(hwnd);
 
             // ── メッセージループ ──────────────────────────────────────────
