@@ -9,6 +9,7 @@ vte = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-normalization = { workspace = true }
+base64 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

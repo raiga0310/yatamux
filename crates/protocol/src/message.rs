@@ -80,6 +80,9 @@ pub enum ServerMessage {
     /// OSC 通知（9/99/777）
     Notification { pane: PaneId, body: String },
 
+    /// OSC 52 クリップボード書き込み要求
+    ClipboardWrite { pane: PaneId, data: Vec<u8> },
+
     /// ペインが終了
     PaneClosed { pane: PaneId },
 

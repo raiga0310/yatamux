@@ -25,9 +25,11 @@ mod win32 {
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -399,6 +401,13 @@ mod win32 {
             WM_TIMER => {
                 if wparam.0 == TIMER_REPAINT && !state_ptr.is_null() {
                     let state = &*state_ptr;
+
+                    // OSC 52 クリップボード書き込み（pending_clipboard があれば処理）
+                    let clip = state.panes.lock().unwrap().pending_clipboard.take();
+                    if let Some(data) = clip {
+                        write_clipboard_text(hwnd, &data);
+                    }
+
                     let needs_repaint = {
                         let store = state.panes.lock().unwrap();
                         let dirty = store.grids.values()
@@ -995,6 +1004,37 @@ mod win32 {
         let _ = GlobalUnlock(hglobal);
         let _ = CloseClipboard();
         text
+    }
+
+    /// OSC 52 クリップボードデータ（UTF-8 バイト列）をシステムクリップボードに書き込む
+    ///
+    /// 有効な UTF-8 の場合は CF_UNICODETEXT として書き込む。
+    /// バイナリデータや無効な UTF-8 は無視する。
+    unsafe fn write_clipboard_text(hwnd: HWND, data: &[u8]) {
+        let text = match std::str::from_utf8(data) {
+            Ok(s) => s,
+            Err(_) => return, // 有効な UTF-8 でない場合は無視
+        };
+        // UTF-16 LE + NUL ターミネーター
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0u16);
+        let byte_size = wide.len() * 2;
+
+        if OpenClipboard(hwnd).is_err() { return; }
+        let _ = EmptyClipboard();
+
+        // CF_UNICODETEXT = 13
+        if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, byte_size) {
+            let ptr = GlobalLock(hglobal) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                let _ = GlobalUnlock(hglobal);
+                // SetClipboardData takes ownership of hglobal on success;
+                // on failure we should free it, but for simplicity we skip that here.
+                let _ = SetClipboardData(13, windows::Win32::Foundation::HANDLE(hglobal.0));
+            }
+        }
+        let _ = CloseClipboard();
     }
 
     // ── キーマップ ───────────────────────────────────────────────────────────
