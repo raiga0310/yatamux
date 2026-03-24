@@ -80,9 +80,13 @@ impl PtySession {
     }
 
     /// PTY に書き込む（キーボード入力 → ConPTY）
+    ///
+    /// `write_all` の後に `flush` を呼ぶことで、制御コード（Ctrl+C = 0x03 など）が
+    /// バッファに滞留せず即座に ConPTY 側へ届くようにする。
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         use std::io::Write;
-        self.writer.write_all(data).context("Failed to write to PTY")
+        self.writer.write_all(data).context("Failed to write to PTY")?;
+        self.writer.flush().context("Failed to flush PTY writer")
     }
 
     /// PTY をリサイズする
