@@ -23,8 +23,12 @@ use yatamux_terminal::TerminalSink;
 use crate::DEFAULT_SESSION;
 
 /// デフォルトのターミナルサイズ
-const DEFAULT_COLS: u16 = 220;
-const DEFAULT_ROWS: u16 = 50;
+///
+/// 実際の表示サイズは起動後の WM_SIZE によって即座に上書きされる。
+/// ここでは VT100 標準の 80×24 を使用し、PTY・readline が初期化時に
+/// 極端に広い幅を持たないようにする（折り返し描画ずれの防止）。
+const DEFAULT_COLS: u16 = 80;
+const DEFAULT_ROWS: u16 = 24;
 
 /// アプリを起動する
 pub async fn run() -> Result<()> {
