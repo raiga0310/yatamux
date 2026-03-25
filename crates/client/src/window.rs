@@ -458,9 +458,31 @@ mod win32 {
 
                     // ── Pane モードのキー処理 ────────────────────────────
                     if state.mode.get() == ClientMode::Pane {
+                        let vk = wparam.0 as u16;
+
+                        // `<`/`>` (Shift+,/.) はペインモードを維持して繰り返し操作可能にする
+                        const VK_OEM_COMMA: u16 = 0xBC;
+                        const VK_OEM_PERIOD: u16 = 0xBE;
+                        if shift && (vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) {
+                            let active = state.panes.lock().unwrap().active;
+                            let delta = if vk == VK_OEM_PERIOD {
+                                0.05_f32
+                            } else {
+                                -0.05_f32
+                            };
+                            state
+                                .panes
+                                .lock()
+                                .unwrap()
+                                .layout
+                                .adjust_ratio(active, delta);
+                            state.skip_char.set(true);
+                            let _ = InvalidateRect(hwnd, None, false);
+                            return LRESULT(0);
+                        }
+
                         state.mode.set(ClientMode::Normal);
                         state.skip_char.set(true); // WM_CHAR を抑制
-                        let vk = wparam.0 as u16;
                         match vk {
                             k if k == b'H' as u16 => {
                                 state.focus_pane_dir(Direction::Left);
@@ -1246,7 +1268,7 @@ mod win32 {
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
-                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  q: 戻る",
+                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  </>: リサイズ  q: 戻る",
             ),
         };
 

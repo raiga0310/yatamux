@@ -87,9 +87,7 @@ impl PtySession {
     /// Windows の ConPTY では PTY master が子プロセス終了後も open のままになるため、
     /// `reader.read()` が EOF を返さないことがある。子プロセスの終了検知には
     /// このメソッドで取得したハンドルに対して `wait()` を呼ぶこと。
-    pub fn take_child(
-        &mut self,
-    ) -> Option<Box<dyn portable_pty::Child + Send + Sync>> {
+    pub fn take_child(&mut self) -> Option<Box<dyn portable_pty::Child + Send + Sync>> {
         self.child.take()
     }
 

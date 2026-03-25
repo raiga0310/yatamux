@@ -249,6 +249,40 @@ impl LayoutNode {
         }
     }
 
+    /// アクティブペイン `id` を含む最近傍 Split ノードの ratio を `delta` だけ増減する。
+    ///
+    /// - `id` が `first` サブツリーに属する場合: `ratio += delta`（first が拡大）
+    /// - `id` が `second` サブツリーに属する場合: `ratio -= delta`（second が拡大）
+    /// - ratio は `[0.1, 0.9]` にクランプされる
+    ///
+    /// 戻り値: ratio を変更した場合 `true`、変更なし（Leaf またはペイン不在）なら `false`
+    pub fn adjust_ratio(&mut self, id: PaneId, delta: f32) -> bool {
+        match self {
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                // 子ノードで先に再帰（最近傍 Split を優先）
+                if first.adjust_ratio(id, delta) || second.adjust_ratio(id, delta) {
+                    return true;
+                }
+                // このノードが直接の親 Split かチェック
+                if first.pane_ids().contains(&id) {
+                    *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                    true
+                } else if second.pane_ids().contains(&id) {
+                    *ratio = (*ratio - delta).clamp(0.1, 0.9);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// セパレーター矩形リスト（コンテンツ座標）
     pub fn compute_separator_rects(&self, r: PaneRect) -> Vec<PaneRect> {
         match self {
@@ -696,6 +730,108 @@ mod tests {
         let next = layout.remove_pane(PaneId(2));
         assert_eq!(next, Some(PaneId(1)));
         assert!(matches!(layout, LayoutNode::Leaf(PaneId(1))));
+    }
+
+    // ── adjust_ratio テスト (C-10) ─────────────────────────────────────────
+
+    // TC-C10-01: 単一 Leaf → no-op (false)
+    #[test]
+    fn test_adjust_ratio_leaf_noop() {
+        let mut layout = LayoutNode::Leaf(PaneId(1));
+        assert!(!layout.adjust_ratio(PaneId(1), 0.05));
+    }
+
+    // TC-C10-02: first ペインを拡大 → ratio 増加
+    #[test]
+    fn test_adjust_ratio_first_expand() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(1), 0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.55).abs() < 1e-6);
+        }
+    }
+
+    // TC-C10-03: second ペインを拡大 → ratio 減少
+    #[test]
+    fn test_adjust_ratio_second_expand() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(2), 0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.45).abs() < 1e-6);
+        }
+    }
+
+    // TC-C10-04: ratio は 0.9 でクランプ
+    #[test]
+    fn test_adjust_ratio_clamp_max() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.88,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(1), 0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.9).abs() < 1e-6);
+        }
+    }
+
+    // TC-C10-05: ratio は 0.1 でクランプ
+    #[test]
+    fn test_adjust_ratio_clamp_min() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.12,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(1), -0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.1).abs() < 1e-6);
+        }
+    }
+
+    // TC-C10-06: ネスト Split — 内側の Split を操作
+    #[test]
+    fn test_adjust_ratio_nested_inner() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(1))),
+                second: Box::new(LayoutNode::Leaf(PaneId(2))),
+            }),
+            second: Box::new(LayoutNode::Leaf(PaneId(3))),
+        };
+        assert!(layout.adjust_ratio(PaneId(1), 0.05));
+        // 外側の ratio は変わらない
+        if let LayoutNode::Split {
+            ratio: outer_ratio,
+            first,
+            ..
+        } = &layout
+        {
+            assert!((outer_ratio - 0.5).abs() < 1e-6);
+            // 内側の ratio が変わっている
+            if let LayoutNode::Split {
+                ratio: inner_ratio, ..
+            } = first.as_ref()
+            {
+                assert!((inner_ratio - 0.55).abs() < 1e-6);
+            }
+        }
     }
 
     // TC-F8-08: ネスト Split(1, Split(2, 3)) → remove 2 → Split(1, 3)
