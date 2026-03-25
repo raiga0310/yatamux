@@ -56,11 +56,15 @@ pub struct Server {
     /// ペインからの出力を受け取るチャネル
     pane_output_rx: mpsc::Receiver<(PaneId, Arc<[u8]>)>,
     pane_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
+    /// ペインからの通知（OSC 9/133 等）を受け取るチャネル
+    pane_notification_rx: mpsc::Receiver<(PaneId, String)>,
+    pane_notification_tx: mpsc::Sender<(PaneId, String)>,
 }
 
 impl Server {
     pub fn new(client_tx: mpsc::Sender<ServerMessage>) -> Self {
         let (pane_output_tx, pane_output_rx) = mpsc::channel(1024);
+        let (pane_notification_tx, pane_notification_rx) = mpsc::channel(256);
         Self {
             workspaces: HashMap::new(),
             surfaces: HashMap::new(),
@@ -72,6 +76,8 @@ impl Server {
             client_tx,
             pane_output_rx,
             pane_output_tx,
+            pane_notification_rx,
+            pane_notification_tx,
         }
     }
 
@@ -92,6 +98,13 @@ impl Server {
                     let _ = self.client_tx.send(ServerMessage::Output {
                         pane: pane_id,
                         data,
+                    }).await;
+                }
+                // ペインからの通知転送（OSC 9/133 等）
+                Some((pane_id, body)) = self.pane_notification_rx.recv() => {
+                    let _ = self.client_tx.send(ServerMessage::Notification {
+                        pane: pane_id,
+                        body,
                     }).await;
                 }
             }
@@ -160,6 +173,7 @@ impl Server {
                     size,
                     self.width_config.clone(),
                     self.pane_output_tx.clone(),
+                    self.pane_notification_tx.clone(),
                 )?;
                 self.panes.insert(id, pane);
 

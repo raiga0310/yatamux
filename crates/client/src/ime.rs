@@ -117,8 +117,8 @@ impl ImeHandler {
     #[cfg(windows)]
     pub fn on_composition(&self, hwnd: windows::Win32::Foundation::HWND, lparam: usize) {
         use windows::Win32::UI::Input::Ime::{
-            ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
-            GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR,
+            ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_COMPSTR, GCS_CURSORPOS,
+            GCS_RESULTSTR,
         };
 
         unsafe {
@@ -140,8 +140,7 @@ impl ImeHandler {
 
             // ── プリエディット文字列 (GCS_COMPSTR) ────────────────────
             if lparam & GCS_COMPSTR.0 != 0 {
-                let comp_str = get_composition_string_w(himc, GCS_COMPSTR)
-                    .unwrap_or_default();
+                let comp_str = get_composition_string_w(himc, GCS_COMPSTR).unwrap_or_default();
 
                 // 属性バイト列（各文字に対応）
                 let attrs = get_composition_attrs(himc);
@@ -172,9 +171,8 @@ impl ImeHandler {
     ) {
         use windows::Win32::Foundation::{POINT, RECT};
         use windows::Win32::UI::Input::Ime::{
-            CFS_EXCLUDE, CFS_POINT, CANDIDATEFORM, COMPOSITIONFORM,
-            ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
-            ImmSetCompositionWindow,
+            ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+            CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM,
         };
 
         unsafe {
@@ -258,10 +256,8 @@ unsafe fn get_composition_string_w(
 
 /// `GCS_COMPATTR` で属性バイト列を取得する
 #[cfg(windows)]
-unsafe fn get_composition_attrs(
-    himc: windows::Win32::UI::Input::Ime::HIMC,
-) -> Vec<u8> {
-    use windows::Win32::UI::Input::Ime::{GCS_COMPATTR, ImmGetCompositionStringW};
+unsafe fn get_composition_attrs(himc: windows::Win32::UI::Input::Ime::HIMC) -> Vec<u8> {
+    use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, GCS_COMPATTR};
 
     let byte_len = ImmGetCompositionStringW(himc, GCS_COMPATTR, None, 0);
     if byte_len <= 0 {
@@ -322,7 +318,10 @@ fn build_preedit_segments(text: &str, attrs: &[u8]) -> Vec<PreeditSegment> {
             current_text.push(ch);
         } else {
             if let Some(a) = current_attr {
-                segments.push(PreeditSegment { text: current_text.clone(), attr: a });
+                segments.push(PreeditSegment {
+                    text: current_text.clone(),
+                    attr: a,
+                });
                 current_text.clear();
             }
             current_text.push(ch);
@@ -332,7 +331,10 @@ fn build_preedit_segments(text: &str, attrs: &[u8]) -> Vec<PreeditSegment> {
 
     if let Some(a) = current_attr {
         if !current_text.is_empty() {
-            segments.push(PreeditSegment { text: current_text, attr: a });
+            segments.push(PreeditSegment {
+                text: current_text,
+                attr: a,
+            });
         }
     }
 
@@ -397,8 +399,14 @@ mod tests {
         let state = ImeState {
             composing: true,
             preedit: vec![
-                PreeditSegment { text: "日本".to_string(), attr: PreeditAttr::TargetConverted },
-                PreeditSegment { text: "語".to_string(), attr: PreeditAttr::Input },
+                PreeditSegment {
+                    text: "日本".to_string(),
+                    attr: PreeditAttr::TargetConverted,
+                },
+                PreeditSegment {
+                    text: "語".to_string(),
+                    attr: PreeditAttr::Input,
+                },
             ],
             preedit_cursor: 2,
             committed: None,
@@ -434,9 +442,18 @@ mod tests {
         let state = ImeState {
             composing: true,
             preedit: vec![
-                PreeditSegment { text: "にほ".to_string(), attr: PreeditAttr::Input },
-                PreeditSegment { text: "ん".to_string(), attr: PreeditAttr::TargetConverted },
-                PreeditSegment { text: "ご".to_string(), attr: PreeditAttr::Converted },
+                PreeditSegment {
+                    text: "にほ".to_string(),
+                    attr: PreeditAttr::Input,
+                },
+                PreeditSegment {
+                    text: "ん".to_string(),
+                    attr: PreeditAttr::TargetConverted,
+                },
+                PreeditSegment {
+                    text: "ご".to_string(),
+                    attr: PreeditAttr::Converted,
+                },
             ],
             preedit_cursor: 2,
             committed: None,
@@ -489,7 +506,10 @@ mod tests {
             "on_start_composition 後は true — WM_CHAR は skip されるべき"
         );
         handler.on_end_composition();
-        assert!(!handler.state.lock().unwrap().composing, "on_end_composition 後は false");
+        assert!(
+            !handler.state.lock().unwrap().composing,
+            "on_end_composition 後は false"
+        );
     }
 
     // is_empty: composing=false なら常に empty

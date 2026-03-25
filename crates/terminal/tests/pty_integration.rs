@@ -7,9 +7,9 @@
 
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use yatamux_protocol::types::TermSize;
 use yatamux_terminal::PtySession;
-use tokio::sync::mpsc;
 
 fn default_size() -> TermSize {
     TermSize { cols: 80, rows: 24 }
@@ -20,7 +20,11 @@ fn default_size() -> TermSize {
 async fn test_pty_spawns_successfully() {
     let (output_tx, _output_rx) = mpsc::channel::<Vec<u8>>(64);
     let result = PtySession::spawn(default_size(), None, output_tx);
-    assert!(result.is_ok(), "PTY spawn should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "PTY spawn should succeed: {:?}",
+        result.err()
+    );
 }
 
 // A-2: PTY 起動後、初期出力（プロンプト等）が届く
@@ -32,8 +36,14 @@ async fn test_pty_initial_output_received() {
     let data = tokio::time::timeout(Duration::from_secs(5), output_rx.recv())
         .await
         .expect("timeout: no initial output from PTY");
-    assert!(data.is_some(), "output channel should not be closed immediately");
-    assert!(!data.unwrap().is_empty(), "initial output should be non-empty");
+    assert!(
+        data.is_some(),
+        "output channel should not be closed immediately"
+    );
+    assert!(
+        !data.unwrap().is_empty(),
+        "initial output should be non-empty"
+    );
 }
 
 // A-2: echo コマンドを書き込み、その出力が返ってくる
@@ -70,7 +80,10 @@ async fn test_pty_echo_command_output() {
     .await
     .unwrap_or(false);
 
-    assert!(found, "PTY output should contain echo result 'cmux_pty_test_marker'");
+    assert!(
+        found,
+        "PTY output should contain echo result 'cmux_pty_test_marker'"
+    );
 }
 
 // A-3: リサイズが成功する
@@ -79,9 +92,16 @@ async fn test_pty_resize_succeeds() {
     let (output_tx, _) = mpsc::channel::<Vec<u8>>(64);
     let session = PtySession::spawn(default_size(), None, output_tx).unwrap();
 
-    let new_size = TermSize { cols: 120, rows: 40 };
+    let new_size = TermSize {
+        cols: 120,
+        rows: 40,
+    };
     let result = session.resize(new_size);
-    assert!(result.is_ok(), "PTY resize should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "PTY resize should succeed: {:?}",
+        result.err()
+    );
 }
 
 // A-3: リサイズ後も書き込みが成功する
@@ -90,7 +110,12 @@ async fn test_pty_write_after_resize() {
     let (output_tx, _) = mpsc::channel::<Vec<u8>>(256);
     let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
 
-    session.resize(TermSize { cols: 120, rows: 40 }).unwrap();
+    session
+        .resize(TermSize {
+            cols: 120,
+            rows: 40,
+        })
+        .unwrap();
     let result = session.write(b"\r");
     assert!(result.is_ok(), "Write after resize should succeed");
 }
@@ -103,7 +128,11 @@ async fn test_pty_process_running_after_spawn() {
 
     // 起動直後はまだ動いているはず
     let status = session.try_wait();
-    assert!(status.is_none(), "Process should still be running: got exit code {:?}", status);
+    assert!(
+        status.is_none(),
+        "Process should still be running: got exit code {:?}",
+        status
+    );
 }
 
 // A-4: exit コマンドでプロセスが終了する
@@ -144,7 +173,9 @@ async fn test_pty_concurrent_read_write_no_deadlock() {
         let mut total = 0usize;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {
-            if let Ok(Some(data)) = tokio::time::timeout(Duration::from_millis(100), output_rx.recv()).await {
+            if let Ok(Some(data)) =
+                tokio::time::timeout(Duration::from_millis(100), output_rx.recv()).await
+            {
                 total += data.len();
             }
         }
@@ -174,7 +205,9 @@ async fn test_large_output_does_not_stall() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 大量出力を生成（for /L ループ）
-    session.write(b"for /L %i in (1,1,1000) do @echo line %i\r").unwrap();
+    session
+        .write(b"for /L %i in (1,1,1000) do @echo line %i\r")
+        .unwrap();
 
     // 5 秒以内に全出力を受け取れることを確認
     let bytes_received = tokio::time::timeout(Duration::from_secs(5), async {

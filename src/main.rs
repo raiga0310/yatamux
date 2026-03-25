@@ -109,9 +109,7 @@ async fn main() -> Result<()> {
             // text は --pane <id> の直後の引数
             let text = pane_pos.and_then(|i| args.get(i + 2)).cloned();
             match (pane_id, text) {
-                (Some(id), Some(t)) => {
-                    cli::send_keys(DEFAULT_SESSION, id, &t).await
-                }
+                (Some(id), Some(t)) => cli::send_keys(DEFAULT_SESSION, id, &t).await,
                 _ => {
                     eprintln!("Usage: yatamux send-keys --pane <id> <text>");
                     bail!("missing arguments");

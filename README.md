@@ -74,8 +74,38 @@ $env:RUST_LOG="info"; cargo run
 |-----|--------|
 | `Ctrl+Shift+E` | Split pane vertically (left/right) |
 | `Ctrl+Shift+O` | Split pane horizontally (top/bottom) |
+| `Ctrl+→` / `Ctrl+↓` | Focus next pane |
+| `Ctrl+←` / `Ctrl+↑` | Focus previous pane |
 | `Ctrl+Tab` | Focus next pane |
 | `Ctrl+Shift+Tab` | Focus previous pane |
+
+### Toast Notifications
+
+yatamux shows Steam-style toast notifications in the bottom-right corner when a background pane has something to report.
+
+**Triggers (background panes only):**
+
+| Trigger | How to enable |
+|---------|---------------|
+| `BEL` (`\x07`) output | Always works — many CLI tools (e.g. `make`, test runners) emit BEL on completion |
+| OSC 9: `\x1b]9;message\x07` | Application emits this explicitly |
+| OSC 133;D (shell integration) | Configure your shell to emit `\x1b]133;D\x07` after each command (see below) |
+| Process exit | Automatic — fires when the process running in the pane exits |
+
+**Shell integration setup (OSC 133;D):**
+
+For **bash / Git Bash / WSL bash**, add to `~/.bashrc`:
+```bash
+PROMPT_COMMAND='printf "\x1b]133;D\x07"'
+```
+
+For **PowerShell**, add to `$PROFILE`:
+```powershell
+function prompt {
+    [Console]::Write("`e]133;D`a")
+    "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
+}
+```
 
 ### Architecture
 
@@ -180,8 +210,38 @@ $env:RUST_LOG="info"; cargo run
 |------|------|
 | `Ctrl+Shift+E` | 縦分割（左右） |
 | `Ctrl+Shift+O` | 横分割（上下） |
+| `Ctrl+→` / `Ctrl+↓` | 次のペインにフォーカス |
+| `Ctrl+←` / `Ctrl+↑` | 前のペインにフォーカス |
 | `Ctrl+Tab` | 次のペインにフォーカス |
 | `Ctrl+Shift+Tab` | 前のペインにフォーカス |
+
+### トースト通知
+
+バックグラウンドペインで何か通知すべきことがあると、画面右下に Steam 風のトースト通知が表示されます。
+
+**通知が出るトリガー（バックグラウンドペインのみ）:**
+
+| トリガー | 有効にする方法 |
+|---------|--------------|
+| `BEL`（`\x07`）出力 | 常に有効。`make` やテストランナーなど多くの CLI が完了時に BEL を出す |
+| OSC 9: `\x1b]9;メッセージ\x07` | アプリが明示的に出力する |
+| OSC 133;D（シェルインテグレーション） | シェルにコマンド終了後のシーケンス出力を設定する（下記参照） |
+| プロセス終了 | 自動。ペイン内のプロセスが終了すると通知が出る |
+
+**シェルインテグレーション設定（OSC 133;D）:**
+
+**bash / Git Bash / WSL bash** の場合、`~/.bashrc` に追加:
+```bash
+PROMPT_COMMAND='printf "\x1b]133;D\x07"'
+```
+
+**PowerShell** の場合、`$PROFILE` に追加:
+```powershell
+function prompt {
+    [Console]::Write("`e]133;D`a")
+    "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
+}
+```
 
 ### アーキテクチャ
 
