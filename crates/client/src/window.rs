@@ -460,6 +460,23 @@ mod win32 {
                     if state.mode.get() == ClientMode::Pane {
                         let vk = wparam.0 as u16;
 
+                        // モディファイアキー単体はペインモードを維持して無視
+                        // (Shift/Ctrl/Alt を押しただけで Normal に戻らないようにする)
+                        const MODIFIER_KEYS: &[u16] = &[
+                            0x10, // VK_SHIFT
+                            0x11, // VK_CONTROL
+                            0x12, // VK_MENU (Alt)
+                            0xA0, // VK_LSHIFT
+                            0xA1, // VK_RSHIFT
+                            0xA2, // VK_LCONTROL
+                            0xA3, // VK_RCONTROL
+                            0xA4, // VK_LMENU
+                            0xA5, // VK_RMENU
+                        ];
+                        if MODIFIER_KEYS.contains(&vk) {
+                            return LRESULT(0);
+                        }
+
                         // `<`/`>` (Shift+,/.) はペインモードを維持して繰り返し操作可能にする
                         const VK_OEM_COMMA: u16 = 0xBC;
                         const VK_OEM_PERIOD: u16 = 0xBE;
