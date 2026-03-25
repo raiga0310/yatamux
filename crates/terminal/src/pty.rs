@@ -15,8 +15,8 @@ pub struct PtySession {
     writer: Box<dyn std::io::Write + Send>,
     /// resize 用に master を保持
     master: Box<dyn portable_pty::MasterPty + Send>,
-    /// 子プロセス
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// 子プロセス（take_child() で取り出し可能）
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
 impl PtySession {
@@ -78,8 +78,19 @@ impl PtySession {
         Ok(Self {
             writer,
             master: pair.master,
-            child,
+            child: Some(child),
         })
+    }
+
+    /// 子プロセスハンドルを取り出す（`spawn_blocking` で `wait()` するために使用）
+    ///
+    /// Windows の ConPTY では PTY master が子プロセス終了後も open のままになるため、
+    /// `reader.read()` が EOF を返さないことがある。子プロセスの終了検知には
+    /// このメソッドで取得したハンドルに対して `wait()` を呼ぶこと。
+    pub fn take_child(
+        &mut self,
+    ) -> Option<Box<dyn portable_pty::Child + Send + Sync>> {
+        self.child.take()
     }
 
     /// PTY に書き込む（キーボード入力 → ConPTY）
@@ -108,7 +119,7 @@ impl PtySession {
 
     /// 子プロセスが終了しているか確認（非ブロッキング）
     pub fn try_wait(&mut self) -> Option<u32> {
-        self.child.try_wait().ok()?.map(|s| s.exit_code())
+        self.child.as_mut()?.try_wait().ok()?.map(|s| s.exit_code())
     }
 }
 

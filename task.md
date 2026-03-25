@@ -224,11 +224,10 @@ yatamux がバックグラウンドのとき通知が見えない問題を、通
 - `on_pane_created` / `on_pane_closed` フックを `cmd.exe /C` で非同期発火
 - 環境変数: `YATAMUX_PANE_ID`, `YATAMUX_SESSION`
 
-### C-9: シェル終了時にペインを自動削除 【優先度: 高】
+### ~~C-9: シェル終了時にペインを自動削除~~ ✅ 対応済み 【優先度: 高】
 - ペイン内のシェルで `exit` などを実行して PTY プロセスが終了したとき、そのペインを自動的に削除する
-- 現状: PTY 終了時に `ServerMessage::Notification` が発火するが、ペインは残ったまま
 - 最後の 1 枚のペインが閉じたときはアプリ終了
-- **実装方針**: PTY 読み取りタスクの EOF 時に `ClosePane` を送信 or `PaneExited` メッセージを追加して `app.rs` で処理
+- **実装**: `session.rs` で "Process exited" 通知受信時に自動 `ClosePane`。`app.rs` で grids 空になったら `should_quit = true` をセット。`window.rs` の `WM_TIMER` で `DestroyWindow`。
 
 ### C-10: ペイン幅調整キーバインド 【優先度: 中】
 - ペインモード中にキー操作で分割比率（ratio）を変更できるようにする
