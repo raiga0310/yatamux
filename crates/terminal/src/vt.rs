@@ -38,6 +38,34 @@ impl<'a> VtProcessor<'a> {
     }
 }
 
+/// BiDi 制御文字かどうかを判定する。
+///
+/// これらの文字はカーソルを進めず、セルにも書き込まない（幅0として扱う）。
+///
+/// - U+200E LEFT-TO-RIGHT MARK
+/// - U+200F RIGHT-TO-LEFT MARK
+/// - U+202A–U+202E (LRE, RLE, PDF, LRO, RLO)
+/// - U+2066–U+2069 (LRI, RLI, FSI, PDI)
+/// - U+061C ARABIC LETTER MARK
+#[inline]
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200E}'  // LEFT-TO-RIGHT MARK
+        | '\u{200F}'  // RIGHT-TO-LEFT MARK
+        | '\u{202A}'  // LEFT-TO-RIGHT EMBEDDING
+        | '\u{202B}'  // RIGHT-TO-LEFT EMBEDDING
+        | '\u{202C}'  // POP DIRECTIONAL FORMATTING
+        | '\u{202D}'  // LEFT-TO-RIGHT OVERRIDE
+        | '\u{202E}'  // RIGHT-TO-LEFT OVERRIDE
+        | '\u{2066}'  // LEFT-TO-RIGHT ISOLATE
+        | '\u{2067}'  // RIGHT-TO-LEFT ISOLATE
+        | '\u{2068}'  // FIRST STRONG ISOLATE
+        | '\u{2069}'  // POP DIRECTIONAL ISOLATE
+        | '\u{061C}' // ARABIC LETTER MARK
+    )
+}
+
 impl<'a> Perform for VtProcessor<'a> {
     fn print(&mut self, c: char) {
         use unicode_width::UnicodeWidthChar;
@@ -49,10 +77,12 @@ impl<'a> Perform for VtProcessor<'a> {
             '\u{FE0E}' => self.grid.combine_with_last_cell(c),
             // ZWJ (U+200D): ゼロ幅結合子 → 前セルに付加（次の文字が結合される）
             '\u{200D}' => self.grid.combine_with_last_cell(c),
+            // BiDi 制御文字 → カーソルを進めず、セルにも書き込まない（幅0扱い）
+            c if is_bidi_control(c) => {}
             _ => {
                 let w = UnicodeWidthChar::width(c).unwrap_or(0);
                 if w == 0 {
-                    // 一般的な結合文字・BiDi 制御文字 → 前セルに付加
+                    // 一般的な結合文字 → 前セルに付加
                     self.grid.combine_with_last_cell(c);
                 } else if self.grid.last_grapheme_ends_with_zwj() {
                     // 前セルが ZWJ で終わっている → この文字を結合（ZWJ シーケンス完成）
@@ -1243,5 +1273,127 @@ mod tests {
         let mut proc = VtProcessor::new(&mut g);
         feed_bytes(&mut parser, &mut proc, b"hello world");
         assert!(!proc.bell);
+    }
+
+    // ── BiDi 制御文字テスト (C-6) ─────────────────────────────────────────
+
+    /// BiDi 制御文字入りの文字列をフィードしてカーソル位置を確認するヘルパー
+    fn feed_str(g: &mut Grid, s: &str) {
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(g);
+        feed_bytes(&mut parser, &mut proc, s.as_bytes());
+    }
+
+    // TC-C6-01: RIGHT-TO-LEFT MARK (U+200F) はカーソルを進めない
+    #[test]
+    fn test_bidi_rtl_mark_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{200F}B");
+        assert_eq!(g.cursor().col, 2, "U+200F should not advance cursor");
+    }
+
+    // TC-C6-02: LEFT-TO-RIGHT MARK (U+200E) はカーソルを進めない
+    #[test]
+    fn test_bidi_ltr_mark_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{200E}B");
+        assert_eq!(g.cursor().col, 2, "U+200E should not advance cursor");
+    }
+
+    // TC-C6-03: LRE (U+202A) はカーソルを進めない
+    #[test]
+    fn test_bidi_lre_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{202A}B");
+        assert_eq!(g.cursor().col, 2, "U+202A should not advance cursor");
+    }
+
+    // TC-C6-04: RLE (U+202B) はカーソルを進めない
+    #[test]
+    fn test_bidi_rle_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{202B}B");
+        assert_eq!(g.cursor().col, 2, "U+202B should not advance cursor");
+    }
+
+    // TC-C6-05: PDF (U+202C) はカーソルを進めない
+    #[test]
+    fn test_bidi_pdf_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{202C}B");
+        assert_eq!(g.cursor().col, 2, "U+202C should not advance cursor");
+    }
+
+    // TC-C6-06: LRO (U+202D) はカーソルを進めない
+    #[test]
+    fn test_bidi_lro_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{202D}B");
+        assert_eq!(g.cursor().col, 2, "U+202D should not advance cursor");
+    }
+
+    // TC-C6-07: RLO (U+202E) はカーソルを進めない
+    #[test]
+    fn test_bidi_rlo_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{202E}B");
+        assert_eq!(g.cursor().col, 2, "U+202E should not advance cursor");
+    }
+
+    // TC-C6-08: LRI (U+2066) はカーソルを進めない
+    #[test]
+    fn test_bidi_lri_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{2066}B");
+        assert_eq!(g.cursor().col, 2, "U+2066 should not advance cursor");
+    }
+
+    // TC-C6-09: RLI (U+2067) はカーソルを進めない
+    #[test]
+    fn test_bidi_rli_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{2067}B");
+        assert_eq!(g.cursor().col, 2, "U+2067 should not advance cursor");
+    }
+
+    // TC-C6-10: FSI (U+2068) はカーソルを進めない
+    #[test]
+    fn test_bidi_fsi_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{2068}B");
+        assert_eq!(g.cursor().col, 2, "U+2068 should not advance cursor");
+    }
+
+    // TC-C6-11: PDI (U+2069) はカーソルを進めない
+    #[test]
+    fn test_bidi_pdi_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{2069}B");
+        assert_eq!(g.cursor().col, 2, "U+2069 should not advance cursor");
+    }
+
+    // TC-C6-12: ARABIC LETTER MARK (U+061C) はカーソルを進めない
+    #[test]
+    fn test_bidi_arabic_letter_mark_zero_width() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "A\u{061C}B");
+        assert_eq!(g.cursor().col, 2, "U+061C should not advance cursor");
+    }
+
+    // TC-C6-13: BiDi 制御文字のみの文字列はカーソルを動かさない
+    #[test]
+    fn test_bidi_only_controls_no_cursor_movement() {
+        let mut g = make_grid(80, 24);
+        feed_str(&mut g, "\u{200F}\u{200E}\u{202A}");
+        assert_eq!(
+            g.cursor().col,
+            0,
+            "Only BiDi controls should not move cursor"
+        );
+        assert_eq!(
+            g.cursor().row,
+            0,
+            "Only BiDi controls should not move cursor row"
+        );
     }
 }
