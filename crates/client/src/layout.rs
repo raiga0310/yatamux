@@ -5,6 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use serde::Deserialize;
 use yatamux_protocol::types::{PaneId, SplitDirection};
 use yatamux_terminal::Grid;
 
@@ -353,46 +354,110 @@ impl LayoutNode {
     }
 }
 
+/// ランチャープレビュー用レイアウトデータ
+#[derive(Clone, Debug)]
+pub struct LayoutPreview {
+    /// ペイン分割ツリー（PaneId は 0, 1, 2, … の連番）
+    pub node: LayoutNode,
+    /// PaneId(i) のペインに送信するコマンド文字列（None = コマンドなし）
+    pub commands: Vec<Option<String>>,
+}
+
 /// レイアウトランチャーの表示状態
 #[derive(Clone, Debug)]
 pub struct LauncherState {
-    /// 選択可能なレイアウト名のリスト
-    pub layouts: Vec<String>,
+    /// (名前, プレビューデータ) のリスト
+    pub entries: Vec<(String, Option<LayoutPreview>)>,
     /// 現在選択中のインデックス
     pub selected: usize,
 }
 
 impl LauncherState {
-    pub fn new(layouts: Vec<String>) -> Self {
+    pub fn new(entries: Vec<(String, Option<LayoutPreview>)>) -> Self {
         Self {
-            layouts,
+            entries,
             selected: 0,
         }
     }
+
+    /// 選択中のレイアウト名を返す
+    pub fn selected_name(&self) -> Option<&str> {
+        self.entries.get(self.selected).map(|(n, _)| n.as_str())
+    }
+
+    /// 選択中のプレビューデータを返す
+    pub fn selected_preview(&self) -> Option<&LayoutPreview> {
+        self.entries.get(self.selected)?.1.as_ref()
+    }
 }
 
-/// `%APPDATA%\yatamux\layouts\` 内の `.toml` ファイル名（拡張子なし）を返す（ソート済み）
-pub fn list_available_layouts() -> Vec<String> {
+/// TOML 文字列からプレビュー用 `LayoutPreview` を構築する
+fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
+    #[derive(Deserialize)]
+    struct PreviewConfig {
+        #[serde(default)]
+        panes: Vec<PreviewPane>,
+    }
+    #[derive(Deserialize)]
+    struct PreviewPane {
+        split: Option<PreviewSplitDir>,
+        command: Option<String>,
+    }
+    #[derive(Deserialize, Clone, Copy)]
+    #[serde(rename_all = "lowercase")]
+    enum PreviewSplitDir {
+        Vertical,
+        Horizontal,
+    }
+
+    let config: PreviewConfig = toml::from_str(content).ok()?;
+    if config.panes.is_empty() {
+        return None;
+    }
+    let commands: Vec<Option<String>> = config.panes.iter().map(|p| p.command.clone()).collect();
+    let mut root = LayoutNode::Leaf(PaneId(0));
+    for (i, pane) in config.panes.iter().enumerate().skip(1) {
+        if let Some(split) = pane.split {
+            let dir = match split {
+                PreviewSplitDir::Vertical => SplitDirection::Vertical,
+                PreviewSplitDir::Horizontal => SplitDirection::Horizontal,
+            };
+            root.split_leaf(PaneId((i - 1) as u32), PaneId(i as u32), dir);
+        }
+    }
+    Some(LayoutPreview {
+        node: root,
+        commands,
+    })
+}
+
+/// `%APPDATA%\yatamux\layouts\` 内の `.toml` ファイルを読み込み、
+/// `(名前, プレビューデータ)` のリストをソートして返す
+pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     let dir = std::path::PathBuf::from(base)
         .join("yatamux")
         .join("layouts");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    let Ok(dir_entries) = std::fs::read_dir(&dir) else {
         return vec![];
     };
-    let mut names: Vec<String> = entries
+    let mut results: Vec<(String, Option<LayoutPreview>)> = dir_entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let path = e.path();
             if path.extension()?.to_str()? == "toml" {
-                path.file_stem()?.to_str().map(|s| s.to_string())
+                let name = path.file_stem()?.to_str()?.to_string();
+                let preview = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|c| build_preview_layout(&c));
+                Some((name, preview))
             } else {
                 None
             }
         })
         .collect();
-    names.sort();
-    names
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
 }
 
 /// Win32 スレッドが表示するトースト通知

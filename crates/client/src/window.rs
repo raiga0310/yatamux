@@ -46,7 +46,7 @@ mod win32 {
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
     use crate::layout::{
-        list_available_layouts, Direction, LauncherState, PaneRect, PaneStore, Toast,
+        list_available_layouts, Direction, LauncherState, LayoutPreview, PaneRect, PaneStore, Toast,
     };
     use crate::notification::NativeToastMsg;
 
@@ -472,8 +472,10 @@ mod win32 {
                                 let name = store
                                     .launcher
                                     .as_ref()
-                                    .filter(|l| !l.layouts.is_empty())
-                                    .and_then(|l| l.layouts.get(l.selected).cloned());
+                                    .filter(|l| !l.entries.is_empty())
+                                    .and_then(|l| {
+                                        l.entries.get(l.selected).map(|(n, _)| n.clone())
+                                    });
                                 store.launcher = None;
                                 name
                             };
@@ -488,7 +490,7 @@ mod win32 {
                                 if vk == VK_UP.0 {
                                     launcher.selected = launcher.selected.saturating_sub(1);
                                 } else if vk == VK_DOWN.0 {
-                                    let max = launcher.layouts.len().saturating_sub(1);
+                                    let max = launcher.entries.len().saturating_sub(1);
                                     launcher.selected = (launcher.selected + 1).min(max);
                                 }
                             }
@@ -560,9 +562,9 @@ mod win32 {
                             }
                             k if k == b'L' as u16 => {
                                 // レイアウトランチャーを開く
-                                let layouts = list_available_layouts();
+                                let entries = list_available_layouts();
                                 state.panes.lock().unwrap().launcher =
-                                    Some(LauncherState::new(layouts));
+                                    Some(LauncherState::new(entries));
                             }
                             _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
                         }
@@ -1488,6 +1490,7 @@ mod win32 {
     ///
     /// `PaneStore::launcher` が `Some` のときのみ描画する。
     /// 上下キーで選択行をハイライトし、Enter で適用、Esc/q でキャンセル。
+    /// 右パネルに選択中レイアウトのプレビューダイアグラムを表示する。
     unsafe fn paint_launcher(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
         let launcher = {
             let store = state.panes.lock().unwrap();
@@ -1505,26 +1508,44 @@ mod win32 {
         const COLOR_TEXT: COLORREF = COLORREF(0x00_F4_D6_CD); // text
         const COLOR_TITLE: COLORREF = COLORREF(0x00_87_AB_FA); // peach
         const COLOR_HINT_FG: COLORREF = COLORREF(0x00_A0_9D_8C); // subtext0
+                                                                 // プレビュー用カラー — popup bg より明確に明るい色でコントラストを確保
+        const COLOR_PREVIEW_PANE: COLORREF = COLORREF(0x00_5E_4D_4C); // surface2 相当（暗め）
+        const COLOR_PREVIEW_BORDER: COLORREF = COLORREF(0x00_87_AB_FA); // peach（ペイン枠）
+        const COLOR_PREVIEW_SEP: COLORREF = COLORREF(0x00_C9_BA_B8); // subtext1（分割線）
+        const COLOR_PREVIEW_TEXT: COLORREF = COLORREF(0x00_F4_D6_CD); // text（コマンド名）
 
         let cw = state.cell_width;
         let ch = state.cell_height;
-        let n = launcher.layouts.len() as i32;
+        let n = launcher.entries.len() as i32;
 
-        // ポップアップサイズ計算
+        // 左パネル（名前リスト）のサイズ
         let max_name_chars = launcher
-            .layouts
+            .entries
             .iter()
-            .map(|s| s.chars().count())
+            .map(|(s, _)| s.chars().count())
             .max()
             .unwrap_or(10) as i32;
-        let popup_w = ((max_name_chars + 8) * cw).max(cw * 36);
+        let list_w = ((max_name_chars + 8) * cw).max(cw * 22);
+
+        // 右パネル（プレビュー）は画面幅に合わせて大きく取る
+        let preview_margin = cw;
+        let preview_w = (win_w / 2).max(cw * 44);
+
+        let popup_w = list_w + 1 + preview_margin + preview_w + preview_margin;
+
+        // アイテム行数と最小プレビュー高さのどちらか大きい方でコンテンツ高を決める
         let item_rows = n.max(1);
+        let content_h = (item_rows * ch).max(ch * 12);
         let popup_h = ch + ch / 2 // タイトル行 + 余白
-            + 1               // セパレーター
+            + 1               // 水平セパレーター
             + ch / 4          // 余白
-            + item_rows * ch  // アイテム行
+            + content_h       // アイテム行 / プレビュー
             + ch / 4          // 余白
             + ch; // ヒント行
+
+        // ウィンドウからはみ出さないようクランプ
+        let popup_w = popup_w.min(win_w - cw * 2);
+        let popup_h = popup_h.min(win_h - ch * 2);
         let popup_x = (win_w - popup_w) / 2;
         let popup_y = (win_h - popup_h) / 2;
 
@@ -1567,7 +1588,7 @@ mod win32 {
             None,
         );
 
-        // セパレーター線
+        // 水平セパレーター線
         let sep_y = popup_y + ch + ch / 4;
         let sep_brush = CreateSolidBrush(COLOR_SEPARATOR);
         let sep_rect = RECT {
@@ -1579,9 +1600,28 @@ mod win32 {
         FillRect(hdc, &sep_rect, sep_brush);
         let _ = DeleteObject(sep_brush);
 
+        // 左右パネルの垂直セパレーター
+        let vsep_x = popup_x + list_w;
+        let vsep_brush = CreateSolidBrush(COLOR_SEPARATOR);
+        let vsep_rect = RECT {
+            left: vsep_x,
+            top: sep_y + 1,
+            right: vsep_x + 1,
+            bottom: popup_y + popup_h - ch,
+        };
+        FillRect(hdc, &vsep_rect, vsep_brush);
+        let _ = DeleteObject(vsep_brush);
+
         let items_top = sep_y + 1 + ch / 4;
 
-        if launcher.layouts.is_empty() {
+        // ── 左パネル: 名前リスト ──────────────────────────────────────
+        let list_clip = RECT {
+            left: popup_x,
+            top: popup_y,
+            right: popup_x + list_w,
+            bottom: popup_y + popup_h,
+        };
+        if launcher.entries.is_empty() {
             let msg = "  (レイアウトファイルが見つかりません)";
             let msg_w: Vec<u16> = msg.encode_utf16().collect();
             SetTextColor(hdc, COLOR_HINT_FG);
@@ -1590,19 +1630,19 @@ mod win32 {
                 popup_x + cw,
                 items_top,
                 ETO_CLIPPED,
-                Some(&popup_rect),
+                Some(&list_clip),
                 PCWSTR(msg_w.as_ptr()),
                 msg_w.len() as u32,
                 None,
             );
         } else {
-            for (i, name) in launcher.layouts.iter().enumerate() {
+            for (i, (name, _)) in launcher.entries.iter().enumerate() {
                 let item_y = items_top + i as i32 * ch;
                 if i == launcher.selected {
                     let sel_rect = RECT {
                         left: popup_x + cw / 2,
                         top: item_y,
-                        right: popup_x + popup_w - cw / 2,
+                        right: popup_x + list_w - cw / 2,
                         bottom: item_y + ch,
                     };
                     let sel_brush = CreateSolidBrush(COLOR_SEL_BG);
@@ -1619,12 +1659,61 @@ mod win32 {
                     popup_x + cw,
                     item_y,
                     ETO_CLIPPED,
-                    Some(&popup_rect),
+                    Some(&list_clip),
                     PCWSTR(text_w.as_ptr()),
                     text_w.len() as u32,
                     None,
                 );
             }
+        }
+
+        // ── 右パネル: プレビューダイアグラム ─────────────────────────
+        let preview_x = vsep_x + 1 + preview_margin;
+        let preview_area_h = popup_h
+            - (ch + ch / 2 + 1 + ch / 4) // タイトル + セパレーター
+            - ch / 4 // 下余白
+            - ch; // ヒント行
+        let preview_top = sep_y + 1 + ch / 4;
+        let actual_preview_w = popup_x + popup_w - preview_margin - preview_x;
+
+        if let Some(preview) = launcher.selected_preview() {
+            let preview_rect = RECT {
+                left: preview_x,
+                top: preview_top,
+                right: preview_x + actual_preview_w,
+                bottom: preview_top + preview_area_h,
+            };
+            draw_layout_preview(
+                hdc,
+                preview,
+                &preview_rect,
+                COLOR_PREVIEW_PANE,
+                COLOR_PREVIEW_BORDER,
+                COLOR_PREVIEW_SEP,
+                COLOR_PREVIEW_TEXT,
+                cw,
+                ch,
+            );
+        } else {
+            let no_preview = "  (プレビューなし)";
+            let no_preview_w: Vec<u16> = no_preview.encode_utf16().collect();
+            let preview_clip = RECT {
+                left: vsep_x + 1,
+                top: popup_y,
+                right: popup_x + popup_w,
+                bottom: popup_y + popup_h,
+            };
+            SetTextColor(hdc, COLOR_HINT_FG);
+            let _ = ExtTextOutW(
+                hdc,
+                preview_x,
+                preview_top,
+                ETO_CLIPPED,
+                Some(&preview_clip),
+                PCWSTR(no_preview_w.as_ptr()),
+                no_preview_w.len() as u32,
+                None,
+            );
         }
 
         // ヒント行
@@ -1642,6 +1731,187 @@ mod win32 {
             hint_w.len() as u32,
             None,
         );
+    }
+
+    /// `LayoutPreview` をプレビューエリアに再帰描画する。
+    ///
+    /// 各ペインは明るいボーダー → 暗い内部 → コマンドテキストの順で描く。
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_layout_preview(
+        hdc: HDC,
+        preview: &LayoutPreview,
+        rect: &RECT,
+        color_pane: COLORREF,
+        color_border: COLORREF,
+        color_sep: COLORREF,
+        color_text: COLORREF,
+        cell_w: i32,
+        cell_h: i32,
+    ) {
+        draw_preview_node(
+            hdc,
+            &preview.node,
+            rect,
+            &preview.commands,
+            color_pane,
+            color_border,
+            color_sep,
+            color_text,
+            cell_w,
+            cell_h,
+        );
+    }
+
+    /// LayoutNode を再帰描画する内部ヘルパー。
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_preview_node(
+        hdc: HDC,
+        node: &crate::layout::LayoutNode,
+        rect: &RECT,
+        commands: &[Option<String>],
+        color_pane: COLORREF,
+        color_border: COLORREF,
+        color_sep: COLORREF,
+        color_text: COLORREF,
+        cell_w: i32,
+        cell_h: i32,
+    ) {
+        use crate::layout::LayoutNode;
+        use yatamux_protocol::types::SplitDirection;
+
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 2 || h <= 2 {
+            return;
+        }
+
+        match node {
+            LayoutNode::Leaf(id) => {
+                // 外枠を border 色で塗る → 内側を pane 色で上塗り（1px ボーダー効果）
+                let border_brush = CreateSolidBrush(color_border);
+                FillRect(hdc, rect, border_brush);
+                let _ = DeleteObject(border_brush);
+
+                let inner = RECT {
+                    left: rect.left + 1,
+                    top: rect.top + 1,
+                    right: rect.right - 1,
+                    bottom: rect.bottom - 1,
+                };
+                let pane_brush = CreateSolidBrush(color_pane);
+                FillRect(hdc, &inner, pane_brush);
+                let _ = DeleteObject(pane_brush);
+
+                // コマンドテキストを左上に描画（内側に収まるようクリップ）
+                if let Some(Some(cmd)) = commands.get(id.0 as usize) {
+                    let pad = (cell_w / 4).max(2);
+                    let text_x = inner.left + pad;
+                    let text_y = (inner.top + inner.bottom - cell_h) / 2; // 垂直中央
+                    SetTextColor(hdc, color_text);
+                    SetBkMode(hdc, TRANSPARENT);
+                    let text_w: Vec<u16> = cmd.encode_utf16().collect();
+                    let _ = ExtTextOutW(
+                        hdc,
+                        text_x,
+                        text_y,
+                        ETO_CLIPPED,
+                        Some(&inner),
+                        PCWSTR(text_w.as_ptr()),
+                        text_w.len() as u32,
+                        None,
+                    );
+                }
+            }
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                const SEP: i32 = 3;
+                let (r1, r2) = match direction {
+                    SplitDirection::Vertical => {
+                        let w1 = (((w - SEP) as f32 * ratio) as i32).max(1);
+                        let w2 = (w - w1 - SEP).max(1);
+                        (
+                            RECT {
+                                left: rect.left,
+                                top: rect.top,
+                                right: rect.left + w1,
+                                bottom: rect.bottom,
+                            },
+                            RECT {
+                                left: rect.left + w1 + SEP,
+                                top: rect.top,
+                                right: rect.left + w1 + SEP + w2,
+                                bottom: rect.bottom,
+                            },
+                        )
+                    }
+                    SplitDirection::Horizontal => {
+                        let h1 = (((h - SEP) as f32 * ratio) as i32).max(1);
+                        let h2 = (h - h1 - SEP).max(1);
+                        (
+                            RECT {
+                                left: rect.left,
+                                top: rect.top,
+                                right: rect.right,
+                                bottom: rect.top + h1,
+                            },
+                            RECT {
+                                left: rect.left,
+                                top: rect.top + h1 + SEP,
+                                right: rect.right,
+                                bottom: rect.top + h1 + SEP + h2,
+                            },
+                        )
+                    }
+                };
+                // セパレーター
+                let sep_rect = match direction {
+                    SplitDirection::Vertical => RECT {
+                        left: r1.right,
+                        top: rect.top,
+                        right: r2.left,
+                        bottom: rect.bottom,
+                    },
+                    SplitDirection::Horizontal => RECT {
+                        left: rect.left,
+                        top: r1.bottom,
+                        right: rect.right,
+                        bottom: r2.top,
+                    },
+                };
+                let sep_brush = CreateSolidBrush(color_sep);
+                FillRect(hdc, &sep_rect, sep_brush);
+                let _ = DeleteObject(sep_brush);
+
+                draw_preview_node(
+                    hdc,
+                    first,
+                    &r1,
+                    commands,
+                    color_pane,
+                    color_border,
+                    color_sep,
+                    color_text,
+                    cell_w,
+                    cell_h,
+                );
+                draw_preview_node(
+                    hdc,
+                    second,
+                    &r2,
+                    commands,
+                    color_pane,
+                    color_border,
+                    color_sep,
+                    color_text,
+                    cell_w,
+                    cell_h,
+                );
+            }
+        }
     }
 
     /// 罫線文字・ブロック要素を GDI プリミティブで描画する。
