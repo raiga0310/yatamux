@@ -1094,7 +1094,7 @@ mod win32 {
                     let y = row as i32 * state.cell_height + off_y;
                     let mut x = off_x;
 
-                    for cell in cells.iter().take(display_cols) {
+                    for (col_idx, cell) in cells.iter().take(display_cols).enumerate() {
                         let cell_rect = RECT {
                             left: x,
                             top: y,
@@ -1102,9 +1102,21 @@ mod win32 {
                             bottom: y + state.cell_height,
                         };
 
+                        // コピーモードで選択中セルかどうか判定
+                        let is_sel = is_active
+                            && copy_mode_state.as_ref().is_some_and(|cm| {
+                                cm.anchor.is_some() && cm.is_selected(col_idx, row as usize)
+                            });
+
                         match &cell.content {
                             CellContent::Grapheme { text, width } => {
-                                let (fg, bg) = cell_colors(cell, &ime_state);
+                                let (raw_fg, raw_bg) = cell_colors(cell, &ime_state);
+                                // 選択中は前景・背景を反転して文字を可視状態に保つ
+                                let (fg, bg) = if is_sel {
+                                    (raw_bg, raw_fg)
+                                } else {
+                                    (raw_fg, raw_bg)
+                                };
                                 let width_px = state.cell_width * (*width as i32);
                                 let wide_rect = RECT {
                                     right: x + width_px,
@@ -1162,7 +1174,13 @@ mod win32 {
                                 x += state.cell_width;
                             }
                             CellContent::Blank => {
-                                SetBkColor(mem_dc, COLOR_BG);
+                                // 選択中はセル背景を選択色で塗りつぶす
+                                let blank_bg = if is_sel {
+                                    COLORREF(0x00_44_60_A0)
+                                } else {
+                                    COLOR_BG
+                                };
+                                SetBkColor(mem_dc, blank_bg);
                                 let _ = ExtTextOutW(
                                     mem_dc,
                                     x,
@@ -1218,31 +1236,10 @@ mod win32 {
                     }
                 }
 
-                // コピーモード: 選択ハイライトとコピーカーソル（アクティブペインのみ）
+                // コピーモード: コピーカーソル（アクティブペインのみ）
+                // 選択ハイライトはセル描画ループ内で is_sel フラグにより前景・背景反転で描画済み
                 if is_active {
                     if let Some(ref cm) = copy_mode_state {
-                        // 選択範囲のハイライト
-                        if cm.anchor.is_some() {
-                            for row in 0..grid.rows() as usize {
-                                for col_idx in 0..display_cols {
-                                    if cm.is_selected(col_idx, row) {
-                                        let hx = col_idx as i32 * state.cell_width + off_x;
-                                        let hy = row as i32 * state.cell_height + off_y;
-                                        // 半透明の選択ハイライト（反転色で重ね描き）
-                                        let sel_brush = CreateSolidBrush(COLORREF(0x00_A0_60_44)); // 選択色 (B G R)
-                                        let sel_rect = RECT {
-                                            left: hx,
-                                            top: hy,
-                                            right: hx + state.cell_width,
-                                            bottom: hy + state.cell_height,
-                                        };
-                                        FillRect(mem_dc, &sel_rect, sel_brush);
-                                        let _ = DeleteObject(sel_brush);
-                                    }
-                                }
-                            }
-                        }
-
                         // コピーカーソル（ブロック型）
                         let (cc, cr) = cm.cursor;
                         if cc < display_cols && cr < grid.rows() as usize {

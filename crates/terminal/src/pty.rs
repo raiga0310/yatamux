@@ -43,7 +43,10 @@ impl PtySession {
         let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
         let mut cmd = cmd.unwrap_or_else(default_shell);
-        if let Some(dir) = working_dir {
+        if let Some(ref dir) = working_dir {
+            if !std::path::Path::new(dir).is_dir() {
+                return Err(anyhow::anyhow!("working directory does not exist: {}", dir));
+            }
             cmd.cwd(dir);
         }
 
@@ -94,6 +97,16 @@ impl PtySession {
     /// このメソッドで取得したハンドルに対して `wait()` を呼ぶこと。
     pub fn take_child(&mut self) -> Option<Box<dyn portable_pty::Child + Send + Sync>> {
         self.child.take()
+    }
+
+    /// 子プロセスの kill ハンドルを複製して返す。
+    ///
+    /// `take_child()` の前に呼ぶこと。`Pane::Drop` で子プロセスを終了させるために使用する。
+    /// `take_child()` 後は `child` が `None` になるため `None` を返す。
+    pub fn clone_child_killer(
+        &self,
+    ) -> Option<Box<dyn portable_pty::ChildKiller + Send + Sync>> {
+        self.child.as_ref().map(|c| c.clone_killer())
     }
 
     /// PTY に書き込む（キーボード入力 → ConPTY）

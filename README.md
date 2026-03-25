@@ -34,15 +34,20 @@ yatamux addresses these on Windows by using native APIs directly: ConPTY for PTY
 | **60 fps rendering** | GDI double-buffered, dirty-line differential repaint |
 | **Dark title bar** | DWM `DWMWA_USE_IMMERSIVE_DARK_MODE` |
 | **OSC 52 clipboard** | Cross-SSH clipboard write via `\x1b]52;c;<base64>\x07` escape sequence |
+| **Copy mode** | `V` in Pane mode → Copy mode. `hjkl`/arrows to move cursor, `v` to start selection, `y`/Enter to yank to clipboard |
+| **Mouse selection** | Left-drag to select text; releases to clipboard automatically |
 | **External IPC** | Named pipe `\\.\pipe\yatamux-<session>` for CLI / agent integration |
+| **CLI tools** | `list-panes`, `send-keys`, `capture-pane`, `split-pane` — scriptable from shell or AI agents |
 | **Scrollback buffer** | Up to 50,000 lines; mouse-wheel scroll; open in `$EDITOR` via Pane mode `X` |
 | **Floating pane** | Overlay pane on top of the tiled layout (`Ctrl+F` to toggle) |
 | **Pane mode** | `Ctrl+B` enters Pane mode — status bar shows context-sensitive keybind hints |
 | **Session persistence** | Layout auto-saved to `%APPDATA%\yatamux\session.toml` on exit, restored on startup |
 | **Declarative layouts** | `--layout <name>` loads `%APPDATA%\yatamux\layouts\<name>.toml` for project startup |
+| **Layout launcher** | `L` in Pane mode opens an in-app layout picker with a live split-diagram preview |
+| **Pane resize** | `<` / `>` in Pane mode adjusts the active pane's split ratio in 5 % steps |
 | **Plugin hooks** | `%APPDATA%\yatamux\config.toml` `[hooks]` — `on_pane_created` / `on_pane_closed` shell commands |
 | **Click to focus** | Left-click on any pane to focus it |
-| **ZWJ / emoji** | ZWJ sequences (👨‍💻), VS-16 widening, Nerd Fonts wide-glyph option |
+| **ZWJ / emoji / BiDi** | ZWJ sequences (👨‍💻), VS-16 widening, Nerd Fonts wide-glyph option, BiDi control chars (zero-width) |
 | **Tested with** | vim, lazygit, Claude Code |
 
 ### Requirements
@@ -98,13 +103,47 @@ $env:RUST_LOG="info"; cargo run
 
 | Key | Action |
 |-----|--------|
-| `H` / `J` / `K` / `L` | Move focus left / down / up / right |
 | `E` | Split vertically |
 | `O` | Split horizontally |
 | `W` | Close active pane |
 | `F` | Toggle floating pane |
 | `X` | Open scrollback in `$EDITOR` |
+| `<` / `>` | Shrink / expand active pane (adjusts split ratio ±5 %) |
+| `L` | Open layout launcher (pick & apply a saved layout) |
+| `V` | Enter Copy mode |
 | `q` | Return to Normal mode |
+
+**Copy mode** (entered with `V` in Pane mode):
+
+| Key | Action |
+|-----|--------|
+| `h` / `←` | Move cursor left |
+| `j` / `↓` | Move cursor down |
+| `k` / `↑` | Move cursor up |
+| `l` / `→` | Move cursor right |
+| `v` | Toggle selection (visual mode) |
+| `y` / `Enter` | Yank selected text to clipboard, exit Copy mode |
+| `q` / `Esc` | Exit Copy mode |
+
+### CLI / Agent Integration
+
+When yatamux is running, you can control it from any shell or AI agent via the named pipe IPC:
+
+```powershell
+# List all panes
+yatamux list-panes
+
+# Send keystrokes to a pane (supports \n \r \t escape sequences)
+yatamux send-keys --pane 1 "cargo test\n"
+
+# Capture pane output (scrollback tail + current screen) — useful for AI agents
+yatamux capture-pane --target 1 --lines 200
+
+# Split a pane, optionally in a different working directory
+yatamux split-pane --target 1 --direction vertical --dir C:\projects\other-repo
+```
+
+These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-default`.
 
 ### Toast Notifications
 
@@ -150,13 +189,18 @@ An IPC server (`\\.\pipe\yatamux-<session>`) also starts automatically for exter
 
 ### Known Limitations
 
-- Pane split ratio is fixed at 50:50 (keyboard resize not yet implemented)
 - Windows 10 1903+ required (ConPTY)
 
 ### Roadmap
 
-- [ ] Pane resize by keyboard (`<` / `>` in Pane mode)
-- [ ] Auto-close pane when shell exits
+- [ ] Remote monitoring via WebSocket bridge (read-only preview from browser / mobile)
+- [ ] Claude Code integration skill (MCP server or prompt scaffolding for AI orchestration)
+- [x] Copy mode — keyboard text selection + clipboard yank (`V` in Pane mode)
+- [x] `capture-pane` CLI — AI-readable pane content dump
+- [x] `split-pane --dir` CLI — open a new pane in any working directory
+- [x] Auto-close pane when shell exits
+- [x] Pane resize by keyboard (`<` / `>` in Pane mode, ±5 % ratio)
+- [x] In-app layout launcher (`L` in Pane mode, with split-diagram preview)
 - [x] Scrollback buffer (50,000 lines, mouse-wheel scroll, open in `$EDITOR`)
 - [x] Session persistence (`%APPDATA%\yatamux\session.toml`)
 - [x] Floating pane (`Ctrl+F`)
@@ -201,15 +245,20 @@ yatamux は ConPTY・Win32 GDI・IMM32 を直接使い、Windows ネイティブ
 | **60fps 描画** | GDI ダブルバッファ、ダーティライン差分再描画 |
 | **ダークタイトルバー** | DWM `DWMWA_USE_IMMERSIVE_DARK_MODE` |
 | **OSC 52 クリップボード** | `\x1b]52;c;<base64>\x07` による SSH 越しクリップボード書き込み |
+| **コピーモード** | ペインモード `V` でコピーモードへ。`hjkl`/矢印でカーソル移動、`v` で選択開始、`y`/Enter でヤンク |
+| **マウス選択** | 左ドラッグでテキスト選択。離した瞬間にクリップボードへコピー |
 | **外部 IPC** | `\\.\pipe\yatamux-<session>` で CLI・エージェントからの操作を受け付け |
+| **CLI ツール** | `list-panes`、`send-keys`、`capture-pane`、`split-pane` — シェルや AI エージェントからスクリプト化可能 |
 | **スクロールバック** | 最大 50,000 行。マウスホイールでスクロール。ペインモード `X` で `$EDITOR` 起動 |
 | **フローティングペイン** | タイルレイアウトの上に重なるオーバーレイペイン（`Ctrl+F` でトグル） |
 | **ペインモード** | `Ctrl+B` でペインモードへ。ステータスバーにキーバインドヒントを表示 |
 | **セッション永続化** | 終了時に `%APPDATA%\yatamux\session.toml` へ自動保存、起動時に復元 |
 | **宣言的レイアウト** | `--layout <name>` で `%APPDATA%\yatamux\layouts\<name>.toml` をプロジェクト起動に活用 |
+| **レイアウトランチャー** | ペインモード `L` でアプリ内レイアウト選択 UI を表示（分割図プレビュー付き） |
+| **ペインリサイズ** | ペインモード `<` / `>` で分割比率を 5 % 単位で増減 |
 | **プラグインフック** | `config.toml` の `[hooks]` で `on_pane_created` / `on_pane_closed` シェルコマンドを設定 |
 | **クリックフォーカス** | ペイン領域を左クリックしてフォーカス移動 |
-| **ZWJ / 絵文字** | ZWJ シーケンス（👨‍💻）、VS-16 幅拡張、Nerd Fonts ワイドグリフオプション |
+| **ZWJ / 絵文字 / BiDi** | ZWJ シーケンス（👨‍💻）、VS-16 幅拡張、Nerd Fonts ワイドグリフ、BiDi 制御文字（幅0扱い） |
 | **動作確認済み** | vim、lazygit、Claude Code |
 
 ### 動作要件
@@ -265,13 +314,47 @@ $env:RUST_LOG="info"; cargo run
 
 | キー | 動作 |
 |------|------|
-| `H` / `J` / `K` / `L` | 左 / 下 / 上 / 右のペインにフォーカス移動 |
 | `E` | 縦分割 |
 | `O` | 横分割 |
 | `W` | アクティブペインを閉じる |
 | `F` | フローティングペインのトグル |
 | `X` | スクロールバックを `$EDITOR` で開く |
+| `<` / `>` | アクティブペインを縮小 / 拡大（分割比率 ±5 %） |
+| `L` | レイアウトランチャーを開く（保存済みレイアウトを選択・適用） |
+| `V` | コピーモードに入る |
 | `q` | ノーマルモードに戻る |
+
+**コピーモード**（ペインモードで `V` を押して移行）:
+
+| キー | 動作 |
+|------|------|
+| `h` / `←` | カーソルを左に移動 |
+| `j` / `↓` | カーソルを下に移動 |
+| `k` / `↑` | カーソルを上に移動 |
+| `l` / `→` | カーソルを右に移動 |
+| `v` | 選択トグル（ビジュアルモード） |
+| `y` / `Enter` | 選択テキストをクリップボードにコピーしてコピーモードを終了 |
+| `q` / `Esc` | コピーモードを終了 |
+
+### CLI / エージェント連携
+
+yatamux 起動中は、任意のシェルや AI エージェントから名前付きパイプ IPC を通じて操作できます:
+
+```powershell
+# ペイン一覧を表示
+yatamux list-panes
+
+# 指定ペインにキー入力を送信（\n \r \t エスケープに対応）
+yatamux send-keys --pane 1 "cargo test\n"
+
+# ペインの内容をダンプ（スクロールバック末尾 + 現在画面）— AI エージェントの結果回収に最適
+yatamux capture-pane --target 1 --lines 200
+
+# ペインを分割。--dir で別リポジトリの作業ディレクトリを指定可能
+yatamux split-pane --target 1 --direction vertical --dir C:\projects\other-repo
+```
+
+接続先: `\\.\pipe\yatamux-default`
 
 ### トースト通知
 
@@ -317,13 +400,18 @@ yatamux (bin)
 
 ### 既知の制限
 
-- ペイン分割比は 50:50 固定（キーボードリサイズ未実装）
 - Windows 10 1903 以降が必要（ConPTY）
 
 ### ロードマップ
 
-- [ ] ペインリサイズ（ペインモードで `<` / `>`）
-- [ ] シェル終了時のペイン自動削除
+- [ ] WebSocket ブリッジ（ブラウザ / スマホからの読み取り専用リモート監視）
+- [ ] Claude Code 統合スキル（AI オーケストレーション向け MCP サーバーまたはプロンプト定義）
+- [x] コピーモード — キーボードによるテキスト選択 + クリップボードヤンク（ペインモード `V`）
+- [x] `capture-pane` CLI — AI が読みやすいペイン内容ダンプ
+- [x] `split-pane --dir` CLI — 任意の作業ディレクトリで新ペインを作成
+- [x] シェル終了時のペイン自動削除
+- [x] ペインリサイズ（ペインモード `<` / `>`、±5 % 比率調整）
+- [x] アプリ内レイアウトランチャー（ペインモード `L`、分割図プレビュー付き）
 - [x] スクロールバックバッファ（50,000 行、マウスホイール、`$EDITOR` 起動）
 - [x] セッション永続化（`%APPDATA%\yatamux\session.toml`）
 - [x] フローティングペイン（`Ctrl+F`）
