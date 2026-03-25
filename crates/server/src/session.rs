@@ -104,8 +104,15 @@ impl Server {
                 Some((pane_id, body)) = self.pane_notification_rx.recv() => {
                     let _ = self.client_tx.send(ServerMessage::Notification {
                         pane: pane_id,
-                        body,
+                        body: body.clone(),
                     }).await;
+                    // C-9: PTY プロセス終了時にペインを自動削除
+                    if body == "Process exited" {
+                        self.panes.remove(&pane_id);
+                        let _ = self.client_tx
+                            .send(ServerMessage::PaneClosed { pane: pane_id })
+                            .await;
+                    }
                 }
             }
         }

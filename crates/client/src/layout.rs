@@ -357,6 +357,8 @@ pub struct PaneStore {
     pub floating_visible: bool,
     /// フローティング表示前のアクティブペイン（非表示時の復帰用）
     pub pre_float_active: Option<PaneId>,
+    /// true のとき Win32 タイマーがウィンドウを破棄してアプリを終了する（C-9）
+    pub should_quit: bool,
 }
 
 impl PaneStore {
@@ -373,6 +375,7 @@ impl PaneStore {
             floating: None,
             floating_visible: false,
             pre_float_active: None,
+            should_quit: false,
         }
     }
 
