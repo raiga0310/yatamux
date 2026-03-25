@@ -45,7 +45,7 @@ src/app.rs         起動オーケストレーション。
                    ③ Workspace → Surface → 初期 Pane を作成
                    ④ セッション復元 / --layout 設定 / 初期ペインのみ の3パスで起動
                    ⑤ tokio::select! ループ（出力ルーティング＋ペイン分割＋フローティング
-                      ＋フック発火＋通知ルーティング）
+                      ＋フック発火＋通知ルーティング＋レイアウト切り替え）
                    ⑥ spawn_blocking で Win32 メッセージループを起動
 src/config.rs      AppConfig / HooksConfig。%APPDATA%\yatamux\config.toml から読み込む。
                    on_pane_created / on_pane_closed フックを cmd.exe /C で非同期発火。
@@ -174,3 +174,15 @@ just lint && just test && just fmt
 ## task.md
 
 `task.md` が未実装タスクの一覧。
+
+## docs/troubleshoot.md
+
+このプロジェクトで実際に発生したデッドロック・テスト失敗・文字化け等のトラブルパターンと
+解決策をまとめたリファレンス。新機能追加・バグ修正の前に確認すること。
+
+主なトピック:
+- **T-01**: `tokio::sync::Mutex` を `handle_client_message` 内で使うと循環デッドロック
+- **T-02**: テストに必ず `with_timeout`（120s）を付ける
+- **T-03**: 子プロセス孤児化を防ぐため `Drop` impl で `ChildKiller::kill()` を呼ぶ
+- **T-04**: Windows の ANSI CP932 文字化けは `activeCodePage = UTF-8` マニフェストで解決
+- **T-05**: `select!` スタベーションパターン

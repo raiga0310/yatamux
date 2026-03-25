@@ -198,7 +198,7 @@ yatamux がバックグラウンドのとき通知が見えない問題を、通
   split = "horizontal"
   ```
 
-### ~~C-6: 高度な Unicode / 絵文字対応~~ ✅ 部分対応済み 【優先度: 中】
+### ~~C-6: 高度な Unicode / 絵文字対応~~ ✅ 対応済み 【優先度: 中】
 - 24ビット True Color の完全サポート確認
 - ゼロ幅結合子（ZWJ）を使った絵文字（👨‍💻 等）の正確な幅計算
 - Nerd Fonts グリフ（U+E000–U+F8FF）の幅を2セルとして扱うオプション
@@ -207,7 +207,7 @@ yatamux がバックグラウンドのとき通知が見えない問題を、通
   - [x] ZWJ シーケンス（U+200D 連結）の幅を1セルとして扱う（`combine_with_last_cell()` / `last_grapheme_ends_with_zwj()`）
   - [x] Variation Selector（VS-15/VS-16）による幅切り替え対応（`apply_vs16()`）
   - [x] Nerd Fonts グリフ（U+E000–U+F8FF）を2セル幅に扱う `nerd_fonts_wide` オプションを追加
-  - [ ] BiDi 基本対応（RTL マーカーを幅0で処理）
+  - [x] BiDi 基本対応（RTL マーカーを幅0で処理）（`vt.rs` の `is_bidi_control()` で制御文字を幅0扱い）
 
 ### ~~C-7: 効率的なスクロールバックバッファ~~ ✅ 対応済み 【優先度: 低】
 - 数万行のスクロールバック履歴を保持してもメモリ・パフォーマンスが劣化しない設計
@@ -242,11 +242,11 @@ yatamux がバックグラウンドのとき通知が見えない問題を、通
 - **状態管理の注意点**: 動的にレイアウトを適用する場合、既存のペイン（プロセス）をどう扱うか（すべて破棄するか、新しいウィンドウ/タブとして開くか）のポリシー決定が必要。初期段階では「現在のペインをすべて閉じてから適用する（破棄確認あり）」または「新しいタブ/ワークスペースとして展開する（将来のタブ機能拡張を見据える）」のどちらかを採用する。
 
 #### サブタスク
-- [ ] `layout_config.rs` に、利用可能なレイアウトファイル一覧（ファイル名のリスト）を取得する `list_layouts()` 関数を追加
-- [ ] クライアント側に、中央ポップアップでリストを描画し、上下キーで選択するUIコンポーネントを実装
-- [ ] レイアウト切り替えコマンドの発火（既存ペインの安全な終了処理と、新しい `LayoutConfig` に基づくペイン生成フローの構築）
-- [ ] ペインモード中のキーバインド（例: `L`）でレイアウトランチャーを起動できるように配線
-- [ ] `docs/test-plan-layout-launcher.md` を作成し、UIの表示・選択・適用・キャンセルのテストケースを定義
+- [x] `layout_config.rs` に `list_layouts()` 関数を追加（`.toml` のみ返し、ソート済み）
+- [x] クライアント側に `LauncherState` と中央ポップアップ描画 UI を実装（`layout.rs` / `window.rs`）
+- [x] `list_available_layouts()` でレイアウト一覧を取得しランチャーに表示
+- [x] ペインモード中のキーバインド（`L`）でランチャーを起動、上下キーで選択・Enter で適用
+- [x] `docs/test-plan-layout-launcher.md` 作成済み
 
 ### ~~F-10: CLIヘルプ (`--help`) とコマンドライン引数解析の実装~~ ✅ 対応済み 【優先度: 高】
 
@@ -260,3 +260,146 @@ yatamux がバックグラウンドのとき通知が見えない問題を、通
 - [x] `src/main.rs` の `Cli` 構造体で引数を定義し、`clap::Parser` で解析
 - [x] サポートする引数の定義: `--help` (自動生成), `--version` (自動生成), `--layout <NAME>`
 - [x] `list-panes` / `send-keys` も `#[command(subcommand)]` で整理
+
+### ~~C-12: コピーモードとテキスト範囲選択UIの実装~~ ✅ 対応済み 【優先度: 高】
+ターミナル上の出力をマウスドラッグ、またはキーボード操作で範囲選択し、システムクリップボードにコピーできるようにする。
+C-2（クリップボード統合）を土台として、実際にユーザーが画面上の文字を選択・視認できるUIを構築する。
+
+- **概要**: tmuxの `prefix + [` のようなコピーモード（スクロールバックバッファの閲覧とテキスト選択）と、マウスによる直感的なドラッグ選択をサポートする。
+- **操作性**: Neovimの操作感を取り入れ、キーボード操作時は `v` で選択開始（ビジュアルモード）、`y` または `Enter` でヤンク（コピー）して通常モードに戻るフローとする。
+- **描画**: 選択中のテキスト領域は、背景色と文字色を反転させるなどしてハイライト表示する。
+
+#### サブタスク
+- [x] `CopyState`（カーソル位置・選択開始座標を保持）を `PaneStore` に追加
+- [x] マウスイベント（`WM_LBUTTONDOWN`, `WM_MOUSEMOVE`, `WM_LBUTTONUP`）でドラッグ始点・終点トラッキングを実装
+- [x] キーボード操作（hjkl / 矢印キー）によるカーソル移動と `v`（選択開始）、`y`/`Enter`（コピー実行）のキーバインド配線
+- [x] `paint()` でセルごとに fg/bg を反転して選択ハイライトを描画（FillRect による文字隠し問題を修正済み）
+- [x] `Grid::extract_text(row_start, row_end)` でテキスト抽出（Continuation セルスキップ、CJK 対応）
+- [x] `docs/test-plan-copy-mode.md` 作成済み
+
+### ~~C-13: 画面キャプチャCLI（`capture-pane`）とAI向け出力~~ ✅ 対応済み 【優先度: 高】
+Zenn記事の `cmux read-screen` 相当の機能。Claude CodeなどのAIが、別ペインで動かしているサブエージェントの実行結果やエラーをCLI経由で自律的に読み取れるようにする。
+
+- **概要**: `yatamux capture-pane --target <ID> --lines <n>` のようなCLIコマンドを実装し、指定ペインの画面バッファやスクロールバック履歴をプレーンテキストとして標準出力にダンプする。
+- **連携**: C-12（コピーモード）で実装したテキスト抽出ロジックを利用し、不要な空白やANSIエスケープシーケンスを整理してAIがパースしやすい形で出力する。
+
+#### サブタスク
+- [x] IPCプロトコルに `ClientMessage::CapturePane { pane_id, lines }` と `ServerMessage::PaneContent { content }` を追加
+- [x] サーバー側で `Grid` および `scrollback` から指定行数のテキストを抽出し返送するロジックを実装
+- [x] `src/cli.rs` に `capture-pane` サブコマンドを追加し、標準出力に結果を流す処理を実装
+- [x] `docs/test-plan-capture-pane.md` 作成済み
+
+### ~~C-14: 作業ディレクトリ指定でのペイン分割CLI（クロスリポジトリ対応）~~ ✅ 対応済み 【優先度: 高】
+AIが現在のカレントディレクトリの制約を超え、別リポジトリのタスクを「別ペイン・別セッション」で即座に立ち上げるための機能。
+
+- **概要**: `yatamux split-pane --dir <PATH>` のように、ペイン作成時に作業ディレクトリを明示的に指定できるCLIオプションを追加する。
+- **背景**: 記事にある「複数プロジェクトをまたぐ作業がつらい」という課題の解決策。Claude CodeがプロジェクトAに居ながら、プロジェクトB用のサブエージェントを別ペインにスムーズに展開できるようにする。
+
+#### サブタスク
+- [x] `ClientMessage::CreatePane` のペイロードに `working_dir: Option<String>` を追加（`protocol/src/message.rs`）
+- [x] `pty.rs` の `PtySession::spawn()` で `working_dir` が指定された場合そのディレクトリでシェルを起動するよう変更（存在確認つき）
+- [x] `src/cli.rs` に `split-pane` サブコマンドを追加（`--target`, `--direction`, `--dir` オプション）
+- [x] `docs/test-plan-split-pane-dir.md` 作成済み
+
+### ~~B-5: `split-pane` CLI で作ったペインが GUI に表示されない~~ ✅ 対応済み 【優先度: 高】
+
+`yatamux split-pane` で作成したペインがサーバー側（`list-panes` で確認可）には存在するが、
+GUI のレイアウトツリー（`PaneStore`）に反映されず、画面に表示されない。
+ステータスバーのペイン数カウントも更新されない。
+
+#### 根本原因
+
+`app.rs` の `ServerMessage::PaneCreated` ハンドラは以下の優先順位で処理を分岐する：
+
+1. `layout_switch.is_some()` → レイアウト切り替えフロー
+2. `pending_float` → フローティングペイン
+3. `pending.pop_front().is_some()` → **GUI（キーボードショートカット）起点の分割** → `PaneStore` を更新
+4. **それ以外 → 何もしない** ← IPC 経由の `CreatePane` はここに落ちる
+
+`pending` はキーボードショートカット（`split_tx`）経由でのみ積まれる。
+IPC クライアントが `CreatePane` を送っても `pending` に積まれないため、
+`PaneCreated` が届いても `PaneStore.grids`・`layout` が更新されず GUI に反映されない。
+
+#### 修正方針
+
+`PaneCreated` ハンドラの else 節（現在は何もしない）で、
+IPC 起点のペインとして GUI レイアウトに追加する処理を入れる。
+
+- `PaneStore.grids` に新しい `Grid` を追加
+- `layout.split_leaf(active, new_id, direction)` でレイアウトツリーに追加
+  - ただし IPC 側は `split_from` ペイン ID と `direction` を持っているので、
+    `PaneCreated` に `split_from` と `direction` を含める必要がある
+- `active` を新しいペイン ID に更新
+
+#### 必要な変更
+
+- `ServerMessage::PaneCreated` に `split_from: Option<PaneId>` と `direction: Option<SplitDirection>` を追加（`protocol/src/message.rs`）
+- サーバー側で `PaneCreated` 送信時にこれらを設定する（`session.rs` または `server/src/lib.rs`）
+- `app.rs` の else 節でレイアウト更新処理を実装
+
+#### サブタスク
+- [x] `ServerMessage::PaneCreated` に `split_from` / `direction` を追加（`protocol/src/message.rs`）
+- [x] サーバー側で `PaneCreated` 送信時に `split_from` / `direction` を設定（`session.rs`）
+- [x] `app.rs` の `PaneCreated` ハンドラに IPC 起点ペイン追加処理を実装（else 節）
+
+---
+
+### ~~I-1: `send-keys` の使い勝手改善 — エージェントが `--help` 一読で成功できるように~~ ✅ 対応済み 【優先度: 高】
+
+`send-keys` を初めて使うエージェント（Claude Code 等）が `--help` を読んだだけで一発成功できない問題が複数ある。
+
+#### 現状の問題
+
+1. **`\r` が CR に変換されるという仕様が `--help` に記載されていない**
+   - Enter を送るには `\r` を文字列末尾に付ける必要があるが、全く記述がない
+   - エージェントは自然に `"echo hello"` と送り、コマンドが実行されないことに気づかない
+
+2. **Windows パスに `\r` が含まれると意図せず Enter として解釈される**
+   - 例: `"dir C:\Users\raiga\dev"` → `unescape()` が `\r` を CR に変換してしまい、
+     `dir C:\Users` + Enter + `aiga\dev` という2コマンドになる
+   - `--help` にこの危険な副作用の警告がない
+
+3. **エスケープシーケンス仕様が `--help` に書かれていない**
+   - `\r`=CR、`\n`=LF、`\t`=TAB、`\\`=バックスラッシュ の変換ルールが不明
+
+#### 理想状態
+
+`yatamux send-keys --help` を読んだエージェントが、何も試行錯誤せずに初回で正しいコマンドを送れる。
+
+#### 解決策の候補（実装時に選択）
+
+- **A: `--enter` フラグを追加**（推奨）
+  - `--enter` を付けると末尾に CR を自動付加する
+  - `\r` のエスケープ変換はそのまま残す（明示的に使いたい場合向け）
+  - `--help` の Examples に `send-keys --pane 2 --enter "echo hello"` と明示
+- **B: パス中の `\r` 問題を回避するため `--raw` モードを追加**
+  - `--raw` を付けるとエスケープ変換を一切しない（リテラル送信）
+  - `--enter` と組み合わせて `--raw --enter` で「パスをそのまま送って Enter」が実現できる
+- **C: `--help` の改善のみ（最小対応）**
+  - エスケープ仕様と使用例（Windows パスの注意）を `--help` に追記するだけ
+
+#### サブタスク
+- [x] `--enter` フラグ追加（末尾に CR を自動付加）
+- [x] `--raw` フラグ追加（エスケープ変換なしでリテラル送信。Windows パス対応）
+- [x] `--help` の doc コメントにエスケープ仕様・注意点・使用例を追記
+
+### C-15: AIオーケストレーション向け Claude Code 統合スキル提供 【優先度: 中】
+`using-cmux` 相当。Yatamux本体の機能追加ではなく、Claude Codeに「Yatamuxの操作方法」を教えるためのインターフェースを提供する。
+
+- **概要**: Claude Codeが「ペイン分割 → サブエージェント（別のClaude Code）起動 → `capture-pane` で監視・結果回収」というパターンを自律的に行えるよう、専用の MCP (Model Context Protocol) サーバー、または Claude Code 用のスキル定義を同梱する。
+
+#### サブタスク
+- [ ] リポジトリ内に `integrations/claude-code/` などを設け、Yatamux操作用のプロンプトやコマンドのラッパースクリプトを作成
+- [ ] AIに対して「別タスクは `yatamux split-pane` で隔離し、`yatamux send-keys` で指示を送り、`yatamux capture-pane` で回収せよ」と教えるシステムプロンプトの設計
+- [ ] READMEに「AIサブエージェントの可視化と管理」に関するユースケース・チュートリアルを追記
+
+### C-16: リモート監視用 WebSocket ブリッジ（スマホからの進捗モニタリング） 【優先度: 低】
+`cmux-remote` 相当の機能。AIが自動作業している様子を、席を離れてiPhoneや別PCから監視できるようにする。
+
+- **概要**: YatamuxのIPCサーバーに、リモートプレビュー用のWebSocketエンドポイント（読み取り専用）を追加し、ターミナルの描画更新をJSON等で配信する。
+- **UI**: 配信されたデータを受信してブラウザ上でレンダリングする、簡易的なWebビューア（xterm.jsベース）を実装する。
+
+#### サブタスク
+- [ ] サーバー側で、既存の名前付きパイプ（Windows IPC）とは別に、WebSocketで接続を待ち受けるオプトインの機能を追加
+- [ ] セキュリティを考慮し、リモートからは入力（Input）を受け付けない「読み取り専用（Read-only）セッション」の仕組みを導入
+- [ ] 外部から状態を確認するための簡易PWA/Webクライアントのプロトタイプ作成

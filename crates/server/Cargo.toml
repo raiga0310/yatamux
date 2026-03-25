@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 
 vte = { workspace = true }
 
+portable-pty = { workspace = true }
 yatamux-protocol = { path = "../protocol" }
 yatamux-terminal = { path = "../terminal" }
 

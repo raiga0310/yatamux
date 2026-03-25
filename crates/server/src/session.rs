@@ -170,6 +170,7 @@ impl Server {
                 size,
                 split_from,
                 direction,
+                working_dir,
             } => {
                 let id = PaneId(self.next_pane_id);
                 self.next_pane_id += 1;
@@ -181,6 +182,7 @@ impl Server {
                     self.width_config.clone(),
                     self.pane_output_tx.clone(),
                     self.pane_notification_tx.clone(),
+                    working_dir,
                 )?;
                 self.panes.insert(id, pane);
 
@@ -203,7 +205,12 @@ impl Server {
                 }
 
                 self.client_tx
-                    .send(ServerMessage::PaneCreated { id, surface })
+                    .send(ServerMessage::PaneCreated {
+                        id,
+                        surface,
+                        split_from,
+                        direction,
+                    })
                     .await
                     .context("Failed to send PaneCreated")?;
             }
@@ -235,6 +242,44 @@ impl Server {
                 // TODO: グリッドの現在状態を送信
             }
 
+            ClientMessage::CapturePane { pane, lines } => {
+                let content = if let Some(p) = self.panes.get(&pane) {
+                    let grid = p.grid.lock().await;
+                    if lines == 0 {
+                        String::new()
+                    } else {
+                        // スクロールバック末尾 + 現在画面を取得
+                        let sb_len = grid.scrollback_len();
+                        let rows = grid.rows() as usize;
+                        let total_rows = sb_len + rows;
+                        // lines 行分だけ末尾から取得する
+                        let skip = total_rows.saturating_sub(lines);
+
+                        let mut parts: Vec<String> = Vec::new();
+                        // スクロールバック行
+                        for i in skip..sb_len {
+                            if let Some(row) = grid.scrollback_row(i) {
+                                parts.push(yatamux_terminal::grid::row_cells_to_text(row));
+                            }
+                        }
+                        // 画面行（スクロールバック分を差し引いた分）
+                        let screen_skip = skip.saturating_sub(sb_len);
+                        for r in screen_skip..rows {
+                            if let Some(row) = grid.row(r as u16) {
+                                parts.push(yatamux_terminal::grid::row_cells_to_text(row));
+                            }
+                        }
+                        parts.join("\n")
+                    }
+                } else {
+                    String::new()
+                };
+                self.client_tx
+                    .send(ServerMessage::PaneContent { pane, content })
+                    .await
+                    .context("Failed to send PaneContent")?;
+            }
+
             ClientMessage::ListPanes => {
                 // サーフェスごとに属するペインを収集（非同期ロックのためクロージャ外で処理）
                 let mut panes: Vec<PaneInfo> = Vec::new();
@@ -246,11 +291,11 @@ impl Server {
                         .unwrap_or_default();
                     for pane_id in &ids_in_tree {
                         if let Some(pane) = self.panes.get(pane_id) {
-                            let (cols, rows) = {
-                                let grid = pane.grid.lock().await;
-                                (grid.cols(), grid.rows())
-                            };
-                            let title = pane.title.lock().await.clone();
+                            // std::sync::Mutex: await なし、デッドロックなし
+                            let s = pane.size.lock().unwrap();
+                            let (cols, rows) = (s.cols, s.rows);
+                            drop(s);
+                            let title = pane.title.lock().unwrap().clone();
                             panes.push(PaneInfo {
                                 id: *pane_id,
                                 surface: *surf_id,
@@ -332,466 +377,768 @@ mod tests {
             .expect("server channel closed")
     }
 
+    /// Output / Notification / PaneClosed を読み飛ばし、次の「制御」メッセージを返す。
+    ///
+    /// PTY が起動直後に出力を流し始めるため、テストで特定のレスポンス
+    /// (PaneCreated 等) を待つときは Output が先着する可能性がある。
+    /// このヘルパーはそれらを無視して期待するメッセージだけを返す。
+    /// 全体タイムアウト 60 秒: それを超えた場合はデッドロック等とみなして panic。
+    async fn recv_ctrl(rx: &mut mpsc::Receiver<ServerMessage>) -> ServerMessage {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match recv_one(rx).await {
+                    ServerMessage::Output { .. }
+                    | ServerMessage::Notification { .. }
+                    | ServerMessage::PaneClosed { .. } => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .expect("recv_ctrl: timed out after 60s — suspected deadlock or resource exhaustion")
+    }
+
+    /// テスト全体を 120 秒でタイムアウトさせるラッパー。
+    ///
+    /// デッドロック・無限ループ・OS リソース枯渇によるハングを防ぐ。
+    /// 非同期デッドロックはコンパイル時に保証できないため、
+    /// すべてのテストでこのラッパーを使用すること。
+    async fn with_timeout<F: std::future::Future<Output = ()>>(test_fn: F) {
+        tokio::time::timeout(Duration::from_secs(120), test_fn)
+            .await
+            .expect("test timed out after 120s — likely deadlock or resource exhaustion")
+    }
+
     // G-1: CreateWorkspace → WorkspaceCreated が返る
     #[tokio::test]
     async fn test_create_workspace() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace {
-            name: Some("ws1".to_string()),
-        })
-        .await
-        .unwrap();
-        match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, name } => {
-                assert_eq!(id, WorkspaceId(1));
-                assert_eq!(name, "ws1");
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace {
+                name: Some("ws1".to_string()),
+            })
+            .await
+            .unwrap();
+            match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, name } => {
+                    assert_eq!(id, WorkspaceId(1));
+                    assert_eq!(name, "ws1");
+                }
+                other => panic!("unexpected: {:?}", other),
             }
-            other => panic!("unexpected: {:?}", other),
-        }
+        })
+        .await;
     }
 
     // G-1: 名前なしワークスペースも作成できる（自動命名）
     #[tokio::test]
     async fn test_create_workspace_auto_name() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
-            .await
-            .unwrap();
-        match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { name, .. } => {
-                assert!(!name.is_empty(), "auto name should not be empty");
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { name, .. } => {
+                    assert!(!name.is_empty(), "auto name should not be empty");
+                }
+                other => panic!("unexpected: {:?}", other),
             }
-            other => panic!("unexpected: {:?}", other),
-        }
+        })
+        .await;
     }
 
     // G-2: CreateSurface → SurfaceCreated が返り WorkspaceId と紐づく
     #[tokio::test]
     async fn test_create_surface() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
-            .await
-            .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            other => panic!("unexpected: {:?}", other),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
-            .await
-            .unwrap();
-        match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, workspace } => {
-                assert_eq!(id, SurfaceId(1));
-                assert_eq!(workspace, ws_id);
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                other => panic!("unexpected: {:?}", other),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, workspace } => {
+                    assert_eq!(id, SurfaceId(1));
+                    assert_eq!(workspace, ws_id);
+                }
+                other => panic!("unexpected: {:?}", other),
             }
-            other => panic!("unexpected: {:?}", other),
-        }
+        })
+        .await;
     }
 
     // G-3: CreatePane → PaneCreated が返る (Windows のみ: PTY spawn が必要)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_create_pane() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
-            .await
-            .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size: TermSize { cols: 80, rows: 24 },
-        })
-        .await
-        .unwrap();
-        match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, surface } => {
-                assert_eq!(surface, surf_id);
-                assert_eq!(id, yatamux_protocol::types::PaneId(1));
+            match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, surface, .. } => {
+                    assert_eq!(surface, surf_id);
+                    assert_eq!(id, yatamux_protocol::types::PaneId(1));
+                }
+                other => panic!("unexpected: {:?}", other),
             }
-            other => panic!("unexpected: {:?}", other),
-        }
+        })
+        .await;
     }
 
     // G-5: PTY 出力がクライアントに Output メッセージとして届く (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_pane_output_forwarded_to_client() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
-            .await
-            .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size: TermSize { cols: 80, rows: 24 },
-        })
-        .await
-        .unwrap();
-        let pane_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        // cmd.exe が起動すると初期プロンプトが出力されるはず
-        let output = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let ServerMessage::Output { pane, data } = recv_one(&mut rx).await {
-                    if pane == pane_id && !data.is_empty() {
-                        return data;
+            let pane_id = match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            // cmd.exe が起動すると初期プロンプトが出力されるはず
+            let output = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let ServerMessage::Output { pane, data } = recv_one(&mut rx).await {
+                        if pane == pane_id && !data.is_empty() {
+                            return data;
+                        }
                     }
                 }
-            }
+            })
+            .await
+            .expect("timeout: no output from PTY");
+            assert!(!output.is_empty(), "initial PTY output should be non-empty");
         })
-        .await
-        .expect("timeout: no output from PTY");
-        assert!(!output.is_empty(), "initial PTY output should be non-empty");
+        .await;
     }
 
     // G-4: Input メッセージがペインに届く（Error が返らない）(Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_input_routed_to_pane_without_error() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+            let pane_id = match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            // 初期出力が来るまで待つ
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::Output { .. } = recv_one(&mut rx).await {
+                        break;
+                    }
+                }
+            })
+            .await
+            .ok();
+            // 入力送信
+            tx.send(ClientMessage::Input {
+                pane: pane_id,
+                data: b"echo test_input\r".to_vec(),
+            })
             .await
             .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size: TermSize { cols: 80, rows: 24 },
-        })
-        .await
-        .unwrap();
-        let pane_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        // 初期出力が来るまで待つ
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let ServerMessage::Output { .. } = recv_one(&mut rx).await {
-                    break;
+            // 500ms 以内に Error が来ないことを確認
+            let got_error = tokio::time::timeout(Duration::from_millis(500), async {
+                loop {
+                    if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
+                        return true;
+                    }
                 }
-            }
-        })
-        .await
-        .ok();
-        // 入力送信
-        tx.send(ClientMessage::Input {
-            pane: pane_id,
-            data: b"echo test_input\r".to_vec(),
-        })
-        .await
-        .unwrap();
-        // 500ms 以内に Error が来ないことを確認
-        let got_error = tokio::time::timeout(Duration::from_millis(500), async {
-            loop {
-                if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
-                    return true;
-                }
-            }
+            })
+            .await;
+            assert!(
+                got_error.is_err(),
+                "no error should be received after Input"
+            );
         })
         .await;
-        assert!(
-            got_error.is_err(),
-            "no error should be received after Input"
-        );
     }
 
     // G-6: ClosePane → PaneClosed が返る (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_close_pane() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
-            .await
-            .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size: TermSize { cols: 80, rows: 24 },
-        })
-        .await
-        .unwrap();
-        let pane_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::ClosePane { pane: pane_id })
-            .await
-            .unwrap();
-        let closed = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let ServerMessage::PaneClosed { pane } = recv_one(&mut rx).await {
-                    return pane;
+            let pane_id = match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::ClosePane { pane: pane_id })
+                .await
+                .unwrap();
+            let closed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PaneClosed { pane } = recv_one(&mut rx).await {
+                        return pane;
+                    }
                 }
-            }
+            })
+            .await
+            .expect("timeout waiting for PaneClosed");
+            assert_eq!(closed, pane_id);
         })
-        .await
-        .expect("timeout waiting for PaneClosed");
-        assert_eq!(closed, pane_id);
+        .await;
     }
 
     // G-7: Resize メッセージでエラーが返らない (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_resize_pane() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+            let pane_id = match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::Resize {
+                pane: pane_id,
+                size: TermSize {
+                    cols: 120,
+                    rows: 40,
+                },
+            })
             .await
             .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size: TermSize { cols: 80, rows: 24 },
-        })
-        .await
-        .unwrap();
-        let pane_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::Resize {
-            pane: pane_id,
-            size: TermSize {
-                cols: 120,
-                rows: 40,
-            },
-        })
-        .await
-        .unwrap();
-        let got_error = tokio::time::timeout(Duration::from_millis(300), async {
-            loop {
-                if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
-                    return true;
+            let got_error = tokio::time::timeout(Duration::from_millis(300), async {
+                loop {
+                    if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
+                        return true;
+                    }
                 }
-            }
+            })
+            .await;
+            assert!(got_error.is_err(), "Resize should not produce an error");
         })
         .await;
-        assert!(got_error.is_err(), "Resize should not produce an error");
     }
 
     // G-8: ListPanes → PanesListed に全ペインが含まれる (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_list_panes_returns_all_panes() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            let size = TermSize { cols: 80, rows: 24 };
+            // ペイン 1 作成
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size,
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+            let pane1_id = match recv_ctrl(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                other => panic!("expected PaneCreated, got {:?}", other),
+            };
+            // ペイン 2 作成（分割）
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: Some(pane1_id),
+                direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
+                size: TermSize { cols: 40, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        let size = TermSize { cols: 80, rows: 24 };
-        // ペイン 1 作成
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size,
-        })
-        .await
-        .unwrap();
-        let pane1_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        // ペイン 2 作成（分割）
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: Some(pane1_id),
-            direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
-            size: TermSize { cols: 40, rows: 24 },
-        })
-        .await
-        .unwrap();
-        match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { .. } => {}
-            _ => panic!(),
-        }
-        // ListPanes を送信
-        tx.send(ClientMessage::ListPanes).await.unwrap();
-        let panes = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let ServerMessage::PanesListed { panes } = recv_one(&mut rx).await {
-                    return panes;
-                }
+            match recv_ctrl(&mut rx).await {
+                ServerMessage::PaneCreated { .. } => {}
+                other => panic!("expected PaneCreated, got {:?}", other),
             }
+            // ListPanes を送信
+            tx.send(ClientMessage::ListPanes).await.unwrap();
+            let panes = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PanesListed { panes } = recv_one(&mut rx).await {
+                        return panes;
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for PanesListed");
+            assert_eq!(panes.len(), 2);
+            assert!(panes.iter().all(|p| p.surface == surf_id));
         })
-        .await
-        .expect("timeout waiting for PanesListed");
-        assert_eq!(panes.len(), 2);
-        assert!(panes.iter().all(|p| p.surface == surf_id));
+        .await;
     }
 
     // G-9: ペインなしで ListPanes → 空リストが返る
     #[tokio::test]
     async fn test_list_panes_returns_empty_when_no_panes() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::ListPanes).await.unwrap();
-        let panes = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let ServerMessage::PanesListed { panes } = recv_one(&mut rx).await {
-                    return panes;
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::ListPanes).await.unwrap();
+            let panes = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PanesListed { panes } = recv_one(&mut rx).await {
+                        return panes;
+                    }
                 }
-            }
+            })
+            .await
+            .expect("timeout waiting for PanesListed");
+            assert!(panes.is_empty());
         })
-        .await
-        .expect("timeout waiting for PanesListed");
-        assert!(panes.is_empty());
+        .await;
     }
 
     // G-10: 非アクティブペインへの Input でエラーが返らない (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_send_input_to_inactive_pane() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::CreateWorkspace { name: None })
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            let size = TermSize { cols: 80, rows: 24 };
+            // ペイン 1 作成
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size,
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let ws_id = match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+            let pane1_id = match recv_ctrl(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                other => panic!("expected PaneCreated, got {:?}", other),
+            };
+            // ペイン 2 作成（分割）
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: Some(pane1_id),
+                direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
+                size: TermSize { cols: 40, rows: 24 },
+                working_dir: None,
+            })
             .await
             .unwrap();
-        let surf_id = match recv_one(&mut rx).await {
-            ServerMessage::SurfaceCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        let size = TermSize { cols: 80, rows: 24 };
-        // ペイン 1 作成
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size,
-        })
-        .await
-        .unwrap();
-        let pane1_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        // ペイン 2 作成（分割）
-        tx.send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: Some(pane1_id),
-            direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
-            size: TermSize { cols: 40, rows: 24 },
-        })
-        .await
-        .unwrap();
-        let pane2_id = match recv_one(&mut rx).await {
-            ServerMessage::PaneCreated { id, .. } => id,
-            _ => panic!(),
-        };
-        let pane_ids = vec![pane1_id, pane2_id];
-        // 2 番目のペイン（非アクティブ）に Input を送信
-        tx.send(ClientMessage::Input {
-            pane: pane_ids[1],
-            data: b"echo hello\r".to_vec(),
-        })
-        .await
-        .unwrap();
-        // エラーが来ないことを確認
-        let got_error = tokio::time::timeout(Duration::from_millis(500), async {
-            loop {
-                if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
-                    return true;
+            let pane2_id = match recv_ctrl(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                other => panic!("expected PaneCreated, got {:?}", other),
+            };
+            let pane_ids = vec![pane1_id, pane2_id];
+            // 2 番目のペイン（非アクティブ）に Input を送信
+            tx.send(ClientMessage::Input {
+                pane: pane_ids[1],
+                data: b"echo hello\r".to_vec(),
+            })
+            .await
+            .unwrap();
+            // エラーが来ないことを確認
+            let got_error = tokio::time::timeout(Duration::from_millis(500), async {
+                loop {
+                    if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
+                        return true;
+                    }
                 }
-            }
+            })
+            .await;
+            assert!(
+                got_error.is_err(),
+                "Input to inactive pane should not produce an error"
+            );
         })
         .await;
-        assert!(
-            got_error.is_err(),
-            "Input to inactive pane should not produce an error"
-        );
+    }
+
+    // TC-C13-03: 存在しないペインに CapturePane → PaneContent { content: "" } が返る
+    #[tokio::test]
+    async fn test_capture_pane_nonexistent_pane_returns_empty() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CapturePane {
+                pane: PaneId(9999),
+                lines: 100,
+            })
+            .await
+            .unwrap();
+            let msg = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PaneContent { content, .. } = recv_one(&mut rx).await {
+                        return content;
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for PaneContent");
+            assert!(
+                msg.is_empty(),
+                "non-existent pane should return empty content"
+            );
+        })
+        .await;
+    }
+
+    // TC-C13-04: lines=0 に CapturePane → PaneContent { content: "" } が返る
+    #[tokio::test]
+    async fn test_capture_pane_lines_zero_returns_empty() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CapturePane {
+                pane: PaneId(1),
+                lines: 0,
+            })
+            .await
+            .unwrap();
+            let msg = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PaneContent { content, .. } = recv_one(&mut rx).await {
+                        return content;
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for PaneContent");
+            assert!(msg.is_empty(), "lines=0 should return empty content");
+        })
+        .await;
+    }
+
+    // TC-C13-05: 実在するペインに CapturePane → PaneContent が返る (Windows のみ)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_capture_pane_returns_pane_content() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
+            .await
+            .unwrap();
+            let pane_id = match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            // PTY 初期出力が届くまで待機
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let ServerMessage::Output { .. } = recv_one(&mut rx).await {
+                        break;
+                    }
+                }
+            })
+            .await
+            .ok();
+            // 少し待ってから CapturePane を送信
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.send(ClientMessage::CapturePane {
+                pane: pane_id,
+                lines: 100,
+            })
+            .await
+            .unwrap();
+            let content = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PaneContent { pane, content } = recv_one(&mut rx).await {
+                        if pane == pane_id {
+                            return content;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for PaneContent");
+            // PaneContent が返ること（空でも空でなくてもよい、エラーでないことを確認）
+            // cmd.exe の初期プロンプトが含まれるはずなので空でないことを確認
+            assert!(
+                !content.is_empty(),
+                "existing pane should return non-empty content after PTY output"
+            );
+        })
+        .await;
+    }
+
+    // TC-C14-03: working_dir 指定でペイン作成が成功する (Windows のみ)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_create_pane_with_working_dir_succeeds() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            // C:\Users は Windows に必ず存在するパス
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: Some("C:\\Users".to_string()),
+            })
+            .await
+            .unwrap();
+            // PaneCreated が返ること（エラーでないこと）を確認
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match recv_one(&mut rx).await {
+                        ServerMessage::PaneCreated { id, .. } => return Ok(id),
+                        ServerMessage::Error { message } => return Err(message),
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("timeout");
+            assert!(
+                result.is_ok(),
+                "CreatePane with valid working_dir should succeed, got error: {:?}",
+                result.err()
+            );
+        })
+        .await;
+    }
+
+    // TC-C14-04: 存在しないパスを working_dir に指定すると Error が返る (Windows のみ)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_create_pane_with_invalid_working_dir_returns_error() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: Some("Z:\\nonexistent_path_xyzzy_yatamux_test".to_string()),
+            })
+            .await
+            .unwrap();
+            // Error が返ること（PaneCreated が来ないこと）を確認
+            let got_error = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match recv_one(&mut rx).await {
+                        ServerMessage::Error { .. } => return true,
+                        ServerMessage::PaneCreated { .. } => return false,
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for Error or PaneCreated");
+            assert!(
+                got_error,
+                "CreatePane with non-existent working_dir should return Error"
+            );
+        })
+        .await;
     }
 
     // F-4: Detach 後もサーバーが応答する
     #[tokio::test]
     async fn test_server_continues_after_detach() {
-        let (tx, mut rx) = start_server();
-        tx.send(ClientMessage::Detach).await.unwrap();
-        tx.send(ClientMessage::CreateWorkspace {
-            name: Some("after-detach".to_string()),
-        })
-        .await
-        .unwrap();
-        match recv_one(&mut rx).await {
-            ServerMessage::WorkspaceCreated { name, .. } => {
-                assert_eq!(name, "after-detach");
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::Detach).await.unwrap();
+            tx.send(ClientMessage::CreateWorkspace {
+                name: Some("after-detach".to_string()),
+            })
+            .await
+            .unwrap();
+            match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { name, .. } => {
+                    assert_eq!(name, "after-detach");
+                }
+                other => panic!("unexpected after detach: {:?}", other),
             }
-            other => panic!("unexpected after detach: {:?}", other),
-        }
+        })
+        .await;
     }
 }

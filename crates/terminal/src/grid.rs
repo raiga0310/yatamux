@@ -104,7 +104,9 @@ impl ScrollbackBuffer {
 }
 
 /// 1行のセル列をプレーンテキストに変換する（末尾の空白を除去）
-fn row_to_text(row: &[Cell]) -> String {
+///
+/// サーバーサイドの `CapturePane` などから直接利用できるよう公開している。
+pub fn row_cells_to_text(row: &[Cell]) -> String {
     let line: String = row
         .iter()
         .filter_map(|cell| match &cell.content {
@@ -113,6 +115,10 @@ fn row_to_text(row: &[Cell]) -> String {
         })
         .collect();
     line.trim_end().to_string()
+}
+
+fn row_to_text(row: &[Cell]) -> String {
+    row_cells_to_text(row)
 }
 
 /// 仮想スクリーンバッファ
@@ -347,6 +353,27 @@ impl Grid {
             }
         }
         parts.join("\n")
+    }
+
+    /// 指定した行範囲（0-based, inclusive）をプレーンテキストとして抽出する。
+    ///
+    /// - 各行の末尾空白を除去する
+    /// - Continuation セル（CJK 全角文字の右半分）はスキップする
+    /// - 行は `\n` で連結する
+    /// - `row_start` > `row_end` の場合は空文字列を返す
+    /// - 範囲外はグリッドの行数にクランプされる
+    pub fn extract_text(&self, row_start: usize, row_end: usize) -> String {
+        if row_start > row_end {
+            return String::new();
+        }
+        let rows = self.rows as usize;
+        let start = row_start.min(rows.saturating_sub(1));
+        let end = row_end.min(rows.saturating_sub(1));
+        (start..=end)
+            .filter_map(|r| self.row(r as u16))
+            .map(row_to_text)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// 行頭からカーソル位置までを消去する (`EL 1`)
@@ -1128,5 +1155,56 @@ mod tests {
         let text = g.full_content_text();
         assert!(text.contains('A'), "スクロールバック行 'A' が含まれること");
         assert!(text.contains('B'), "画面行 'B' が含まれること");
+    }
+
+    // ── extract_text テスト (C-12) ──────────────────────────────────────────
+
+    use crate::vt::{feed_bytes, VtProcessor};
+    use vte::Parser;
+
+    fn feed_str_grid(g: &mut Grid, s: &str) {
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(g);
+        feed_bytes(&mut parser, &mut proc, s.as_bytes());
+    }
+
+    // TC-C12-04: extract_text が ASCII テキストを正しく抽出する
+    #[test]
+    fn test_extract_text_ascii() {
+        let mut g = default_grid(80, 24);
+        feed_str_grid(&mut g, "hello");
+        let text = g.extract_text(0, 0);
+        assert_eq!(text, "hello");
+    }
+
+    // TC-C12-05: extract_text が複数行の選択範囲を処理する
+    #[test]
+    fn test_extract_text_multi_row() {
+        let mut g = default_grid(80, 24);
+        feed_str_grid(&mut g, "hello\r\nworld");
+        let text = g.extract_text(0, 1);
+        assert_eq!(text, "hello\nworld");
+    }
+
+    // TC-C12-06: extract_text が CJK 全角文字の Continuation セルをスキップする
+    #[test]
+    fn test_extract_text_skips_continuation() {
+        let mut g = default_grid(80, 24);
+        // CJK 全角文字を書き込む（2セル消費）
+        g.write_char("日", CellStyle::default());
+        g.write_char("本", CellStyle::default());
+        let text = g.extract_text(0, 0);
+        // Continuation セルが含まれず、文字そのものだけが返る
+        assert_eq!(text, "日本");
+        assert!(!text.contains('\u{FFFF}')); // Continuation マーカーが含まれないこと
+    }
+
+    // TC-C12-extra: extract_text の行範囲が逆の場合は空文字列を返す
+    #[test]
+    fn test_extract_text_inverted_range() {
+        let mut g = default_grid(80, 24);
+        feed_str_grid(&mut g, "hello");
+        let text = g.extract_text(5, 0);
+        assert_eq!(text, "");
     }
 }

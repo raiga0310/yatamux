@@ -145,13 +145,58 @@ enum Commands {
     /// アクティブなペイン一覧を表示
     ListPanes,
     /// 指定ペインにキー入力を送信
+    ///
+    /// エスケープシーケンス: \n=LF, \r=CR, \t=TAB, \\=バックスラッシュ
+    ///
+    /// 注意: Windows パス（例: C:\Users\name）の \n や \r はエスケープ変換される。
+    /// パスをそのまま送る場合は --raw を使用すること。
+    ///
+    /// 例:
+    ///   yatamux send-keys --pane 1 --enter "cargo test"
+    ///   yatamux send-keys --pane 1 "echo hello\r"
+    ///   yatamux send-keys --pane 1 --raw --enter "C:\Users\raiga\dev"
+    #[command(verbatim_doc_comment)]
     SendKeys {
         /// 送信先ペイン ID
         #[arg(long, value_name = "ID")]
         pane: u32,
-        /// 送信するテキスト
+        /// 送信するテキスト（エスケープ変換あり: \n=LF \r=CR \t=TAB \\=バックスラッシュ）
         text: String,
+        /// 末尾に CR（Enter）を自動付加する
+        #[arg(long)]
+        enter: bool,
+        /// エスケープ変換を無効化してテキストをそのまま送信（Windows パスなどに使用）
+        #[arg(long)]
+        raw: bool,
     },
+    /// 指定ペインの内容を表示（スクロールバック末尾 N 行 + 現在画面）
+    CapturePane {
+        /// 対象ペイン ID
+        #[arg(long, default_value = "0")]
+        target: u32,
+        /// 取得する行数
+        #[arg(long, default_value = "100")]
+        lines: usize,
+    },
+    /// ペインを分割して新しいペインを作成
+    SplitPane {
+        /// 作業ディレクトリ
+        #[arg(long)]
+        dir: Option<String>,
+        /// 分割方向 (vertical / horizontal)
+        #[arg(long, value_enum, default_value = "vertical")]
+        direction: SplitDirectionArg,
+        /// 分割元ペイン ID（省略時は 0）
+        #[arg(long)]
+        target: Option<u32>,
+    },
+}
+
+/// CLI 用の分割方向
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum SplitDirectionArg {
+    Vertical,
+    Horizontal,
 }
 
 #[tokio::main]
@@ -165,9 +210,12 @@ async fn main() -> Result<()> {
     {
         if std::env::args().count() > 1 {
             // CLI 引数あり: 親コンソール（PowerShell 等）にアタッチして出力を有効化。
-            // `cli` フィーチャービルド（コンソールサブシステム）では既に stdout 有効だが
-            // 親コンソールに明示的に繋ぐことで出力先を統一する。
             attach_parent_console();
+            // UTF-8 コードページに切り替えて日本語文字化けを防ぐ。
+            unsafe {
+                use windows::Win32::System::Console::SetConsoleOutputCP;
+                let _ = SetConsoleOutputCP(65001);
+            }
         } else {
             // 引数なし = GUI 起動。`cli` フィーチャービルドはコンソールサブシステムなので
             // 起動時にコンソールウィンドウが開く。FreeConsole() で即座に解放する。
@@ -183,8 +231,27 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::ListPanes) => cli::list_panes(DEFAULT_SESSION).await,
-        Some(Commands::SendKeys { pane, text }) => {
-            cli::send_keys(DEFAULT_SESSION, pane, &text).await
+        Some(Commands::SendKeys {
+            pane,
+            text,
+            enter,
+            raw,
+        }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw).await,
+        Some(Commands::CapturePane { target, lines }) => {
+            cli::capture_pane(DEFAULT_SESSION, target, lines).await
+        }
+        Some(Commands::SplitPane {
+            dir,
+            direction,
+            target,
+        }) => {
+            let split_dir = match direction {
+                SplitDirectionArg::Vertical => yatamux_protocol::types::SplitDirection::Vertical,
+                SplitDirectionArg::Horizontal => {
+                    yatamux_protocol::types::SplitDirection::Horizontal
+                }
+            };
+            cli::split_pane(DEFAULT_SESSION, target.unwrap_or(0), split_dir, dir).await
         }
         None => {
             let app_config =

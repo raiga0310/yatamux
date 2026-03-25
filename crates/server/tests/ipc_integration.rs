@@ -251,6 +251,7 @@ async fn test_ipc_send_keys_routes_to_pane() {
             split_from: None,
             direction: None,
             size: TermSize { cols: 80, rows: 24 },
+            working_dir: None,
         })
         .await
         .unwrap();

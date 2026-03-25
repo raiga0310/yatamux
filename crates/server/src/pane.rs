@@ -6,12 +6,17 @@
 //!   3. VT 処理は PTY 読み取りタスク内でインライン実行
 
 use anyhow::Result;
+use portable_pty::ChildKiller;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
 
 use yatamux_protocol::types::{PaneId, TermSize};
 use yatamux_terminal::{CjkWidthConfig, Grid};
+
+// ListPanes でのデッドロックを避けるため、サイズとタイトルは std::sync::Mutex で保持する。
+// tokio::sync::Mutex の .lock().await は pane_output_rx が詰まると
+// handle_client_message 内でデッドロックを起こす可能性がある。
 
 /// ペイン書き込みタスクへの制御コマンド
 enum PtyCmd {
@@ -27,7 +32,21 @@ pub struct Pane {
     pub output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
     /// PTY コマンドチャネル（入力 / リサイズ）
     cmd_tx: mpsc::Sender<PtyCmd>,
-    pub title: Arc<Mutex<String>>,
+    /// タイトル文字列（std::sync::Mutex: ListPanes でブロッキングなし取得のため）
+    pub title: Arc<std::sync::Mutex<String>>,
+    /// 現在のペインサイズ（std::sync::Mutex: ListPanes でブロッキングなし取得のため）
+    pub size: Arc<std::sync::Mutex<TermSize>>,
+    /// 子プロセス kill ハンドル。Pane が Drop されるときに cmd.exe を終了させる。
+    /// 孤児プロセス（テスト後の残留 cmd.exe）を防ぐために保持する。
+    child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        if let Some(mut killer) = self.child_killer.take() {
+            let _ = killer.kill();
+        }
+    }
 }
 
 impl Pane {
@@ -38,14 +57,20 @@ impl Pane {
         width_config: CjkWidthConfig,
         client_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
         client_notification_tx: mpsc::Sender<(PaneId, String)>,
+        working_dir: Option<String>,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
-        let title = Arc::new(Mutex::new(String::new()));
+        let title = Arc::new(std::sync::Mutex::new(String::new()));
+        let pane_size = Arc::new(std::sync::Mutex::new(size));
 
         let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<Vec<u8>>(256);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCmd>(64);
 
-        let mut pty = yatamux_terminal::PtySession::spawn(size, None, pty_output_tx)?;
+        let mut pty = yatamux_terminal::PtySession::spawn(size, None, pty_output_tx, working_dir)?;
+
+        // Drop 時に子プロセスを kill するためのハンドルを先に取得する。
+        // take_child() の後は child が None になるため、必ず前に呼ぶこと。
+        let child_killer = pty.clone_child_killer();
 
         // 子プロセス終了監視タスク（C-9）
         //
@@ -96,7 +121,7 @@ impl Pane {
                     yatamux_terminal::vt::feed_bytes(&mut parser, &mut proc, &data);
 
                     if let Some(t) = proc.title.take() {
-                        *title_clone.lock().await = t;
+                        *title_clone.lock().unwrap() = t;
                     }
                     (proc.notification.take(), proc.command_finished, proc.bell)
                 };
@@ -132,6 +157,8 @@ impl Pane {
             output_tx: client_output_tx,
             cmd_tx,
             title,
+            size: pane_size,
+            child_killer,
         })
     }
 
@@ -145,6 +172,7 @@ impl Pane {
 
     /// ペインをリサイズ（グリッドと PTY の両方）
     pub async fn resize(&self, size: TermSize) -> Result<()> {
+        *self.size.lock().unwrap() = size;
         self.grid.lock().await.resize(size.cols, size.rows);
         self.cmd_tx
             .send(PtyCmd::Resize(size))

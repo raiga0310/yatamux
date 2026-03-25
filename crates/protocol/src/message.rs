@@ -33,6 +33,9 @@ pub enum ClientMessage {
         split_from: Option<PaneId>,
         direction: Option<SplitDirection>,
         size: TermSize,
+        /// 作業ディレクトリ（None の場合はサーバープロセスの CWD を引き継ぐ）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
 
     /// ペインにキー入力を送信
@@ -52,6 +55,9 @@ pub enum ClientMessage {
 
     /// 全ペインの情報一覧を要求
     ListPanes,
+
+    /// ペインの内容（スクロールバック末尾 N 行 + 現在画面）を要求
+    CapturePane { pane: PaneId, lines: usize },
 }
 
 /// サーバー → クライアント メッセージ
@@ -68,7 +74,16 @@ pub enum ServerMessage {
     },
 
     /// ペイン作成完了
-    PaneCreated { id: PaneId, surface: SurfaceId },
+    PaneCreated {
+        id: PaneId,
+        surface: SurfaceId,
+        /// 分割元ペイン ID（IPC 経由の CreatePane で設定される）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split_from: Option<PaneId>,
+        /// 分割方向（IPC 経由の CreatePane で設定される）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<SplitDirection>,
+    },
 
     /// ペインからの出力データ（VT シーケンス）
     Output {
@@ -94,4 +109,7 @@ pub enum ServerMessage {
 
     /// ListPanes への応答
     PanesListed { panes: Vec<PaneInfo> },
+
+    /// CapturePane への応答
+    PaneContent { pane: PaneId, content: String },
 }
