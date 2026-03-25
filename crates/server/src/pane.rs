@@ -47,6 +47,19 @@ impl Pane {
 
         let mut pty = yatamux_terminal::PtySession::spawn(size, None, pty_output_tx)?;
 
+        // 子プロセス終了監視タスク（C-9）
+        //
+        // Windows の ConPTY では子プロセスが exit しても PTY master の reader が
+        // EOF を返さないため、出力読み取りタスクのループ終了には頼れない。
+        // child.wait()（WaitForSingleObject）で直接プロセス終了を検知する。
+        if let Some(mut child) = pty.take_child() {
+            let exit_tx = client_notification_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = child.wait();
+                let _ = exit_tx.blocking_send((id, "Process exited".to_string()));
+            });
+        }
+
         // PTY 書き込み / リサイズタスク
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
@@ -109,10 +122,7 @@ impl Pane {
                     break;
                 }
             }
-            // PTY が終了したことをクライアントに通知（F-4a）
-            let _ = client_notification_tx
-                .send((id, "Process exited".to_string()))
-                .await;
+            // 出力タスク終了（通知は child watcher タスクが担当）
             info!("Pane {:?} output task ended", id);
         });
 
