@@ -3,6 +3,8 @@
 //! tmux の Grid / zellij の Grid を参考にした CJK 対応実装。
 //! 全角文字の行境界折り返し（DECAWM + LCF）を正しく処理する。
 
+use std::collections::VecDeque;
+
 use crate::cell::{Cell, CellStyle};
 use crate::width::CjkWidthConfig;
 
@@ -68,6 +70,13 @@ pub struct Grid {
     scroll_top: u16,
     /// DECSTBM スクロール領域の下端行（0 始まり、inclusive）
     scroll_bottom: u16,
+    /// スクロールバックバッファ（画面外に出た行。インデックス 0 が最古）
+    scrollback: VecDeque<Vec<Cell>>,
+}
+
+impl Grid {
+    /// スクロールバックバッファの最大行数
+    pub const SCROLLBACK_MAX: usize = 5000;
 }
 
 /// メインスクリーンのスナップショット（オルタネートスクリーン切り替え用）
@@ -93,6 +102,7 @@ impl Grid {
             saved_main: None,
             scroll_top: 0,
             scroll_bottom,
+            scrollback: VecDeque::new(),
         }
     }
 
@@ -250,6 +260,16 @@ impl Grid {
         self.scroll_bottom
     }
 
+    /// スクロールバックに蓄積された行数
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// スクロールバックの行を取得する（0 が最古、len-1 が最新）
+    pub fn scrollback_row(&self, idx: usize) -> Option<&Vec<Cell>> {
+        self.scrollback.get(idx)
+    }
+
     /// 行頭からカーソル位置までを消去する (`EL 1`)
     pub fn erase_line_left(&mut self) {
         let row = self.cursor.row as usize;
@@ -398,11 +418,27 @@ impl Grid {
     ///
     /// `scroll_top`–`scroll_bottom` の範囲のみ n 行上にシフトし、
     /// 空いた最下 n 行を空白で埋める。領域外の行は変化しない。
+    /// フルスクリーンスクロール（scroll_top==0 かつ scroll_bottom==rows-1）かつ
+    /// メインスクリーン表示中のとき、画面外に出た行をスクロールバックに保存する。
     pub fn scroll_up(&mut self, n: u16) {
         let top = self.scroll_top as usize;
         let bot = self.scroll_bottom as usize;
         let region_len = bot + 1 - top;
         let n = (n as usize).min(region_len);
+
+        // フルスクリーンかつメインスクリーンのときのみスクロールバックに保存
+        let is_full_screen = self.scroll_top == 0
+            && self.scroll_bottom == self.rows.saturating_sub(1)
+            && self.saved_main.is_none();
+        if is_full_screen {
+            for i in 0..n {
+                let row = self.cells[i].clone();
+                self.scrollback.push_back(row);
+                if self.scrollback.len() > Self::SCROLLBACK_MAX {
+                    self.scrollback.pop_front();
+                }
+            }
+        }
 
         self.cells[top..=bot].rotate_left(n);
         for row in self.cells[top..=bot].iter_mut().rev().take(n) {
@@ -744,5 +780,70 @@ mod tests {
         let nfc = normalize_nfc(nfd);
         assert_eq!(nfc, "아"); // NFC: U+C544
         assert_ne!(nfc, nfd); // 変換されていることを確認
+    }
+
+    // TC-01: フルスクリーンスクロール時に行がスクロールバックに保存される
+    #[test]
+    fn test_scrollback_full_screen_scroll() {
+        let mut g = default_grid(10, 3);
+        g.write_char("A", CellStyle::default()); // row 0 に "A"
+        g.scroll_up(1);
+        assert_eq!(g.scrollback_len(), 1);
+        let row = g.scrollback_row(0).unwrap();
+        match &row[0].content {
+            CellContent::Grapheme { text, .. } => assert_eq!(text, "A"),
+            _ => panic!("expected 'A' in scrollback row 0"),
+        }
+    }
+
+    // TC-02: スクロール領域が全画面でない場合はスクロールバックに保存しない
+    #[test]
+    fn test_scrollback_subregion_no_save() {
+        let mut g = default_grid(10, 3);
+        g.set_scroll_region(2, 3); // 1 始まり → row 1..=2 のみスクロール
+        g.move_cursor(0, 1);
+        g.write_char("A", CellStyle::default());
+        g.scroll_up(1);
+        assert_eq!(g.scrollback_len(), 0);
+    }
+
+    // TC-03: スクロールバックの上限（5000 行）を超えたら古い行を捨てる
+    #[test]
+    fn test_scrollback_max_lines() {
+        let mut g = default_grid(10, 3);
+        for _ in 0..=5001 {
+            g.scroll_up(1);
+        }
+        assert_eq!(g.scrollback_len(), Grid::SCROLLBACK_MAX);
+    }
+
+    // TC-04: 複数行スクロール時は複数行がスクロールバックに保存される（順序確認）
+    #[test]
+    fn test_scrollback_multi_line_order() {
+        let mut g = default_grid(10, 3);
+        g.write_char("A", CellStyle::default()); // row 0
+        g.move_cursor(0, 1);
+        g.write_char("B", CellStyle::default()); // row 1
+        g.scroll_up(2);
+        assert_eq!(g.scrollback_len(), 2);
+        // 古い行（A）が先、新しい行（B）が後
+        match &g.scrollback_row(0).unwrap()[0].content {
+            CellContent::Grapheme { text, .. } => assert_eq!(text, "A"),
+            _ => panic!("expected 'A' at scrollback[0]"),
+        }
+        match &g.scrollback_row(1).unwrap()[0].content {
+            CellContent::Grapheme { text, .. } => assert_eq!(text, "B"),
+            _ => panic!("expected 'B' at scrollback[1]"),
+        }
+    }
+
+    // TC-05: オルタネートスクリーン中はスクロールバックに保存しない
+    #[test]
+    fn test_scrollback_no_save_in_alternate_screen() {
+        let mut g = default_grid(10, 3);
+        g.write_char("A", CellStyle::default());
+        g.enter_alternate_screen();
+        g.scroll_up(1);
+        assert_eq!(g.scrollback_len(), 0);
     }
 }
