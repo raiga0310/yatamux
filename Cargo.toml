@@ -54,6 +54,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "yatamux"
 version = "0.1.0"
 edition = "2021"
+description = "CJK-aware terminal multiplexer for Windows"
+repository = "https://github.com/raiga0310/cmux-win"
+license = "MIT"
 
 [[bin]]
 name = "yatamux"
