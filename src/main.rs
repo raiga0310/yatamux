@@ -86,6 +86,7 @@ use anyhow::{bail, Result};
 
 mod app;
 mod cli;
+mod config;
 mod layout_config;
 
 /// デフォルトセッション名（IPC パイプ名のサフィックス）
@@ -129,7 +130,10 @@ async fn main() -> Result<()> {
                 .position(|a| a == "--layout")
                 .and_then(|i| args.get(i + 1))
                 .cloned();
-            app::run(layout_name).await
+            // アプリ設定を読み込む（ファイルが存在しない場合はデフォルト）
+            let app_config =
+                config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
+            app::run(layout_name, app_config).await
         }
     }
 }

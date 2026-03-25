@@ -24,6 +24,7 @@ use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
 use yatamux_terminal::TerminalSink;
 
+use crate::config::AppConfig;
 use crate::layout_config::{LayoutConfig, SplitDir};
 use crate::DEFAULT_SESSION;
 
@@ -39,7 +40,7 @@ const DEFAULT_ROWS: u16 = 24;
 ///
 /// `layout_name` が `Some` の場合、`%APPDATA%\yatamux\layouts\<name>.toml` を読み込み
 /// 宣言的レイアウトで起動する。`None` の場合はセッション復元を試みる。
-pub async fn run(layout_name: Option<String>) -> Result<()> {
+pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<()> {
     let size = TermSize {
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
@@ -179,6 +180,7 @@ pub async fn run(layout_name: Option<String>) -> Result<()> {
     // ── サーバー出力 + ペイン分割ハンドラ ───────────────────────────────
     let pane_store2 = Arc::clone(&pane_store);
     let notif_backend2 = Arc::clone(&notif_backend);
+    let hooks = app_config.hooks;
     tokio::spawn(async move {
         let notif_backend = notif_backend2;
         // 分割リクエスト待ちキュー (parent_id, direction, new_size)
@@ -254,6 +256,20 @@ pub async fn run(layout_name: Option<String>) -> Result<()> {
                             }
                         }
                         ServerMessage::PaneCreated { id: new_id, .. } => {
+                            // on_pane_created フックを発火（fire-and-forget）
+                            if let Some(cmd) = &hooks.on_pane_created {
+                                if crate::config::HooksConfig::is_enabled(&Some(cmd.clone())) {
+                                    let cmd = cmd.clone();
+                                    let pane_id_str = new_id.0.to_string();
+                                    tokio::spawn(async move {
+                                        let _ = tokio::process::Command::new("cmd")
+                                            .args(["/C", &cmd])
+                                            .env("YATAMUX_PANE_ID", pane_id_str)
+                                            .env("YATAMUX_SESSION", DEFAULT_SESSION)
+                                            .spawn();
+                                    });
+                                }
+                            }
                             if pending_float {
                                 // フローティングペイン作成完了
                                 pending_float = false;
@@ -291,6 +307,20 @@ pub async fn run(layout_name: Option<String>) -> Result<()> {
                             }
                         }
                         ServerMessage::PaneClosed { pane } => {
+                            // on_pane_closed フックを発火（fire-and-forget）
+                            if let Some(cmd) = &hooks.on_pane_closed {
+                                if crate::config::HooksConfig::is_enabled(&Some(cmd.clone())) {
+                                    let cmd = cmd.clone();
+                                    let pane_id_str = pane.0.to_string();
+                                    tokio::spawn(async move {
+                                        let _ = tokio::process::Command::new("cmd")
+                                            .args(["/C", &cmd])
+                                            .env("YATAMUX_PANE_ID", pane_id_str)
+                                            .env("YATAMUX_SESSION", DEFAULT_SESSION)
+                                            .spawn();
+                                    });
+                                }
+                            }
                             sinks.remove(&pane);
                             let mut store = pane_store2.lock().unwrap();
                             store.grids.remove(&pane);
