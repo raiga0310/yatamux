@@ -52,6 +52,9 @@ pub enum ClientMessage {
 
     /// 全ペインの情報一覧を要求
     ListPanes,
+
+    /// ペインの内容（スクロールバック末尾 N 行 + 現在画面）を要求
+    CapturePane { pane: PaneId, lines: usize },
 }
 
 /// サーバー → クライアント メッセージ
@@ -94,4 +97,7 @@ pub enum ServerMessage {
 
     /// ListPanes への応答
     PanesListed { panes: Vec<PaneInfo> },
+
+    /// CapturePane への応答
+    PaneContent { pane: PaneId, content: String },
 }

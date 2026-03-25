@@ -50,6 +50,41 @@ pub async fn list_panes(session: &str) -> Result<()> {
     Ok(())
 }
 
+/// `yatamux capture-pane --target <id> --lines <n>` — ペインの内容を表示する
+///
+/// スクロールバック末尾 N 行 + 現在画面の内容を標準出力に表示する。
+pub async fn capture_pane(session: &str, pane_id: u32, lines: usize) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+
+    conn.tx
+        .send(ClientMessage::CapturePane {
+            pane: PaneId(pane_id),
+            lines,
+        })
+        .await?;
+
+    let content = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::PaneContent { content, .. }) => return Ok(content),
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PaneContent"
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for pane content")??;
+
+    print!("{}", content);
+    Ok(())
+}
+
 /// `yatamux send-keys --pane <id> <text>` — 指定ペインにテキストを送信する
 ///
 /// `\n` は LF (0x0A)、`\r` は CR (0x0D) として解釈する。

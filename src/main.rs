@@ -152,6 +152,15 @@ enum Commands {
         /// 送信するテキスト
         text: String,
     },
+    /// 指定ペインの内容を表示（スクロールバック末尾 N 行 + 現在画面）
+    CapturePane {
+        /// 対象ペイン ID
+        #[arg(long, default_value = "0")]
+        target: u32,
+        /// 取得する行数
+        #[arg(long, default_value = "100")]
+        lines: usize,
+    },
 }
 
 #[tokio::main]
@@ -185,6 +194,9 @@ async fn main() -> Result<()> {
         Some(Commands::ListPanes) => cli::list_panes(DEFAULT_SESSION).await,
         Some(Commands::SendKeys { pane, text }) => {
             cli::send_keys(DEFAULT_SESSION, pane, &text).await
+        }
+        Some(Commands::CapturePane { target, lines }) => {
+            cli::capture_pane(DEFAULT_SESSION, target, lines).await
         }
         None => {
             let app_config =

@@ -235,6 +235,44 @@ impl Server {
                 // TODO: グリッドの現在状態を送信
             }
 
+            ClientMessage::CapturePane { pane, lines } => {
+                let content = if let Some(p) = self.panes.get(&pane) {
+                    let grid = p.grid.lock().await;
+                    if lines == 0 {
+                        String::new()
+                    } else {
+                        // スクロールバック末尾 + 現在画面を取得
+                        let sb_len = grid.scrollback_len();
+                        let rows = grid.rows() as usize;
+                        let total_rows = sb_len + rows;
+                        // lines 行分だけ末尾から取得する
+                        let skip = total_rows.saturating_sub(lines);
+
+                        let mut parts: Vec<String> = Vec::new();
+                        // スクロールバック行
+                        for i in skip..sb_len {
+                            if let Some(row) = grid.scrollback_row(i) {
+                                parts.push(yatamux_terminal::grid::row_cells_to_text(row));
+                            }
+                        }
+                        // 画面行（スクロールバック分を差し引いた分）
+                        let screen_skip = skip.saturating_sub(sb_len);
+                        for r in screen_skip..rows {
+                            if let Some(row) = grid.row(r as u16) {
+                                parts.push(yatamux_terminal::grid::row_cells_to_text(row));
+                            }
+                        }
+                        parts.join("\n")
+                    }
+                } else {
+                    String::new()
+                };
+                self.client_tx
+                    .send(ServerMessage::PaneContent { pane, content })
+                    .await
+                    .context("Failed to send PaneContent")?;
+            }
+
             ClientMessage::ListPanes => {
                 // サーフェスごとに属するペインを収集（非同期ロックのためクロージャ外で処理）
                 let mut panes: Vec<PaneInfo> = Vec::new();

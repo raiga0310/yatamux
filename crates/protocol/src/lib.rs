@@ -77,4 +77,40 @@ mod tests {
         assert_eq!(info.rows, 40);
         assert_eq!(info.title, "nvim");
     }
+
+    // TC-C13-01: CapturePane メッセージが正しくシリアライズ/デシリアライズされる
+    #[test]
+    fn capture_pane_message_roundtrip() {
+        let msg = ClientMessage::CapturePane {
+            pane: PaneId(1),
+            lines: 50,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::CapturePane { pane, lines } => {
+                assert_eq!(pane, PaneId(1));
+                assert_eq!(lines, 50);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // TC-C13-02: PaneContent メッセージが正しくシリアライズ/デシリアライズされる
+    #[test]
+    fn pane_content_message_roundtrip() {
+        let msg = ServerMessage::PaneContent {
+            pane: PaneId(2),
+            content: "hello\nworld".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ServerMessage::PaneContent { pane, content } => {
+                assert_eq!(pane, PaneId(2));
+                assert_eq!(content, "hello\nworld");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
 }

@@ -104,7 +104,9 @@ impl ScrollbackBuffer {
 }
 
 /// 1行のセル列をプレーンテキストに変換する（末尾の空白を除去）
-fn row_to_text(row: &[Cell]) -> String {
+///
+/// サーバーサイドの `CapturePane` などから直接利用できるよう公開している。
+pub fn row_cells_to_text(row: &[Cell]) -> String {
     let line: String = row
         .iter()
         .filter_map(|cell| match &cell.content {
@@ -113,6 +115,10 @@ fn row_to_text(row: &[Cell]) -> String {
         })
         .collect();
     line.trim_end().to_string()
+}
+
+fn row_to_text(row: &[Cell]) -> String {
+    row_cells_to_text(row)
 }
 
 /// 仮想スクリーンバッファ
