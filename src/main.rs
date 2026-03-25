@@ -85,6 +85,41 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+/// 親プロセスのコンソール（PowerShell 等）にアタッチし、
+/// `println!` / clap の出力が届くよう stdout/stderr を CONOUT$ にリダイレクトする。
+///
+/// リリースビルドは `windows_subsystem = "windows"` により stdout が無効なため、
+/// `--help` / `--version` などの表示前にこの関数を呼ぶ必要がある。
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    unsafe {
+        // 親プロセス（PowerShell 等）のコンソールにアタッチ
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() {
+            // CONOUT$ への書き込みハンドルを取得し stdout/stderr に設定する。
+            // AttachConsole だけでは GUI サブシステムプロセスの GetStdHandle が
+            // NULL のままのため SetStdHandle で上書きが必要。
+            if let Ok(h) = CreateFileW(
+                windows::core::w!("CONOUT$"),
+                0x4000_0000, // GENERIC_WRITE
+                FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            ) {
+                let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+                let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+            }
+        }
+    }
+}
+
 mod app;
 mod cli;
 mod config;
@@ -125,6 +160,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    // 引数がある場合: 親コンソールにアタッチして clap の出力（--help 等）を有効化する
+    // (release ビルドの windows_subsystem = "windows" では stdout がデフォルト無効)
+    #[cfg(windows)]
+    if std::env::args().count() > 1 {
+        attach_parent_console();
+    }
 
     let cli = Cli::parse();
 

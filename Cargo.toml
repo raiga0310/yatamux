@@ -82,6 +82,11 @@ serde = { workspace = true }
 
 clap = { workspace = true }
 yatamux-server = { path = "crates/server" }
+
+[target.'cfg(windows)'.dependencies]
+# AttachConsole + CreateFileW("CONOUT$") + SetStdHandle で
+# リリース GUI ビルドでも --help などの出力を親コンソールに届ける
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security"] }
 yatamux-client = { path = "crates/client" }
 yatamux-protocol = { path = "crates/protocol" }
 yatamux-terminal = { path = "crates/terminal" }

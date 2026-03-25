@@ -1059,6 +1059,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "windows",
  "yatamux-client",
  "yatamux-protocol",
  "yatamux-server",
