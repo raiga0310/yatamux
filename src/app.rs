@@ -24,6 +24,7 @@ use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
 use yatamux_terminal::TerminalSink;
 
+use crate::layout_config::{LayoutConfig, SplitDir};
 use crate::DEFAULT_SESSION;
 
 /// デフォルトのターミナルサイズ
@@ -35,7 +36,10 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
 /// アプリを起動する
-pub async fn run() -> Result<()> {
+///
+/// `layout_name` が `Some` の場合、`%APPDATA%\yatamux\layouts\<name>.toml` を読み込み
+/// 宣言的レイアウトで起動する。`None` の場合はセッション復元を試みる。
+pub async fn run(layout_name: Option<String>) -> Result<()> {
     let size = TermSize {
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
@@ -95,9 +99,28 @@ pub async fn run() -> Result<()> {
 
     tracing::info!("Pane {:?} created, opening window", pane_id);
 
-    // ── セッション復元 or 初期ペインのみ ────────────────────────────────
+    // ── セッション復元 / レイアウト設定 / 初期ペインのみ ─────────────────
     let session_path = LayoutSnapshot::default_path();
-    let (layout, sinks_vec, active_pane) = if let Ok(snap) = LayoutSnapshot::load(&session_path) {
+    let (layout, sinks_vec, active_pane) = if let Some(name) = layout_name {
+        // --layout <name> が指定された場合はレイアウト設定を優先
+        let config_path = LayoutConfig::layout_path(&name);
+        match LayoutConfig::load(&config_path) {
+            Ok(config) => {
+                tracing::info!("レイアウト設定を適用します: {}", config_path.display());
+                apply_layout_config(config, pane_id, surf_id, size, &client_tx, &mut server_rx)
+                    .await?
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "レイアウト設定の読み込みに失敗しました（{}）: {:#}",
+                    config_path.display(),
+                    e
+                );
+                let sink = TerminalSink::new(size.cols, size.rows);
+                (LayoutNode::Leaf(pane_id), vec![(pane_id, sink)], pane_id)
+            }
+        }
+    } else if let Ok(snap) = LayoutSnapshot::load(&session_path) {
         tracing::info!("セッションを復元します");
         let mut old_to_new: HashMap<PaneId, PaneId> = HashMap::new();
         let (layout, sinks_vec) = restore_node(
@@ -306,6 +329,72 @@ pub async fn run() -> Result<()> {
     .await??;
 
     Ok(())
+}
+
+/// 宣言的レイアウト設定を適用して初期ペインを構築する
+///
+/// `config.panes` を順番に処理し、各ペインを作成・分割する。
+/// 各ペインの `command` が設定されている場合はシェルへ入力として送信する。
+/// 戻り値は `(LayoutNode, Vec<(PaneId, TerminalSink)>, active_pane)` のタプル。
+async fn apply_layout_config(
+    config: LayoutConfig,
+    first_pane: PaneId,
+    surf_id: yatamux_protocol::types::SurfaceId,
+    size: TermSize,
+    client_tx: &mpsc::Sender<ClientMessage>,
+    server_rx: &mut mpsc::Receiver<ServerMessage>,
+) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>, PaneId)> {
+    let mut layout = LayoutNode::Leaf(first_pane);
+    let mut sinks: Vec<(PaneId, TerminalSink)> =
+        vec![(first_pane, TerminalSink::new(size.cols, size.rows))];
+    let mut active = first_pane;
+
+    // 最初のペインの command を送信
+    if let Some(pane_cfg) = config.panes.first() {
+        if let Some(cmd) = &pane_cfg.command {
+            let mut input = cmd.clone().into_bytes();
+            input.push(b'\r');
+            let _ = client_tx
+                .send(ClientMessage::Input {
+                    pane: first_pane,
+                    data: input,
+                })
+                .await;
+        }
+    }
+
+    // 2つ目以降のペインを順番に作成
+    for pane_cfg in config.panes.iter().skip(1) {
+        let direction = match pane_cfg.split {
+            Some(SplitDir::Horizontal) => SplitDirection::Horizontal,
+            Some(SplitDir::Vertical) | None => SplitDirection::Vertical,
+        };
+        client_tx
+            .send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: Some(active),
+                direction: Some(direction),
+                size,
+            })
+            .await?;
+        let new_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
+        sinks.push((new_id, TerminalSink::new(size.cols, size.rows)));
+        layout.split_leaf(active, new_id, direction);
+        active = new_id;
+
+        if let Some(cmd) = &pane_cfg.command {
+            let mut input = cmd.clone().into_bytes();
+            input.push(b'\r');
+            let _ = client_tx
+                .send(ClientMessage::Input {
+                    pane: new_id,
+                    data: input,
+                })
+                .await;
+        }
+    }
+
+    Ok((layout, sinks, active))
 }
 
 /// 保存済みレイアウトを再帰的に再構築する
