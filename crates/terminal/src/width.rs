@@ -21,6 +21,8 @@ pub struct CjkWidthConfig {
     pub ambiguous: AmbiguousWidth,
     /// コードポイント範囲ごとの幅オーバーライド: (start, end_inclusive, width)
     pub overrides: Vec<(u32, u32, u8)>,
+    /// Nerd Fonts グリフ（U+E000–U+F8FF）を 2 セル幅として扱うオプション
+    pub nerd_fonts_wide: bool,
 }
 
 impl CjkWidthConfig {
@@ -36,6 +38,11 @@ impl CjkWidthConfig {
             if cp >= start && cp <= end {
                 return width;
             }
+        }
+
+        // Nerd Fonts グリフ（U+E000–U+F8FF）
+        if self.nerd_fonts_wide && (0xE000..=0xF8FF).contains(&cp) {
+            return 2;
         }
 
         // 半角カタカナ濁点・半濁点は端末で独立 1 セルを占有する
@@ -70,8 +77,16 @@ impl CjkWidthConfig {
         s.graphemes(true)
             .map(|g| {
                 let chars: Vec<char> = g.chars().collect();
-                // VS16 絵文字表示セレクタが含まれる → 2 セル幅
+                // VS-15 (U+FE0E): テキスト表示セレクタ → 1 セル幅
+                if chars.contains(&'\u{FE0E}') {
+                    return 1;
+                }
+                // VS-16 (U+FE0F): 絵文字表示セレクタ → 2 セル幅
                 if chars.contains(&'\u{FE0F}') {
+                    return 2;
+                }
+                // ZWJ (U+200D) を含む結合絵文字シーケンス → 2 セル幅
+                if chars.contains(&'\u{200D}') {
                     return 2;
                 }
                 // グラフィーム内の全コードポイント幅を合算
@@ -142,10 +157,12 @@ mod tests {
         let narrow_cfg = CjkWidthConfig {
             ambiguous: AmbiguousWidth::Narrow,
             overrides: vec![],
+            nerd_fonts_wide: false,
         };
         let wide_cfg = CjkWidthConfig {
             ambiguous: AmbiguousWidth::Wide,
             overrides: vec![],
+            nerd_fonts_wide: false,
         };
 
         // ─ (U+2500) は Ambiguous
@@ -159,6 +176,7 @@ mod tests {
             ambiguous: AmbiguousWidth::Narrow,
             // ギリシャ文字を強制的に 2 セル
             overrides: vec![(0x0391, 0x03C9, 2)],
+            nerd_fonts_wide: false,
         };
         assert_eq!(cfg.char_width('α'), 2);
     }
@@ -215,6 +233,56 @@ mod tests {
         let cfg = CjkWidthConfig::default();
         // ♀ (U+2640, Ambiguous=1) + VS16 (U+FE0F) → 絵文字表示 = 2 セル
         assert_eq!(cfg.str_width("♀\u{FE0F}"), 2);
+    }
+
+    // TC-01: ZWJ 結合絵文字の str_width は 2
+    #[test]
+    fn test_zwj_sequence_str_width() {
+        let cfg = CjkWidthConfig::default();
+        // 👨 (2) + ZWJ + 💻 (2) → ZWJ シーケンス全体 = 2 セル
+        assert_eq!(cfg.str_width("👨\u{200D}💻"), 2);
+    }
+
+    // TC-02: VS-16 を含むグラフィームは 2 セル（既存テスト TC-7 と同等、明示的に確認）
+    #[test]
+    fn test_vs16_emoji_presentation_width() {
+        let cfg = CjkWidthConfig::default();
+        assert_eq!(cfg.str_width("♀\u{FE0F}"), 2);
+    }
+
+    // TC-03: VS-15 を含むグラフィームは 1 セル
+    #[test]
+    fn test_vs15_text_presentation_width() {
+        let cfg = CjkWidthConfig::default();
+        // ♀ (U+2640) + VS-15 (U+FE0E) → テキスト表示 = 1 セル
+        assert_eq!(cfg.str_width("♀\u{FE0E}"), 1);
+    }
+
+    // TC-07: BiDi 制御文字は幅 0
+    #[test]
+    fn test_bidi_control_chars_are_zero_width() {
+        let cfg = CjkWidthConfig::default();
+        assert_eq!(cfg.char_width('\u{200E}'), 0); // LRM
+        assert_eq!(cfg.char_width('\u{200F}'), 0); // RLM
+        assert_eq!(cfg.char_width('\u{202A}'), 0); // LRE
+    }
+
+    // TC-08: Nerd Fonts グリフが nerd_fonts_wide=true で幅 2
+    #[test]
+    fn test_nerd_fonts_wide_true() {
+        let cfg = CjkWidthConfig {
+            nerd_fonts_wide: true,
+            ..Default::default()
+        };
+        assert_eq!(cfg.char_width('\u{E000}'), 2);
+        assert_eq!(cfg.char_width('\u{F8FF}'), 2);
+    }
+
+    // TC-09: Nerd Fonts グリフがデフォルト（nerd_fonts_wide=false）で幅 1
+    #[test]
+    fn test_nerd_fonts_wide_false() {
+        let cfg = CjkWidthConfig::default();
+        assert_eq!(cfg.char_width('\u{E001}'), 1);
     }
 
     // C-9: NFD 韓国語 → NFC 変換
