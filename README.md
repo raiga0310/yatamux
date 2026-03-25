@@ -35,6 +35,14 @@ yatamux addresses these on Windows by using native APIs directly: ConPTY for PTY
 | **Dark title bar** | DWM `DWMWA_USE_IMMERSIVE_DARK_MODE` |
 | **OSC 52 clipboard** | Cross-SSH clipboard write via `\x1b]52;c;<base64>\x07` escape sequence |
 | **External IPC** | Named pipe `\\.\pipe\yatamux-<session>` for CLI / agent integration |
+| **Scrollback buffer** | Up to 50,000 lines; mouse-wheel scroll; open in `$EDITOR` via Pane mode `X` |
+| **Floating pane** | Overlay pane on top of the tiled layout (`Ctrl+F` to toggle) |
+| **Pane mode** | `Ctrl+B` enters Pane mode — status bar shows context-sensitive keybind hints |
+| **Session persistence** | Layout auto-saved to `%APPDATA%\yatamux\session.toml` on exit, restored on startup |
+| **Declarative layouts** | `--layout <name>` loads `%APPDATA%\yatamux\layouts\<name>.toml` for project startup |
+| **Plugin hooks** | `%APPDATA%\yatamux\config.toml` `[hooks]` — `on_pane_created` / `on_pane_closed` shell commands |
+| **Click to focus** | Left-click on any pane to focus it |
+| **ZWJ / emoji** | ZWJ sequences (👨‍💻), VS-16 widening, Nerd Fonts wide-glyph option |
 | **Tested with** | vim, lazygit, Claude Code |
 
 ### Requirements
@@ -70,14 +78,33 @@ $env:RUST_LOG="info"; cargo run
 
 ### Keybindings
 
+**Normal mode:**
+
 | Key | Action |
 |-----|--------|
 | `Ctrl+Shift+E` | Split pane vertically (left/right) |
 | `Ctrl+Shift+O` | Split pane horizontally (top/bottom) |
+| `Ctrl+Shift+W` | Close active pane |
 | `Ctrl+→` / `Ctrl+↓` | Focus next pane |
 | `Ctrl+←` / `Ctrl+↑` | Focus previous pane |
 | `Ctrl+Tab` | Focus next pane |
 | `Ctrl+Shift+Tab` | Focus previous pane |
+| `Ctrl+F` | Toggle floating pane |
+| `Ctrl+B` | Enter Pane mode |
+| Left click | Focus clicked pane |
+| Mouse wheel | Scroll scrollback buffer |
+
+**Pane mode** (entered with `Ctrl+B`, status bar shows hint):
+
+| Key | Action |
+|-----|--------|
+| `H` / `J` / `K` / `L` | Move focus left / down / up / right |
+| `E` | Split vertically |
+| `O` | Split horizontally |
+| `W` | Close active pane |
+| `F` | Toggle floating pane |
+| `X` | Open scrollback in `$EDITOR` |
+| `q` | Return to Normal mode |
 
 ### Toast Notifications
 
@@ -123,15 +150,19 @@ An IPC server (`\\.\pipe\yatamux-<session>`) also starts automatically for exter
 
 ### Known Limitations
 
-- Pane split ratio is fixed at 50:50 (drag-to-resize not yet implemented)
-- No scrollback buffer
+- Pane split ratio is fixed at 50:50 (keyboard resize not yet implemented)
 - Windows 10 1903+ required (ConPTY)
 
 ### Roadmap
 
-- [ ] Pane resize by keyboard (`Alt+Shift+←→↑↓`) or mouse drag
-- [ ] Scrollback buffer
+- [ ] Pane resize by keyboard (`<` / `>` in Pane mode)
+- [ ] Auto-close pane when shell exits
+- [x] Scrollback buffer (50,000 lines, mouse-wheel scroll, open in `$EDITOR`)
 - [x] Session persistence (`%APPDATA%\yatamux\session.toml`)
+- [x] Floating pane (`Ctrl+F`)
+- [x] Pane mode with status bar hints
+- [x] Declarative layout (`--layout <name>`)
+- [x] Plugin hooks (`config.toml` `[hooks]`)
 
 ### License
 
@@ -171,6 +202,14 @@ yatamux は ConPTY・Win32 GDI・IMM32 を直接使い、Windows ネイティブ
 | **ダークタイトルバー** | DWM `DWMWA_USE_IMMERSIVE_DARK_MODE` |
 | **OSC 52 クリップボード** | `\x1b]52;c;<base64>\x07` による SSH 越しクリップボード書き込み |
 | **外部 IPC** | `\\.\pipe\yatamux-<session>` で CLI・エージェントからの操作を受け付け |
+| **スクロールバック** | 最大 50,000 行。マウスホイールでスクロール。ペインモード `X` で `$EDITOR` 起動 |
+| **フローティングペイン** | タイルレイアウトの上に重なるオーバーレイペイン（`Ctrl+F` でトグル） |
+| **ペインモード** | `Ctrl+B` でペインモードへ。ステータスバーにキーバインドヒントを表示 |
+| **セッション永続化** | 終了時に `%APPDATA%\yatamux\session.toml` へ自動保存、起動時に復元 |
+| **宣言的レイアウト** | `--layout <name>` で `%APPDATA%\yatamux\layouts\<name>.toml` をプロジェクト起動に活用 |
+| **プラグインフック** | `config.toml` の `[hooks]` で `on_pane_created` / `on_pane_closed` シェルコマンドを設定 |
+| **クリックフォーカス** | ペイン領域を左クリックしてフォーカス移動 |
+| **ZWJ / 絵文字** | ZWJ シーケンス（👨‍💻）、VS-16 幅拡張、Nerd Fonts ワイドグリフオプション |
 | **動作確認済み** | vim、lazygit、Claude Code |
 
 ### 動作要件
@@ -206,14 +245,33 @@ $env:RUST_LOG="info"; cargo run
 
 ### キーバインド
 
+**ノーマルモード:**
+
 | キー | 動作 |
 |------|------|
 | `Ctrl+Shift+E` | 縦分割（左右） |
 | `Ctrl+Shift+O` | 横分割（上下） |
+| `Ctrl+Shift+W` | アクティブペインを閉じる |
 | `Ctrl+→` / `Ctrl+↓` | 次のペインにフォーカス |
 | `Ctrl+←` / `Ctrl+↑` | 前のペインにフォーカス |
 | `Ctrl+Tab` | 次のペインにフォーカス |
 | `Ctrl+Shift+Tab` | 前のペインにフォーカス |
+| `Ctrl+F` | フローティングペインのトグル |
+| `Ctrl+B` | ペインモードへ移行 |
+| 左クリック | クリックしたペインにフォーカス |
+| マウスホイール | スクロールバックをスクロール |
+
+**ペインモード**（`Ctrl+B` で移行、ステータスバーにヒント表示）:
+
+| キー | 動作 |
+|------|------|
+| `H` / `J` / `K` / `L` | 左 / 下 / 上 / 右のペインにフォーカス移動 |
+| `E` | 縦分割 |
+| `O` | 横分割 |
+| `W` | アクティブペインを閉じる |
+| `F` | フローティングペインのトグル |
+| `X` | スクロールバックを `$EDITOR` で開く |
+| `q` | ノーマルモードに戻る |
 
 ### トースト通知
 
@@ -259,15 +317,19 @@ yatamux (bin)
 
 ### 既知の制限
 
-- ペイン分割比は 50:50 固定（ドラッグリサイズ未実装）
-- スクロールバック未実装
+- ペイン分割比は 50:50 固定（キーボードリサイズ未実装）
 - Windows 10 1903 以降が必要（ConPTY）
 
 ### ロードマップ
 
-- [ ] ペインリサイズ（`Alt+Shift+←→↑↓` またはマウスドラッグ）
-- [ ] スクロールバックバッファ
+- [ ] ペインリサイズ（ペインモードで `<` / `>`）
+- [ ] シェル終了時のペイン自動削除
+- [x] スクロールバックバッファ（50,000 行、マウスホイール、`$EDITOR` 起動）
 - [x] セッション永続化（`%APPDATA%\yatamux\session.toml`）
+- [x] フローティングペイン（`Ctrl+F`）
+- [x] ペインモード・ステータスバーヒント
+- [x] 宣言的レイアウト（`--layout <name>`）
+- [x] プラグインフック（`config.toml` `[hooks]`）
 
 ### ライセンス
 
