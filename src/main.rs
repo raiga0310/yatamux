@@ -161,11 +161,22 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // 引数がある場合: 親コンソールにアタッチして clap の出力（--help 等）を有効化する
-    // (release ビルドの windows_subsystem = "windows" では stdout がデフォルト無効)
     #[cfg(windows)]
-    if std::env::args().count() > 1 {
-        attach_parent_console();
+    {
+        if std::env::args().count() > 1 {
+            // CLI 引数あり: 親コンソール（PowerShell 等）にアタッチして出力を有効化。
+            // `cli` フィーチャービルド（コンソールサブシステム）では既に stdout 有効だが
+            // 親コンソールに明示的に繋ぐことで出力先を統一する。
+            attach_parent_console();
+        } else {
+            // 引数なし = GUI 起動。`cli` フィーチャービルドはコンソールサブシステムなので
+            // 起動時にコンソールウィンドウが開く。FreeConsole() で即座に解放する。
+            // GUI サブシステムビルドではコンソールがないため no-op になる。
+            unsafe {
+                use windows::Win32::System::Console::FreeConsole;
+                let _ = FreeConsole();
+            }
+        }
     }
 
     let cli = Cli::parse();
