@@ -229,10 +229,9 @@ yatamux がバックグラウンドのとき通知が見えない問題を、通
 - 最後の 1 枚のペインが閉じたときはアプリ終了
 - **実装**: `session.rs` で "Process exited" 通知受信時に自動 `ClosePane`。`app.rs` で grids 空になったら `should_quit = true` をセット。`window.rs` の `WM_TIMER` で `DestroyWindow`。
 
-### C-10: ペイン幅調整キーバインド 【優先度: 中】
-- ペインモード中にキー操作で分割比率（ratio）を変更できるようにする
-- 例: `<` / `>` で 5% 単位で増減
-- **実装方針**: `LayoutNode` の `ratio` を増減する `adjust_ratio(pane_id, delta)` を `PaneStore` に追加し、`compute_rects()` が参照することで即時再描画
+### ~~C-10: ペイン幅調整キーバインド~~ ✅ 対応済み 【優先度: 中】
+- ペインモード中に `<` / `>` キーで分割比率（ratio）を 5% 単位で増減
+- **実装**: `LayoutNode::adjust_ratio(pane_id, delta)` を追加。`<`/`>` はペインモードを維持して繰り返し操作可能
 
 ### C-11: アプリ内レイアウトランチャー / 動的切り替えUI 【優先度: 中】
 現状、C-5の宣言的レイアウトは起動時の `--layout` オプションでのみ適用可能であり、Yatamux起動後に別のプロジェクトのレイアウトへ切り替える手段がない。
