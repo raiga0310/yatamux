@@ -140,6 +140,8 @@ mod win32 {
         pub mode: std::cell::Cell<ClientMode>,
         /// WM_KEYDOWN でモード切替済みの場合、次の WM_CHAR を抑制するフラグ
         pub skip_char: std::cell::Cell<bool>,
+        /// フローティングペイン作成/トグル要求チャネル
+        pub float_tx: mpsc::Sender<()>,
     }
 
     impl ClientState {
@@ -153,6 +155,7 @@ mod win32 {
             hfont: HFONT,
             app_focused: Arc<AtomicBool>,
             native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
+            float_tx: mpsc::Sender<()>,
         ) -> Self {
             Self {
                 panes,
@@ -174,6 +177,7 @@ mod win32 {
                 notif_icon_timer: std::cell::Cell::new(0),
                 mode: std::cell::Cell::new(ClientMode::Normal),
                 skip_char: std::cell::Cell::new(false),
+                float_tx,
             }
         }
 
@@ -443,8 +447,19 @@ mod win32 {
                             k if k == b'W' as u16 => {
                                 state.close_active_pane();
                             }
+                            k if k == b'F' as u16 => {
+                                let _ = state.float_tx.try_send(());
+                            }
                             _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
                         }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+
+                    // ── Ctrl+F: フローティングペイントグル ──────────────
+                    if ctrl && !shift && wparam.0 == b'F' as usize {
+                        let _ = state.float_tx.try_send(());
+                        state.skip_char.set(true);
                         let _ = InvalidateRect(hwnd, None, false);
                         return LRESULT(0);
                     }
@@ -638,7 +653,27 @@ mod win32 {
                     if msg == WM_LBUTTONDOWN {
                         let px = (lparam.0 & 0xFFFF) as i32;
                         let py = ((lparam.0 >> 16) & 0xFFFF) as i32;
-                        if state.focus_pane_at(px, py) {
+
+                        // フローティングペイン表示中: 外側クリックで非表示に
+                        let float_handled = {
+                            let mut store = state.panes.lock().unwrap();
+                            if store.floating_visible {
+                                let content = state.content_rect.get();
+                                let fr = PaneStore::floating_rect(content);
+                                let cx = (px - PADDING_X).max(0);
+                                let cy = (py - PADDING_Y).max(0);
+                                if cx < fr.x || cx >= fr.x + fr.w || cy < fr.y || cy >= fr.y + fr.h
+                                {
+                                    store.hide_float();
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+                        if float_handled || state.focus_pane_at(px, py) {
                             let _ = InvalidateRect(hwnd, None, false);
                         }
                     }
@@ -975,6 +1010,129 @@ mod win32 {
                 PADDING_X + sep.x + sep.w,
                 PADDING_Y + sep.y + sep.h,
             );
+        }
+
+        // ── フローティングペイン ─────────────────────────────────────
+        let (float_id, float_visible) = {
+            let store = state.panes.lock().unwrap();
+            (store.floating, store.floating_visible)
+        };
+        if float_visible {
+            if let Some(fid) = float_id {
+                if let Some(grid_arc) = {
+                    let store = state.panes.lock().unwrap();
+                    store.grids.get(&fid).cloned()
+                } {
+                    let fr = PaneStore::floating_rect(total_rect);
+                    let off_x = PADDING_X + fr.x;
+                    let off_y = PADDING_Y + fr.y;
+                    let display_cols = (fr.w / state.cell_width.max(1)).max(1) as usize;
+                    let grid = grid_arc.lock().unwrap();
+                    let sb_len = grid.scrollback_len();
+                    for row in 0..grid.rows() {
+                        let y = row as i32 * state.cell_height + off_y;
+                        let cells = match grid.row(row) {
+                            Some(c) => c,
+                            None => continue,
+                        };
+                        let mut x = off_x;
+                        for cell in cells.iter().take(display_cols) {
+                            let cell_rect = RECT {
+                                left: x,
+                                top: y,
+                                right: x + state.cell_width,
+                                bottom: y + state.cell_height,
+                            };
+                            match &cell.content {
+                                CellContent::Grapheme { text, width } => {
+                                    let (fg, bg) = cell_colors(cell, &ime_state);
+                                    let width_px = state.cell_width * (*width as i32);
+                                    let wide_rect = RECT {
+                                        right: x + width_px,
+                                        ..cell_rect
+                                    };
+                                    SetBkColor(mem_dc, bg);
+                                    let _ = ExtTextOutW(
+                                        mem_dc,
+                                        x,
+                                        y,
+                                        ETO_OPAQUE,
+                                        Some(&wide_rect),
+                                        PCWSTR::null(),
+                                        0,
+                                        None,
+                                    );
+                                    let first_cp =
+                                        text.chars().next().map(|c| c as u32).unwrap_or(0);
+                                    let handled = if (0x2500..=0x259F).contains(&first_cp) {
+                                        draw_box_char(
+                                            mem_dc,
+                                            x,
+                                            y,
+                                            state.cell_width,
+                                            state.cell_height,
+                                            first_cp,
+                                            fg,
+                                        )
+                                    } else {
+                                        false
+                                    };
+                                    if !handled {
+                                        SetTextColor(mem_dc, fg);
+                                        SetBkColor(mem_dc, bg);
+                                        let utf16: Vec<u16> = text.encode_utf16().collect();
+                                        let _ = ExtTextOutW(
+                                            mem_dc,
+                                            x,
+                                            y,
+                                            ETO_OPAQUE,
+                                            Some(&wide_rect),
+                                            PCWSTR(utf16.as_ptr()),
+                                            utf16.len() as u32,
+                                            None,
+                                        );
+                                    }
+                                    x += width_px;
+                                }
+                                CellContent::Continuation => {}
+                                CellContent::Blank => {
+                                    SetBkColor(mem_dc, COLOR_BG);
+                                    let _ = ExtTextOutW(
+                                        mem_dc,
+                                        x,
+                                        y,
+                                        ETO_OPAQUE,
+                                        Some(&cell_rect),
+                                        PCWSTR::null(),
+                                        0,
+                                        None,
+                                    );
+                                    x += state.cell_width;
+                                }
+                            }
+                        }
+                    }
+                    drop(grid);
+                    let _ = sb_len;
+
+                    // 枠線（2px）
+                    const COLOR_FLOAT_BORDER: COLORREF = COLORREF(0x00_FA_B4_89); // peach
+                    let border_pen = CreatePen(PS_SOLID, 2, COLOR_FLOAT_BORDER);
+                    let old_pen = SelectObject(mem_dc, border_pen);
+                    let null_brush = GetStockObject(NULL_BRUSH);
+                    let old_brush = SelectObject(mem_dc, null_brush);
+                    let _ = Rectangle(
+                        mem_dc,
+                        off_x - 2,
+                        off_y - 2,
+                        off_x + fr.w + 2,
+                        off_y + fr.h + 2,
+                    );
+                    SelectObject(mem_dc, old_brush);
+                    SelectObject(mem_dc, old_pen);
+                    let _ = DeleteObject(border_pen);
+                }
+            }
         }
 
         // ── ステータスバー ───────────────────────────────────────────
@@ -1805,6 +1963,7 @@ mod win32 {
         initial_size: TermSize,
         app_focused: Arc<AtomicBool>,
         native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
+        float_tx: mpsc::Sender<()>,
     ) -> anyhow::Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
@@ -1825,6 +1984,7 @@ mod win32 {
                 hfont,
                 app_focused,
                 native_notif_queue,
+                float_tx,
             ));
             let state_ptr = Box::into_raw(state);
 
@@ -2365,6 +2525,7 @@ pub fn run_window(
     _native_notif_queue: std::sync::Arc<
         std::sync::Mutex<std::collections::VecDeque<crate::notification::NativeToastMsg>>,
     >,
+    _float_tx: tokio::sync::mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }

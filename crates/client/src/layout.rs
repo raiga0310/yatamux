@@ -341,7 +341,7 @@ impl Toast {
 pub struct PaneStore {
     /// ペイン ID → グリッドの Arc
     pub grids: HashMap<PaneId, Arc<Mutex<Grid>>>,
-    /// レイアウトツリー
+    /// レイアウトツリー（フローティングペインは含まない）
     pub layout: LayoutNode,
     /// フォーカスされているペイン ID
     pub active: PaneId,
@@ -351,6 +351,12 @@ pub struct PaneStore {
     pub pending_toasts: VecDeque<Toast>,
     /// アクティブペインのスクロールオフセット（0 = 最新画面、正値 = 過去方向）
     pub scroll_offset: usize,
+    /// フローティングペイン ID（None = 未作成）
+    pub floating: Option<PaneId>,
+    /// フローティングペインを表示中かどうか
+    pub floating_visible: bool,
+    /// フローティング表示前のアクティブペイン（非表示時の復帰用）
+    pub pre_float_active: Option<PaneId>,
 }
 
 impl PaneStore {
@@ -364,6 +370,40 @@ impl PaneStore {
             pending_clipboard: None,
             pending_toasts: VecDeque::new(),
             scroll_offset: 0,
+            floating: None,
+            floating_visible: false,
+            pre_float_active: None,
+        }
+    }
+
+    /// フローティングペインをコンテンツ領域の中央 80% に配置した矩形を返す
+    pub fn floating_rect(content: PaneRect) -> PaneRect {
+        let w = ((content.w as f32 * 0.8) as i32).max(1);
+        let h = ((content.h as f32 * 0.8) as i32).max(1);
+        PaneRect {
+            x: (content.w - w) / 2,
+            y: (content.h - h) / 2,
+            w,
+            h,
+        }
+    }
+
+    /// フローティングペインを表示してフォーカスを移す
+    pub fn show_float(&mut self) {
+        if let Some(float_id) = self.floating {
+            self.pre_float_active = Some(self.active);
+            self.active = float_id;
+            self.floating_visible = true;
+        }
+    }
+
+    /// フローティングペインを非表示にして元のペインにフォーカスを戻す
+    pub fn hide_float(&mut self) {
+        self.floating_visible = false;
+        if let Some(prev) = self.pre_float_active.take() {
+            if self.grids.contains_key(&prev) {
+                self.active = prev;
+            }
         }
     }
 }
@@ -520,6 +560,100 @@ mod tests {
         let layout = LayoutNode::Leaf(PaneId(1));
         // root は (0,0,200,100)、点 (-1, 0) はヒットしない
         assert_eq!(layout.pane_at_point(-1, 0, root()), None);
+    }
+
+    // ── floating_rect テスト ─────────────────────────────────────────────
+
+    // TC-01: 200×100 の中央に 80% 矩形
+    #[test]
+    fn test_floating_rect_centered() {
+        let content = PaneRect {
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 100,
+        };
+        let r = PaneStore::floating_rect(content);
+        assert_eq!(r.w, 160);
+        assert_eq!(r.h, 80);
+        assert_eq!(r.x, 20);
+        assert_eq!(r.y, 10);
+    }
+
+    // TC-02: 奇数サイズでも中央揃えされる
+    #[test]
+    fn test_floating_rect_odd_size() {
+        let content = PaneRect {
+            x: 0,
+            y: 0,
+            w: 101,
+            h: 51,
+        };
+        let r = PaneStore::floating_rect(content);
+        assert_eq!(r.w, 80); // floor(101 * 0.8) = 80
+        assert_eq!(r.h, 40); // floor(51 * 0.8) = 40
+        assert!(r.x >= 10);
+        assert!(r.y >= 5);
+    }
+
+    // TC-03: show_float で active がフローティング ID に変わる
+    #[test]
+    fn test_show_float_sets_active() {
+        let grid = Arc::new(Mutex::new(yatamux_terminal::Grid::new(
+            80,
+            24,
+            Default::default(),
+        )));
+        let float_grid = Arc::new(Mutex::new(yatamux_terminal::Grid::new(
+            80,
+            24,
+            Default::default(),
+        )));
+        let mut store = PaneStore::new(PaneId(1), grid);
+        store.grids.insert(PaneId(2), float_grid);
+        store.floating = Some(PaneId(2));
+        store.show_float();
+        assert_eq!(store.active, PaneId(2));
+        assert_eq!(store.pre_float_active, Some(PaneId(1)));
+        assert!(store.floating_visible);
+    }
+
+    // TC-04: hide_float で active が元に戻る
+    #[test]
+    fn test_hide_float_restores_active() {
+        let grid = Arc::new(Mutex::new(yatamux_terminal::Grid::new(
+            80,
+            24,
+            Default::default(),
+        )));
+        let float_grid = Arc::new(Mutex::new(yatamux_terminal::Grid::new(
+            80,
+            24,
+            Default::default(),
+        )));
+        let mut store = PaneStore::new(PaneId(1), grid);
+        store.grids.insert(PaneId(2), float_grid);
+        store.floating = Some(PaneId(2));
+        store.show_float();
+        store.hide_float();
+        assert_eq!(store.active, PaneId(1));
+        assert!(!store.floating_visible);
+    }
+
+    // TC-05: レイアウトツリーにフローティングペインは含まれない
+    #[test]
+    fn test_floating_not_in_layout_ids() {
+        let grid = Arc::new(Mutex::new(yatamux_terminal::Grid::new(
+            80,
+            24,
+            Default::default(),
+        )));
+        let store = PaneStore::new(PaneId(1), grid);
+        // layout は Leaf(1) のみ
+        let ids = store.layout.pane_ids();
+        assert_eq!(ids, vec![PaneId(1)]);
+        // floating = Some(99) であっても pane_ids には入らない
+        // (floating はレイアウトツリー外で管理)
     }
 
     // ── remove_pane テスト ────────────────────────────────────────────────
