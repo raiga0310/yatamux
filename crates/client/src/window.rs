@@ -543,18 +543,6 @@ mod win32 {
                         state.mode.set(ClientMode::Normal);
                         state.skip_char.set(true); // WM_CHAR を抑制
                         match vk {
-                            k if k == b'H' as u16 => {
-                                state.focus_pane_dir(Direction::Left);
-                            }
-                            k if k == b'J' as u16 => {
-                                state.focus_pane_dir(Direction::Down);
-                            }
-                            k if k == b'K' as u16 => {
-                                state.focus_pane_dir(Direction::Up);
-                            }
-                            k if k == b'L' as u16 => {
-                                state.focus_pane_dir(Direction::Right);
-                            }
                             k if k == b'E' as u16 => {
                                 state.request_split(SplitDirection::Vertical);
                             }
@@ -1336,7 +1324,7 @@ mod win32 {
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
-                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  </>: リサイズ  L: レイアウト  q: 戻る",
+                " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  </>: リサイズ  L: レイアウト  q: 戻る",
             ),
         };
 
