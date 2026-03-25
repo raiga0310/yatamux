@@ -150,6 +150,9 @@ pub async fn run() -> Result<()> {
     // ── ペイン分割要求チャネル（Window → この tokio タスク）────────────
     let (split_tx, mut split_rx) = mpsc::channel::<(PaneId, SplitDirection)>(8);
 
+    // ── フローティングペイン要求チャネル（Window → この tokio タスク）──
+    let (float_tx, mut float_rx) = mpsc::channel::<()>(4);
+
     // ── サーバー出力 + ペイン分割ハンドラ ───────────────────────────────
     let pane_store2 = Arc::clone(&pane_store);
     let notif_backend2 = Arc::clone(&notif_backend);
@@ -157,10 +160,38 @@ pub async fn run() -> Result<()> {
         let notif_backend = notif_backend2;
         // 分割リクエスト待ちキュー (parent_id, direction, new_size)
         let mut pending: VecDeque<(PaneId, SplitDirection, TermSize)> = VecDeque::new();
+        // 次の PaneCreated がフローティングペイン用かどうか
+        let mut pending_float = false;
 
         loop {
             tokio::select! {
                 biased;
+
+                // フローティングペイン要求
+                Some(()) = float_rx.recv() => {
+                    let floating = pane_store2.lock().unwrap().floating;
+                    match floating {
+                        None => {
+                            // 初回: 新しいペインを作成してフローティングに設定
+                            pending_float = true;
+                            let _ = client_tx.send(ClientMessage::CreatePane {
+                                surface: surf_id,
+                                split_from: None,
+                                direction: None,
+                                size,
+                            }).await;
+                        }
+                        Some(_) => {
+                            // 既存フローティングペインの表示/非表示トグル
+                            let mut store = pane_store2.lock().unwrap();
+                            if store.floating_visible {
+                                store.hide_float();
+                            } else {
+                                store.show_float();
+                            }
+                        }
+                    }
+                }
 
                 // ペイン分割要求
                 Some((parent_id, direction)) = split_rx.recv() => {
@@ -200,7 +231,21 @@ pub async fn run() -> Result<()> {
                             }
                         }
                         ServerMessage::PaneCreated { id: new_id, .. } => {
-                            if let Some((parent_id, direction, new_size)) = pending.pop_front() {
+                            if pending_float {
+                                // フローティングペイン作成完了
+                                pending_float = false;
+                                let float_size = TermSize { cols: DEFAULT_COLS, rows: DEFAULT_ROWS };
+                                let new_sink = TerminalSink::new(float_size.cols, float_size.rows);
+                                let new_grid = Arc::clone(&new_sink.grid);
+                                sinks.insert(new_id, new_sink);
+                                {
+                                    let mut store = pane_store2.lock().unwrap();
+                                    store.grids.insert(new_id, new_grid);
+                                    // レイアウトツリーには追加しない（フローティング管理）
+                                    store.floating = Some(new_id);
+                                    store.show_float();
+                                }
+                            } else if let Some((parent_id, direction, new_size)) = pending.pop_front() {
                                 let new_sink = TerminalSink::new(new_size.cols, new_size.rows);
                                 let new_grid = Arc::clone(&new_sink.grid);
                                 sinks.insert(new_id, new_sink);
@@ -255,6 +300,7 @@ pub async fn run() -> Result<()> {
             size,
             app_focused,
             native_notif_queue,
+            float_tx,
         )
     })
     .await??;
