@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use yatamux_client::{run_window, PaneStore, Toast};
+use yatamux_client::{run_window, LayoutNode, LayoutNodeDef, LayoutSnapshot, PaneStore, Toast};
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
@@ -91,14 +91,42 @@ pub async fn run() -> Result<()> {
 
     tracing::info!("Pane {:?} created, opening window", pane_id);
 
-    // ── 初期ペインの TerminalSink とペインストアを作成 ───────────────────
-    let mut sinks: HashMap<PaneId, TerminalSink> = HashMap::new();
-    {
+    // ── セッション復元 or 初期ペインのみ ────────────────────────────────
+    let session_path = LayoutSnapshot::default_path();
+    let (layout, sinks_vec, active_pane) = if let Ok(snap) = LayoutSnapshot::load(&session_path) {
+        tracing::info!("セッションを復元します");
+        let mut old_to_new: HashMap<PaneId, PaneId> = HashMap::new();
+        let (layout, sinks_vec) = restore_node(
+            &snap.root,
+            pane_id,
+            surf_id,
+            size,
+            &client_tx,
+            &mut server_rx,
+            &mut old_to_new,
+        )
+        .await?;
+        let active = old_to_new.get(&snap.active).copied().unwrap_or(pane_id);
+        (layout, sinks_vec, active)
+    } else {
         let sink = TerminalSink::new(size.cols, size.rows);
-        sinks.insert(pane_id, sink);
+        (LayoutNode::Leaf(pane_id), vec![(pane_id, sink)], pane_id)
+    };
+
+    let mut sinks: HashMap<PaneId, TerminalSink> = HashMap::new();
+    let mut all_grids: HashMap<PaneId, Arc<Mutex<yatamux_terminal::Grid>>> = HashMap::new();
+    for (id, sink) in sinks_vec {
+        all_grids.insert(id, Arc::clone(&sink.grid));
+        sinks.insert(id, sink);
     }
-    let initial_grid = Arc::clone(&sinks[&pane_id].grid);
-    let pane_store = Arc::new(Mutex::new(PaneStore::new(pane_id, initial_grid)));
+
+    let pane_store = {
+        let mut store = PaneStore::new(pane_id, all_grids[&pane_id].clone());
+        store.layout = layout;
+        store.grids = all_grids;
+        store.active = active_pane;
+        Arc::new(Mutex::new(store))
+    };
 
     // ── 入力・リサイズ チャネル（Window → Server）───────────────────────
     let (msg_tx, mut msg_rx) = mpsc::channel::<ClientMessage>(64);
@@ -184,7 +212,14 @@ pub async fn run() -> Result<()> {
                         }
                         ServerMessage::PaneClosed { pane } => {
                             sinks.remove(&pane);
-                            pane_store2.lock().unwrap().grids.remove(&pane);
+                            let mut store = pane_store2.lock().unwrap();
+                            store.grids.remove(&pane);
+                            let next = store.layout.remove_pane(pane);
+                            if store.active == pane {
+                                if let Some(next_id) = next {
+                                    store.active = next_id;
+                                }
+                            }
                         }
                         ServerMessage::Notification { pane, body } => {
                             let mut store = pane_store2.lock().unwrap();
@@ -207,6 +242,71 @@ pub async fn run() -> Result<()> {
     tokio::task::spawn_blocking(move || run_window(pane_store, msg_tx, split_tx, size)).await??;
 
     Ok(())
+}
+
+/// 保存済みレイアウトを再帰的に再構築する
+///
+/// `def` のツリー構造に従い `CreatePane` を発行し、
+/// 新しい `LayoutNode` と各ペインの `TerminalSink` を返す。
+/// `old_to_new` に旧ペイン ID → 新ペイン ID のマッピングを蓄積する。
+async fn restore_node(
+    def: &LayoutNodeDef,
+    current_pane: PaneId,
+    surf_id: yatamux_protocol::types::SurfaceId,
+    size: TermSize,
+    client_tx: &mpsc::Sender<ClientMessage>,
+    server_rx: &mut mpsc::Receiver<ServerMessage>,
+    old_to_new: &mut HashMap<PaneId, PaneId>,
+) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>)> {
+    match def {
+        LayoutNodeDef::Leaf { id: old_id } => {
+            old_to_new.insert(*old_id, current_pane);
+            let sink = TerminalSink::new(size.cols, size.rows);
+            Ok((LayoutNode::Leaf(current_pane), vec![(current_pane, sink)]))
+        }
+        LayoutNodeDef::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            client_tx
+                .send(ClientMessage::CreatePane {
+                    surface: surf_id,
+                    split_from: Some(current_pane),
+                    direction: Some(*direction),
+                    size,
+                })
+                .await?;
+            let new_pane = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
+
+            let (first_layout, mut all_sinks) = Box::pin(restore_node(
+                first,
+                current_pane,
+                surf_id,
+                size,
+                client_tx,
+                server_rx,
+                old_to_new,
+            ))
+            .await?;
+            let (second_layout, second_sinks) = Box::pin(restore_node(
+                second, new_pane, surf_id, size, client_tx, server_rx, old_to_new,
+            ))
+            .await?;
+            all_sinks.extend(second_sinks);
+
+            Ok((
+                LayoutNode::Split {
+                    direction: *direction,
+                    ratio: *ratio,
+                    first: Box::new(first_layout),
+                    second: Box::new(second_layout),
+                },
+                all_sinks,
+            ))
+        }
+    }
 }
 
 /// サーバーからの特定メッセージを待つマクロ

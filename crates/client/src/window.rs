@@ -40,7 +40,7 @@ mod win32 {
     use yatamux_terminal::{Cell, Grid};
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
-    use crate::layout::{PaneRect, PaneStore, Toast};
+    use crate::layout::{Direction, PaneRect, PaneStore, Toast};
 
     // ── 定数 ────────────────────────────────────────────────────────────────
 
@@ -106,6 +106,8 @@ mod win32 {
         pub hfont: HFONT,
         /// 表示中のトースト通知リスト（Win32 スレッド専用）
         pub active_toasts: Mutex<Vec<Toast>>,
+        /// コンテンツ領域矩形（WM_SIZE で更新、Cell で内部可変）
+        pub content_rect: std::cell::Cell<PaneRect>,
     }
 
     impl ClientState {
@@ -126,6 +128,12 @@ mod win32 {
                 cell_height,
                 hfont,
                 active_toasts: Mutex::new(Vec::new()),
+                content_rect: std::cell::Cell::new(PaneRect {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                }),
             }
         }
 
@@ -172,7 +180,7 @@ mod win32 {
             let _ = self.split_tx.try_send((active, direction));
         }
 
-        /// フォーカスを次/前のペインに移す
+        /// フォーカスを次/前のペインに移す（線形 DFS 順）
         fn cycle_pane(&self, forward: bool) {
             let mut store = self.panes.lock().unwrap();
             let next = if forward {
@@ -181,6 +189,45 @@ mod win32 {
                 store.layout.prev_pane(store.active)
             };
             store.active = next;
+        }
+
+        /// フォーカスを指定方向の最近傍ペインに移す
+        fn focus_pane_dir(&self, dir: Direction) {
+            let mut store = self.panes.lock().unwrap();
+            let next = store
+                .layout
+                .pane_in_direction(store.active, dir, self.content_rect.get());
+            store.active = next;
+        }
+
+        /// クリック座標（ウィンドウクライアント座標）からペインフォーカスを切り替える。
+        /// フォーカスが変わった場合は true を返す。
+        fn focus_pane_at(&self, px: i32, py: i32) -> bool {
+            let cx = px - PADDING_X;
+            let cy = py - PADDING_Y;
+            let root = self.content_rect.get();
+            let mut store = self.panes.lock().unwrap();
+            if let Some(pane_id) = store.layout.pane_at_point(cx, cy, root) {
+                if store.active != pane_id {
+                    store.active = pane_id;
+                    store.scroll_offset = 0;
+                    return true;
+                }
+            }
+            false
+        }
+
+        /// アクティブペインを削除する。最後の1ペインの場合は何もしない。
+        fn close_active_pane(&self) {
+            let store = self.panes.lock().unwrap();
+            if matches!(store.layout, crate::layout::LayoutNode::Leaf(_)) {
+                return;
+            }
+            let active = store.active;
+            drop(store);
+            let _ = self
+                .msg_tx
+                .try_send(yatamux_protocol::ClientMessage::ClosePane { pane: active });
         }
     }
 
@@ -302,6 +349,8 @@ mod win32 {
                         if !skip {
                             if let Some(ch) = char::from_u32(code) {
                                 if ch != '\0' {
+                                    // スクロール中なら最新画面に戻す
+                                    state.panes.lock().unwrap().scroll_offset = 0;
                                     let mut buf = [0u8; 4];
                                     let encoded = ch.encode_utf8(&mut buf);
                                     state.send_input(encoded.as_bytes().to_vec());
@@ -330,6 +379,11 @@ mod win32 {
                         state.request_split(SplitDirection::Horizontal);
                         return LRESULT(0);
                     }
+                    // Ctrl+Shift+W: アクティブペインを削除 (F-8)
+                    if ctrl && shift && wparam.0 == b'W' as usize {
+                        state.close_active_pane();
+                        return LRESULT(0);
+                    }
                     // Ctrl+Tab: 次のペイン / Ctrl+Shift+Tab: 前のペイン
                     if ctrl && wparam.0 == VK_TAB.0 as usize {
                         state.cycle_pane(!shift);
@@ -337,38 +391,25 @@ mod win32 {
                         return LRESULT(0);
                     }
 
-                    // Ctrl+Arrow: ペインフォーカス移動
-                    //   Left / Up  → 前のペイン
-                    //   Right / Down → 次のペイン
+                    // Ctrl+Arrow: 方向指定ペインフォーカス移動
                     if ctrl && !shift {
-                        let focus_fwd = match wparam.0 as u16 {
-                            k if k == VK_RIGHT.0 || k == VK_DOWN.0 => Some(true),
-                            k if k == VK_LEFT.0 || k == VK_UP.0 => Some(false),
+                        let dir = match wparam.0 as u16 {
+                            k if k == VK_LEFT.0 => Some(Direction::Left),
+                            k if k == VK_RIGHT.0 => Some(Direction::Right),
+                            k if k == VK_UP.0 => Some(Direction::Up),
+                            k if k == VK_DOWN.0 => Some(Direction::Down),
                             _ => None,
                         };
-                        if let Some(fwd) = focus_fwd {
-                            state.cycle_pane(fwd);
+                        if let Some(d) = dir {
+                            state.focus_pane_dir(d);
                             let _ = InvalidateRect(hwnd, None, false);
                             return LRESULT(0);
                         }
                     }
 
-                    // Ctrl+H/J/K/L: vim 風ペインフォーカス移動（Shift なし限定）
-                    //   H / K → 前のペイン   L / J → 次のペイン
-                    // Note: Ctrl+H=\x08(BS), Ctrl+L=\x0c(FF) などターミナルアプリで
-                    //       使われる場合があるが、ペイン操作を優先する。
-                    if ctrl && !shift {
-                        let focus_fwd = match wparam.0 {
-                            k if k == b'L' as usize || k == b'J' as usize => Some(true),
-                            k if k == b'H' as usize || k == b'K' as usize => Some(false),
-                            _ => None,
-                        };
-                        if let Some(fwd) = focus_fwd {
-                            state.cycle_pane(fwd);
-                            let _ = InvalidateRect(hwnd, None, false);
-                            return LRESULT(0);
-                        }
-                    }
+                    // Ctrl+H/J/K/L によるペインフォーカス移動は廃止（F-6）
+                    // Ctrl+J は Claude Code 等の改行キーと衝突するため削除。
+                    // フォーカス移動は Ctrl+←↑↓→ を使うこと。
 
                     // Ctrl+V: クリップボードからペースト
                     if ctrl && !shift && wparam.0 == b'V' as usize {
@@ -409,8 +450,36 @@ mod win32 {
                     if state.cell_width > 0 && state.cell_height > 0 {
                         let content_w = (width - PADDING_X * 2).max(1);
                         let content_h = (height - PADDING_Y * 2).max(1);
+                        state.content_rect.set(PaneRect {
+                            x: 0,
+                            y: 0,
+                            w: content_w,
+                            h: content_h,
+                        });
                         state.resize_all_panes(content_w, content_h);
                     }
+                }
+                LRESULT(0)
+            }
+
+            // ── マウスホイール（スクロールバック） ──────────────────────
+            WM_MOUSEWHEEL => {
+                if !state_ptr.is_null() {
+                    let state = &*state_ptr;
+                    // WHEEL_DELTA = 120 単位。正 = 上スクロール（過去方向）
+                    let delta = (wparam.0 >> 16) as i16;
+                    let lines: usize = 3; // 1 ノッチあたり 3 行
+                    let mut store = state.panes.lock().unwrap();
+                    let active = store.active;
+                    if let Some(grid_arc) = store.grids.get(&active) {
+                        let max_offset = grid_arc.lock().unwrap().scrollback_len();
+                        if delta > 0 {
+                            store.scroll_offset = (store.scroll_offset + lines).min(max_offset);
+                        } else {
+                            store.scroll_offset = store.scroll_offset.saturating_sub(lines);
+                        }
+                    }
+                    let _ = InvalidateRect(hwnd, None, false);
                 }
                 LRESULT(0)
             }
@@ -461,6 +530,16 @@ mod win32 {
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP | WM_MOUSEMOVE => {
                 if !state_ptr.is_null() {
                     let state = &*state_ptr;
+
+                    // 左クリック時にペインフォーカスを切り替える（F-9）
+                    if msg == WM_LBUTTONDOWN {
+                        let px = (lparam.0 & 0xFFFF) as i32;
+                        let py = ((lparam.0 >> 16) & 0xFFFF) as i32;
+                        if state.focus_pane_at(px, py) {
+                            let _ = InvalidateRect(hwnd, None, false);
+                        }
+                    }
+
                     let (reporting, sgr) = {
                         let g = state.active_grid();
                         let g = g.lock().unwrap();
@@ -529,6 +608,24 @@ mod win32 {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
 
+            // ── ウィンドウ終了（セッション保存）──────────────────────
+            WM_CLOSE => {
+                if !state_ptr.is_null() {
+                    let state = &*state_ptr;
+                    let store = state.panes.lock().unwrap();
+                    let snap = crate::session::LayoutSnapshot {
+                        root: crate::session::LayoutNodeDef::from(&store.layout),
+                        active: store.active,
+                    };
+                    let path = crate::session::LayoutSnapshot::default_path();
+                    if let Err(e) = snap.save(&path) {
+                        tracing::warn!("セッション保存に失敗: {}", e);
+                    }
+                }
+                DestroyWindow(hwnd).ok();
+                LRESULT(0)
+            }
+
             // ── ウィンドウ破棄 ──────────────────────────────────────────
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, TIMER_REPAINT);
@@ -573,7 +670,7 @@ mod win32 {
         };
 
         // PaneStore を短時間ロックして必要な情報を取得
-        let (active_pane, pane_rects, sep_rects, grid_map) = {
+        let (active_pane, scroll_offset, pane_rects, sep_rects, grid_map) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
             let seps = store.layout.compute_separator_rects(total_rect);
@@ -582,7 +679,7 @@ mod win32 {
                 .iter()
                 .map(|(&id, g)| (id, Arc::clone(g)))
                 .collect();
-            (store.active, rects, seps, map)
+            (store.active, store.scroll_offset, rects, seps, map)
         };
 
         // ── 各ペインを描画 ──────────────────────────────────────────────
@@ -598,10 +695,25 @@ mod win32 {
                 // はみ出したセルを隣ペインに描画しないようクリップする）
                 let display_cols = (pane_rect.w / state.cell_width.max(1)).max(1) as usize;
 
+                // アクティブペインかつスクロール中は scrollback を考慮したオフセット描画
+                let effective_offset = if is_active { scroll_offset } else { 0 };
+                let sb_len = grid.scrollback_len();
+                // 表示開始位置（スクロールバック+グリッド結合バッファ上のインデックス）
+                let view_start = sb_len.saturating_sub(effective_offset);
+
                 for row in 0..grid.rows() {
-                    let cells = match grid.row(row) {
-                        Some(c) => c,
-                        None => continue,
+                    let combined_idx = view_start + row as usize;
+                    let cells: &[Cell] = if combined_idx < sb_len {
+                        match grid.scrollback_row(combined_idx) {
+                            Some(r) => r.as_slice(),
+                            None => continue,
+                        }
+                    } else {
+                        let grid_row = (combined_idx - sb_len) as u16;
+                        match grid.row(grid_row) {
+                            Some(c) => c,
+                            None => continue,
+                        }
                     };
                     let y = row as i32 * state.cell_height + off_y;
                     let mut x = off_x;

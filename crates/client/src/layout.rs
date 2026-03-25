@@ -26,6 +26,15 @@ impl PaneRect {
     }
 }
 
+/// ペインフォーカス移動の方向
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// クライアント側レイアウトツリー（サーバーの PaneTree と同構造）
 #[derive(Clone, Debug)]
 pub enum LayoutNode {
@@ -86,6 +95,71 @@ impl LayoutNode {
         ids[(pos + n - 1) % n]
     }
 
+    /// 指定方向で最近傍のペインを返す。
+    /// 同方向にペインがない場合は `current` をそのまま返す（端でループしない）。
+    pub fn pane_in_direction(
+        &self,
+        current: PaneId,
+        dir: Direction,
+        root_rect: PaneRect,
+    ) -> PaneId {
+        let rects = self.compute_rects(root_rect);
+        let cur_rect = match rects.iter().find(|(id, _)| *id == current) {
+            Some((_, r)) => *r,
+            None => return current,
+        };
+
+        let candidates: Vec<(PaneId, i32)> = rects
+            .iter()
+            .filter_map(|(id, r)| {
+                if *id == current {
+                    return None;
+                }
+                let edge_dist = match dir {
+                    Direction::Left => {
+                        let d = cur_rect.x - (r.x + r.w);
+                        if d >= 0 {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    }
+                    Direction::Right => {
+                        let d = r.x - (cur_rect.x + cur_rect.w);
+                        if d >= 0 {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    }
+                    Direction::Up => {
+                        let d = cur_rect.y - (r.y + r.h);
+                        if d >= 0 {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    }
+                    Direction::Down => {
+                        let d = r.y - (cur_rect.y + cur_rect.h);
+                        if d >= 0 {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                edge_dist.map(|d| (*id, d))
+            })
+            .collect();
+
+        candidates
+            .into_iter()
+            .min_by_key(|&(_, d)| d)
+            .map(|(id, _)| id)
+            .unwrap_or(current)
+    }
+
     /// 各ペインのピクセル矩形を計算する（セパレーターの隙間込み）
     pub fn compute_rects(&self, r: PaneRect) -> Vec<(PaneId, PaneRect)> {
         match self {
@@ -138,6 +212,39 @@ impl LayoutNode {
                 let mut rects = first.compute_rects(r1);
                 rects.extend(second.compute_rects(r2));
                 rects
+            }
+        }
+    }
+
+    /// クリック座標 (x, y) がどのペインに含まれるかを返す（コンテンツ座標）
+    pub fn pane_at_point(&self, x: i32, y: i32, root: PaneRect) -> Option<PaneId> {
+        self.compute_rects(root)
+            .into_iter()
+            .find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+            .map(|(id, _)| id)
+    }
+
+    /// ペイン `id` をツリーから削除する。
+    /// 削除後にフォーカスすべき候補ペインの ID を返す。
+    /// ルート Leaf（最後の1ペイン）の場合は None を返す（削除不可）。
+    pub fn remove_pane(&mut self, id: PaneId) -> Option<PaneId> {
+        match self {
+            LayoutNode::Leaf(_) => None,
+            LayoutNode::Split { first, second, .. } => {
+                // first が削除対象
+                if matches!(first.as_ref(), LayoutNode::Leaf(lid) if *lid == id) {
+                    let next = second.pane_ids().into_iter().next();
+                    *self = (**second).clone();
+                    return next;
+                }
+                // second が削除対象
+                if matches!(second.as_ref(), LayoutNode::Leaf(lid) if *lid == id) {
+                    let next = first.pane_ids().into_iter().next();
+                    *self = (**first).clone();
+                    return next;
+                }
+                // 再帰
+                first.remove_pane(id).or_else(|| second.remove_pane(id))
             }
         }
     }
@@ -242,6 +349,8 @@ pub struct PaneStore {
     pub pending_clipboard: Option<Vec<u8>>,
     /// 未処理のトースト通知キュー（tokio → Win32 スレッドへの引き渡し）
     pub pending_toasts: VecDeque<Toast>,
+    /// アクティブペインのスクロールオフセット（0 = 最新画面、正値 = 過去方向）
+    pub scroll_offset: usize,
 }
 
 impl PaneStore {
@@ -254,6 +363,222 @@ impl PaneStore {
             active: pane_id,
             pending_clipboard: None,
             pending_toasts: VecDeque::new(),
+            scroll_offset: 0,
         }
+    }
+}
+
+// ── テスト ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root() -> PaneRect {
+        PaneRect {
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 100,
+        }
+    }
+
+    // TC-01: 垂直分割で Right → 右ペイン
+    #[test]
+    fn test_direction_right_vertical_split() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert_eq!(
+            layout.pane_in_direction(PaneId(1), Direction::Right, root()),
+            PaneId(2)
+        );
+    }
+
+    // TC-02: 垂直分割で Left → 左ペイン
+    #[test]
+    fn test_direction_left_vertical_split() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert_eq!(
+            layout.pane_in_direction(PaneId(2), Direction::Left, root()),
+            PaneId(1)
+        );
+    }
+
+    // TC-03: 端のペインで移動先なし → 自ペインを返す
+    #[test]
+    fn test_direction_no_candidate_returns_self() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert_eq!(
+            layout.pane_in_direction(PaneId(1), Direction::Left, root()),
+            PaneId(1)
+        );
+    }
+
+    // TC-04: 水平分割で Down → 下ペイン
+    #[test]
+    fn test_direction_down_horizontal_split() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let r = PaneRect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 200,
+        };
+        assert_eq!(
+            layout.pane_in_direction(PaneId(1), Direction::Down, r),
+            PaneId(2)
+        );
+    }
+
+    // TC-05: 水平分割で Up → 上ペイン
+    #[test]
+    fn test_direction_up_horizontal_split() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let r = PaneRect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 200,
+        };
+        assert_eq!(
+            layout.pane_in_direction(PaneId(2), Direction::Up, r),
+            PaneId(1)
+        );
+    }
+
+    // TC-06: 単一ペインでは常に自ペインを返す
+    #[test]
+    fn test_direction_single_pane_returns_self() {
+        let layout = LayoutNode::Leaf(PaneId(1));
+        assert_eq!(
+            layout.pane_in_direction(PaneId(1), Direction::Right, root()),
+            PaneId(1)
+        );
+    }
+
+    // ── pane_at_point テスト ──────────────────────────────────────────────
+
+    // TC-F9-01: 単一ペイン — どこをクリックしても自ペイン
+    #[test]
+    fn test_pane_at_point_single() {
+        let layout = LayoutNode::Leaf(PaneId(1));
+        assert_eq!(layout.pane_at_point(50, 50, root()), Some(PaneId(1)));
+    }
+
+    // TC-F9-02: 垂直分割 — 左半分 → first
+    #[test]
+    fn test_pane_at_point_vertical_left() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        // root = 200x100, SEP=1, w1=99, w2=100
+        assert_eq!(layout.pane_at_point(10, 50, root()), Some(PaneId(1)));
+    }
+
+    // TC-F9-03: 垂直分割 — 右半分 → second
+    #[test]
+    fn test_pane_at_point_vertical_right() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert_eq!(layout.pane_at_point(150, 50, root()), Some(PaneId(2)));
+    }
+
+    // TC-F9-04: 範囲外 → None
+    #[test]
+    fn test_pane_at_point_out_of_bounds() {
+        let layout = LayoutNode::Leaf(PaneId(1));
+        // root は (0,0,200,100)、点 (-1, 0) はヒットしない
+        assert_eq!(layout.pane_at_point(-1, 0, root()), None);
+    }
+
+    // ── remove_pane テスト ────────────────────────────────────────────────
+
+    // TC-F8-05: 単一 Leaf は削除不可 → None
+    #[test]
+    fn test_remove_pane_single_returns_none() {
+        let mut layout = LayoutNode::Leaf(PaneId(1));
+        assert_eq!(layout.remove_pane(PaneId(1)), None);
+        // ツリーは変化しない
+        assert!(matches!(layout, LayoutNode::Leaf(PaneId(1))));
+    }
+
+    // TC-F8-06: 垂直分割の first を削除
+    #[test]
+    fn test_remove_pane_vertical_first() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let next = layout.remove_pane(PaneId(1));
+        assert_eq!(next, Some(PaneId(2)));
+        assert!(matches!(layout, LayoutNode::Leaf(PaneId(2))));
+    }
+
+    // TC-F8-07: 垂直分割の second を削除
+    #[test]
+    fn test_remove_pane_vertical_second() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let next = layout.remove_pane(PaneId(2));
+        assert_eq!(next, Some(PaneId(1)));
+        assert!(matches!(layout, LayoutNode::Leaf(PaneId(1))));
+    }
+
+    // TC-F8-08: ネスト Split(1, Split(2, 3)) → remove 2 → Split(1, 3)
+    #[test]
+    fn test_remove_pane_nested() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(2))),
+                second: Box::new(LayoutNode::Leaf(PaneId(3))),
+            }),
+        };
+        let next = layout.remove_pane(PaneId(2));
+        assert_eq!(next, Some(PaneId(3)));
+        // ツリーが Split(1, 3) になっていることを確認
+        let ids = layout.pane_ids();
+        assert_eq!(ids, vec![PaneId(1), PaneId(3)]);
     }
 }
