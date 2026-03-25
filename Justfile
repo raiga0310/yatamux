@@ -24,14 +24,9 @@ build:
 test:
     cargo test
 
-# リリースビルドして %LOCALAPPDATA%\yatamux\yatamux.exe にインストール
+# cargo install でリリースビルドして ~/.cargo/bin/yatamux.exe にインストール
 install:
-    cargo build --release
-    New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\yatamux" | Out-Null; Copy-Item -Force "target\release\yatamux.exe" "$env:LOCALAPPDATA\yatamux\yatamux.exe"; Write-Host "Installed to $env:LOCALAPPDATA\yatamux\yatamux.exe"
-
-# インストール先を PATH に追加（PowerShell プロファイルに記述）
-add-to-path:
-    $dest = "$env:LOCALAPPDATA\yatamux"; if (-not (Test-Path $PROFILE)) { New-Item -Force $PROFILE | Out-Null }; if (-not (Select-String -Quiet -Path $PROFILE -Pattern ([regex]::Escape($dest)))) { Add-Content $PROFILE "`$env:PATH = `"$dest;`$env:PATH`""; Write-Host "Added $dest to PATH in $PROFILE" } else { Write-Host "$dest already in PATH profile" }
+    cargo install --path .
 
 # clippy
 lint:
