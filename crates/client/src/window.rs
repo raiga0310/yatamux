@@ -668,6 +668,13 @@ mod win32 {
                         }
                     }
 
+                    // C-9: 全ペイン終了時にウィンドウを破棄してアプリ終了
+                    let quit = state.panes.lock().unwrap().should_quit;
+                    if quit {
+                        let _ = DestroyWindow(hwnd);
+                        return LRESULT(0);
+                    }
+
                     let needs_repaint = {
                         let store = state.panes.lock().unwrap();
                         let dirty = store

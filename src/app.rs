@@ -330,6 +330,10 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                     store.active = next_id;
                                 }
                             }
+                            // C-9: 全ペインが閉じられたらアプリ終了
+                            if store.grids.is_empty() {
+                                store.should_quit = true;
+                            }
                         }
                         ServerMessage::Notification { pane, body } => {
                             let active = pane_store2.lock().unwrap().active;
