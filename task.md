@@ -86,7 +86,7 @@
 - [x] `window.rs`: `Ctrl+Shift+W` で `ClientMessage::ClosePane` を送信
 - [x] `cargo test && cargo clippy -- -D warnings && cargo fmt --check`
 
-### F-7: 通知バックエンドの仮想チャネル化とフォーカス連動切り替え 【優先度: 中】
+### ~~F-7: 通知バックエンドの仮想チャネル化とフォーカス連動切り替え~~ ✅ 対応済み 【優先度: 中】
 
 現状のトースト通知は yatamux 内部描画（`paint_toasts()`）のみ。
 yatamux がバックグラウンドのとき通知が見えない問題を、通知バックエンドを抽象化して解決する。

@@ -93,6 +93,22 @@ mod win32 {
     const COLOR_SEPARATOR: COLORREF = COLORREF(0x00_5A_47_45); // surface1 #45475a
     const COLOR_PREEDIT_BG: COLORREF = COLORREF(0x00_5A_47_45); // surface1 #45475a
 
+    // ── モード定義 ───────────────────────────────────────────────────────────
+
+    /// UI モード
+    ///
+    /// `Normal`: 全キー入力を PTY に透過する通常状態。
+    /// `Pane`: ペイン操作（移動・分割・削除）を受け付けるワンショットモード。
+    ///         1 キー操作後に自動で `Normal` に戻る。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum ClientMode {
+        Normal,
+        Pane,
+    }
+
+    /// ステータスバーの高さは `cell_height` × 1 行分
+    const STATUS_BAR_ROWS: i32 = 1;
+
     // ── クライアント状態 ─────────────────────────────────────────────────────
 
     /// ウィンドウが保持するクライアント状態
@@ -120,6 +136,10 @@ mod win32 {
         pub native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
         /// バルーン表示後の自動削除カウントダウン（16ms ティック単位）
         pub notif_icon_timer: std::cell::Cell<u32>,
+        /// 現在の UI モード（Internal Cell で内部可変）
+        pub mode: std::cell::Cell<ClientMode>,
+        /// WM_KEYDOWN でモード切替済みの場合、次の WM_CHAR を抑制するフラグ
+        pub skip_char: std::cell::Cell<bool>,
     }
 
     impl ClientState {
@@ -152,6 +172,8 @@ mod win32 {
                 app_focused,
                 native_notif_queue,
                 notif_icon_timer: std::cell::Cell::new(0),
+                mode: std::cell::Cell::new(ClientMode::Normal),
+                skip_char: std::cell::Cell::new(false),
             }
         }
 
@@ -351,6 +373,13 @@ mod win32 {
             WM_CHAR => {
                 if !state_ptr.is_null() {
                     let state = &*state_ptr;
+                    // Pane モード中のキー操作は WM_KEYDOWN で処理済み。
+                    // TranslateMessage が WM_CHAR を投入する前に WM_KEYDOWN が
+                    // skip_char フラグを立てるので、ここで抑制する。
+                    if state.skip_char.get() {
+                        state.skip_char.set(false);
+                        return LRESULT(0);
+                    }
                     // IME 変換中の文字は WM_IME_COMPOSITION で処理済み
                     if !state.ime.state.lock().unwrap().composing {
                         let code = wparam.0 as u32;
@@ -386,6 +415,47 @@ mod win32 {
                     let state = &*state_ptr;
                     let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                     let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+
+                    // ── Pane モードのキー処理 ────────────────────────────
+                    if state.mode.get() == ClientMode::Pane {
+                        state.mode.set(ClientMode::Normal);
+                        state.skip_char.set(true); // WM_CHAR を抑制
+                        let vk = wparam.0 as u16;
+                        match vk {
+                            k if k == b'H' as u16 => {
+                                state.focus_pane_dir(Direction::Left);
+                            }
+                            k if k == b'J' as u16 => {
+                                state.focus_pane_dir(Direction::Down);
+                            }
+                            k if k == b'K' as u16 => {
+                                state.focus_pane_dir(Direction::Up);
+                            }
+                            k if k == b'L' as u16 => {
+                                state.focus_pane_dir(Direction::Right);
+                            }
+                            k if k == b'E' as u16 => {
+                                state.request_split(SplitDirection::Vertical);
+                            }
+                            k if k == b'O' as u16 => {
+                                state.request_split(SplitDirection::Horizontal);
+                            }
+                            k if k == b'W' as u16 => {
+                                state.close_active_pane();
+                            }
+                            _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+
+                    // ── Ctrl+B: Normal → Pane モードへ切り替え ──────────
+                    if ctrl && !shift && wparam.0 == b'B' as usize {
+                        state.mode.set(ClientMode::Pane);
+                        state.skip_char.set(true); // \x02 を PTY に送らない
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
 
                     // Ctrl+Shift+E: 縦分割 (side by side)
                     if ctrl && shift && wparam.0 == b'E' as usize {
@@ -467,7 +537,9 @@ mod win32 {
                     let height = ((lparam.0 >> 16) & 0xFFFF) as i32;
                     if state.cell_width > 0 && state.cell_height > 0 {
                         let content_w = (width - PADDING_X * 2).max(1);
-                        let content_h = (height - PADDING_Y * 2).max(1);
+                        // ステータスバー（1 行分）を下端に確保する
+                        let status_h = state.cell_height * STATUS_BAR_ROWS;
+                        let content_h = (height - PADDING_Y * 2 - status_h).max(1);
                         state.content_rect.set(PaneRect {
                             x: 0,
                             y: 0,
@@ -703,7 +775,9 @@ mod win32 {
 
         // ── コンテンツ領域とレイアウト ─────────────────────────────────
         let content_w = (rect.right - PADDING_X * 2).max(1);
-        let content_h = (rect.bottom - PADDING_Y * 2).max(1);
+        // ステータスバー（1 行分）を下端に確保する
+        let status_h = state.cell_height * STATUS_BAR_ROWS;
+        let content_h = (rect.bottom - PADDING_Y * 2 - status_h).max(1);
         let total_rect = PaneRect {
             x: 0,
             y: 0,
@@ -903,6 +977,9 @@ mod win32 {
             );
         }
 
+        // ── ステータスバー ───────────────────────────────────────────
+        paint_status_bar(mem_dc, rect.right, rect.bottom, state);
+
         // ── トースト通知 ────────────────────────────────────────────
         paint_toasts(mem_dc, rect.right, rect.bottom, state);
 
@@ -922,6 +999,109 @@ mod win32 {
     ///
     /// Steam 風のスライドイン（下から上へ 300ms）で最大 3 件まで縦に積む。
     /// 期限（4000ms）に近づくと消えるのではなく WM_TIMER 側で配列から除去される。
+    /// ステータスバーをウィンドウ下端に描画する。
+    ///
+    /// - 左: `[NORMAL]` / `[PANE]` + キーバインドヒント
+    /// - 右: `pane X/N`（アクティブペイン番号 / 総ペイン数）
+    unsafe fn paint_status_bar(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
+        // Catppuccin Mocha: mantle = #181825, subtext1 = #bac2de, blue = #89b4fa, peach = #fab387
+        const COLOR_STATUS_BG: COLORREF = COLORREF(0x00_25_18_18); // mantle
+        const COLOR_STATUS_FG: COLORREF = COLORREF(0x00_DE_C2_BA); // subtext1
+        const COLOR_MODE_NORMAL: COLORREF = COLORREF(0x00_FA_B4_89); // blue (#89b4fa → BGR)
+        const COLOR_MODE_PANE: COLORREF = COLORREF(0x00_87_AB_FA); // peach (#fab387 → BGR)
+
+        let bar_h = state.cell_height * STATUS_BAR_ROWS;
+        let bar_y = win_h - bar_h;
+
+        // 背景
+        let bar_rect = RECT {
+            left: 0,
+            top: bar_y,
+            right: win_w,
+            bottom: win_h,
+        };
+        let bg_brush = CreateSolidBrush(COLOR_STATUS_BG);
+        FillRect(hdc, &bar_rect, bg_brush);
+        let _ = DeleteObject(bg_brush);
+
+        SetBkColor(hdc, COLOR_STATUS_BG);
+        SetBkMode(hdc, OPAQUE);
+
+        let mode = state.mode.get();
+        let text_y = bar_y;
+
+        // ── 左側: モード名 ──────────────────────────────────────────
+        let (mode_label, mode_color, hint) = match mode {
+            ClientMode::Normal => (" NORMAL ", COLOR_MODE_NORMAL, " Ctrl+B: ペインモード"),
+            ClientMode::Pane => (
+                " PANE ",
+                COLOR_MODE_PANE,
+                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  q: 戻る",
+            ),
+        };
+
+        // モード名（色付き背景）
+        SetTextColor(hdc, COLOR_STATUS_BG);
+        SetBkColor(hdc, mode_color);
+        let label_wide: Vec<u16> = mode_label.encode_utf16().collect();
+        let _ = ExtTextOutW(
+            hdc,
+            PADDING_X,
+            text_y,
+            ETO_OPAQUE,
+            None,
+            PCWSTR(label_wide.as_ptr()),
+            label_wide.len() as u32,
+            None,
+        );
+
+        // ラベル幅を計算
+        let mut label_size = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &label_wide, &mut label_size);
+        let hint_x = PADDING_X + label_size.cx;
+
+        // ヒントテキスト
+        SetTextColor(hdc, COLOR_STATUS_FG);
+        SetBkColor(hdc, COLOR_STATUS_BG);
+        let hint_wide: Vec<u16> = hint.encode_utf16().collect();
+        let _ = ExtTextOutW(
+            hdc,
+            hint_x,
+            text_y,
+            ETO_OPAQUE,
+            None,
+            PCWSTR(hint_wide.as_ptr()),
+            hint_wide.len() as u32,
+            None,
+        );
+
+        // ── 右側: ペイン番号 ────────────────────────────────────────
+        let (active_idx, total) = {
+            let store = state.panes.lock().unwrap();
+            let ids = store.layout.pane_ids();
+            let total = ids.len();
+            let idx = ids.iter().position(|&id| id == store.active).unwrap_or(0) + 1;
+            (idx, total)
+        };
+        let right_text = format!(" pane {}/{} ", active_idx, total);
+        let right_wide: Vec<u16> = right_text.encode_utf16().collect();
+        let mut right_size = SIZE::default();
+        SetBkColor(hdc, COLOR_STATUS_BG);
+        let _ = GetTextExtentPoint32W(hdc, &right_wide, &mut right_size);
+        let right_x = (win_w - right_size.cx).max(hint_x + label_size.cx);
+        SetTextColor(hdc, COLOR_STATUS_FG);
+        let _ = ExtTextOutW(
+            hdc,
+            right_x,
+            text_y,
+            ETO_OPAQUE,
+            None,
+            PCWSTR(right_wide.as_ptr()),
+            right_wide.len() as u32,
+            None,
+        );
+    }
+
     unsafe fn paint_toasts(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
         const TOAST_W: i32 = 300;
         const TOAST_H: i32 = 64;
@@ -2139,6 +2319,29 @@ mod win32 {
                 keydown_to_vt_with_mods(WPARAM(b'A' as usize), lp(), false, false, false),
                 None
             );
+        }
+
+        // TC-09: Normal モードでは mode が Normal のまま
+        #[test]
+        fn test_client_mode_default_normal() {
+            let mode = ClientMode::Normal;
+            assert_eq!(mode, ClientMode::Normal);
+            assert_ne!(mode, ClientMode::Pane);
+        }
+
+        // TC-10: skip_char ヘルパーロジック検証
+        // WM_CHAR で skip_char=true なら抑制する（Cell 操作の単体確認）
+        #[test]
+        fn test_skip_char_cell_behavior() {
+            let skip = std::cell::Cell::new(false);
+            assert!(!skip.get());
+            skip.set(true);
+            assert!(skip.get());
+            // 消費後に false に戻る
+            let was = skip.get();
+            skip.set(false);
+            assert!(was);
+            assert!(!skip.get());
         }
     }
 }

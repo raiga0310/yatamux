@@ -2,8 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(cargo build:*)",
+      "Bash(cargo run -- send-keys:*)",
+      "Bash(cargo run -- list-panes:*)",
+      "Bash(powershell.exe:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Skill(update-config)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }
