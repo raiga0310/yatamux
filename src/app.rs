@@ -9,12 +9,16 @@
 //! サーバー出力はファンアウトタスクが GUI と IPC 両方に配信する。
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use yatamux_client::{run_window, LayoutNode, LayoutNodeDef, LayoutSnapshot, PaneStore, Toast};
+use yatamux_client::{
+    run_window, FocusAwareBackend, LayoutNode, LayoutNodeDef, LayoutSnapshot, NotificationBackend,
+    PaneStore,
+};
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
@@ -128,6 +132,12 @@ pub async fn run() -> Result<()> {
         Arc::new(Mutex::new(store))
     };
 
+    // ── 通知バックエンド（フォーカス状態に応じて切り替え）────────────────
+    let app_focused = Arc::new(AtomicBool::new(true));
+    let (notif_backend, native_notif_queue) =
+        FocusAwareBackend::new(Arc::clone(&app_focused), Arc::clone(&pane_store));
+    let notif_backend: Arc<dyn NotificationBackend> = Arc::new(notif_backend);
+
     // ── 入力・リサイズ チャネル（Window → Server）───────────────────────
     let (msg_tx, mut msg_rx) = mpsc::channel::<ClientMessage>(64);
     let client_tx2 = client_tx.clone();
@@ -142,7 +152,9 @@ pub async fn run() -> Result<()> {
 
     // ── サーバー出力 + ペイン分割ハンドラ ───────────────────────────────
     let pane_store2 = Arc::clone(&pane_store);
+    let notif_backend2 = Arc::clone(&notif_backend);
     tokio::spawn(async move {
+        let notif_backend = notif_backend2;
         // 分割リクエスト待ちキュー (parent_id, direction, new_size)
         let mut pending: VecDeque<(PaneId, SplitDirection, TermSize)> = VecDeque::new();
 
@@ -222,13 +234,9 @@ pub async fn run() -> Result<()> {
                             }
                         }
                         ServerMessage::Notification { pane, body } => {
-                            let mut store = pane_store2.lock().unwrap();
-                            if pane != store.active {
-                                store.pending_toasts.push_back(Toast {
-                                    pane_id: pane,
-                                    message: body,
-                                    elapsed_ms: 0,
-                                });
+                            let active = pane_store2.lock().unwrap().active;
+                            if pane != active {
+                                notif_backend.notify(pane, body);
                             }
                         }
                         _ => {}
@@ -239,7 +247,17 @@ pub async fn run() -> Result<()> {
     });
 
     // ── Win32 ウィンドウ（spawn_blocking でメッセージループ実行）────────
-    tokio::task::spawn_blocking(move || run_window(pane_store, msg_tx, split_tx, size)).await??;
+    tokio::task::spawn_blocking(move || {
+        run_window(
+            pane_store,
+            msg_tx,
+            split_tx,
+            size,
+            app_focused,
+            native_notif_queue,
+        )
+    })
+    .await??;
 
     Ok(())
 }

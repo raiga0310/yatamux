@@ -33,7 +33,12 @@ mod win32 {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows::Win32::UI::Shell::{
+        Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+        NOTIFYICONDATAW,
+    };
     use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
     use yatamux_protocol::ClientMessage;
     use yatamux_terminal::cell::CellContent;
@@ -41,6 +46,7 @@ mod win32 {
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
     use crate::layout::{Direction, PaneRect, PaneStore, Toast};
+    use crate::notification::NativeToastMsg;
 
     // ── 定数 ────────────────────────────────────────────────────────────────
 
@@ -108,9 +114,16 @@ mod win32 {
         pub active_toasts: Mutex<Vec<Toast>>,
         /// コンテンツ領域矩形（WM_SIZE で更新、Cell で内部可変）
         pub content_rect: std::cell::Cell<PaneRect>,
+        /// ウィンドウフォーカス状態（app.rs と共有: WM_ACTIVATEAPP で更新）
+        pub app_focused: Arc<AtomicBool>,
+        /// NativeToast キュー（tokio → Win32 スレッドへのバルーン通知要求）
+        pub native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
+        /// バルーン表示後の自動削除カウントダウン（16ms ティック単位）
+        pub notif_icon_timer: std::cell::Cell<u32>,
     }
 
     impl ClientState {
+        #[allow(clippy::too_many_arguments)]
         fn new(
             panes: Arc<Mutex<PaneStore>>,
             msg_tx: mpsc::Sender<ClientMessage>,
@@ -118,6 +131,8 @@ mod win32 {
             cell_width: i32,
             cell_height: i32,
             hfont: HFONT,
+            app_focused: Arc<AtomicBool>,
+            native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
         ) -> Self {
             Self {
                 panes,
@@ -134,6 +149,9 @@ mod win32 {
                     w: 1,
                     h: 1,
                 }),
+                app_focused,
+                native_notif_queue,
+                notif_icon_timer: std::cell::Cell::new(0),
             }
         }
 
@@ -511,6 +529,19 @@ mod win32 {
                         !active.is_empty()
                     };
 
+                    // NativeToast バルーン: キューから取り出して Shell_NotifyIconW で表示
+                    if let Some(msg) = state.native_notif_queue.lock().unwrap().pop_front() {
+                        show_balloon_notification(hwnd, &msg.title, &msg.body);
+                        state.notif_icon_timer.set(300); // ~5 秒 (300 × 16ms)
+                    }
+                    let t = state.notif_icon_timer.get();
+                    if t > 0 {
+                        state.notif_icon_timer.set(t - 1);
+                        if t == 1 {
+                            remove_tray_icon(hwnd);
+                        }
+                    }
+
                     let needs_repaint = {
                         let store = state.panes.lock().unwrap();
                         let dirty = store
@@ -588,6 +619,16 @@ mod win32 {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
 
+            // ── アプリフォーカス切り替え（通知バックエンド選択用）───────
+            WM_ACTIVATEAPP => {
+                if !state_ptr.is_null() {
+                    let state = &*state_ptr;
+                    let focused = wparam.0 != 0;
+                    state.app_focused.store(focused, Ordering::Relaxed);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
             // ── フォーカス ──────────────────────────────────────────────
             WM_SETFOCUS => {
                 if !state_ptr.is_null() {
@@ -629,6 +670,7 @@ mod win32 {
             // ── ウィンドウ破棄 ──────────────────────────────────────────
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, TIMER_REPAINT);
+                remove_tray_icon(hwnd);
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -1581,6 +1623,8 @@ mod win32 {
         msg_tx: mpsc::Sender<ClientMessage>,
         split_tx: mpsc::Sender<(PaneId, SplitDirection)>,
         initial_size: TermSize,
+        app_focused: Arc<AtomicBool>,
+        native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
     ) -> anyhow::Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
@@ -1599,6 +1643,8 @@ mod win32 {
                 cell_width,
                 cell_height,
                 hfont,
+                app_focused,
+                native_notif_queue,
             ));
             let state_ptr = Box::into_raw(state);
 
@@ -1672,6 +1718,44 @@ mod win32 {
 
             Ok(())
         }
+    }
+
+    /// トレイアイコンを追加してバルーンチップ通知を表示する
+    unsafe fn show_balloon_notification(hwnd: HWND, title: &str, body: &str) {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            uFlags: NIF_ICON | NIF_TIP | NIF_INFO,
+            hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+            ..Default::default()
+        };
+        // szTip: トレイツールチップ
+        let tip = "yatamux\0";
+        let tip_wide: Vec<u16> = tip.encode_utf16().collect();
+        let copy_len = tip_wide.len().min(nid.szTip.len());
+        nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
+        // szInfoTitle: バルーンタイトル
+        let title_wide: Vec<u16> = format!("{}\0", title).encode_utf16().collect();
+        let copy_len = title_wide.len().min(nid.szInfoTitle.len());
+        nid.szInfoTitle[..copy_len].copy_from_slice(&title_wide[..copy_len]);
+        // szInfo: バルーン本文
+        let body_wide: Vec<u16> = format!("{}\0", body).encode_utf16().collect();
+        let copy_len = body_wide.len().min(nid.szInfo.len());
+        nid.szInfo[..copy_len].copy_from_slice(&body_wide[..copy_len]);
+        nid.dwInfoFlags = NIIF_INFO;
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+
+    /// トレイアイコンを削除する
+    unsafe fn remove_tray_icon(hwnd: HWND) {
+        let nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            ..Default::default()
+        };
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
     }
 
     /// インストール済みの候補フォントから最適なものを選んで作成する
@@ -2074,6 +2158,10 @@ pub fn run_window(
         yatamux_protocol::types::SplitDirection,
     )>,
     _initial_size: yatamux_protocol::types::TermSize,
+    _app_focused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _native_notif_queue: std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<crate::notification::NativeToastMsg>>,
+    >,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }
