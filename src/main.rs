@@ -161,6 +161,25 @@ enum Commands {
         #[arg(long, default_value = "100")]
         lines: usize,
     },
+    /// ペインを分割して新しいペインを作成
+    SplitPane {
+        /// 作業ディレクトリ
+        #[arg(long)]
+        dir: Option<String>,
+        /// 分割方向 (vertical / horizontal)
+        #[arg(long, value_enum, default_value = "vertical")]
+        direction: SplitDirectionArg,
+        /// 分割元ペイン ID（省略時は 0）
+        #[arg(long)]
+        target: Option<u32>,
+    },
+}
+
+/// CLI 用の分割方向
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum SplitDirectionArg {
+    Vertical,
+    Horizontal,
 }
 
 #[tokio::main]
@@ -197,6 +216,19 @@ async fn main() -> Result<()> {
         }
         Some(Commands::CapturePane { target, lines }) => {
             cli::capture_pane(DEFAULT_SESSION, target, lines).await
+        }
+        Some(Commands::SplitPane {
+            dir,
+            direction,
+            target,
+        }) => {
+            let split_dir = match direction {
+                SplitDirectionArg::Vertical => yatamux_protocol::types::SplitDirection::Vertical,
+                SplitDirectionArg::Horizontal => {
+                    yatamux_protocol::types::SplitDirection::Horizontal
+                }
+            };
+            cli::split_pane(DEFAULT_SESSION, target.unwrap_or(0), split_dir, dir).await
         }
         None => {
             let app_config =

@@ -94,6 +94,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
             split_from: None,
             direction: None,
             size,
+            working_dir: None,
         })
         .await?;
     let pane_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
@@ -209,6 +210,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                 split_from: None,
                                 direction: None,
                                 size,
+                                working_dir: None,
                             }).await;
                         }
                         Some(_) => {
@@ -253,6 +255,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                 split_from: None,
                                 direction: None,
                                 size,
+                                working_dir: None,
                             }).await;
                             layout_switch = Some(LayoutPhase::WaitingFirst { config });
                         }
@@ -284,6 +287,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                         split_from: Some(parent_id),
                         direction: Some(direction),
                         size: new_size,
+                        working_dir: None,
                     }).await;
                 }
 
@@ -374,6 +378,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                                     split_from: Some(new_id),
                                                     direction: Some(next_dir),
                                                     size,
+                                                    working_dir: None,
                                                 })
                                                 .await;
                                             layout_switch = Some(LayoutPhase::Applying {
@@ -430,6 +435,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                                     split_from: Some(new_id),
                                                     direction: Some(next_dir),
                                                     size,
+                                                    working_dir: None,
                                                 })
                                                 .await;
                                             layout_switch = Some(LayoutPhase::Applying {
@@ -538,6 +544,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                                         split_from: None,
                                                         direction: None,
                                                         size,
+                                                        working_dir: None,
                                                     })
                                                     .await;
                                                 layout_switch =
@@ -629,6 +636,7 @@ async fn apply_layout_config(
                 split_from: Some(active),
                 direction: Some(direction),
                 size,
+                working_dir: None,
             })
             .await?;
         let new_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
@@ -683,6 +691,7 @@ async fn restore_node(
                     split_from: Some(current_pane),
                     direction: Some(*direction),
                     size,
+                    working_dir: None,
                 })
                 .await?;
             let new_pane = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;

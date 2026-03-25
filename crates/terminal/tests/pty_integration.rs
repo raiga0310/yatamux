@@ -19,7 +19,7 @@ fn default_size() -> TermSize {
 #[tokio::test]
 async fn test_pty_spawns_successfully() {
     let (output_tx, _output_rx) = mpsc::channel::<Vec<u8>>(64);
-    let result = PtySession::spawn(default_size(), None, output_tx);
+    let result = PtySession::spawn(default_size(), None, output_tx, None);
     assert!(
         result.is_ok(),
         "PTY spawn should succeed: {:?}",
@@ -31,7 +31,7 @@ async fn test_pty_spawns_successfully() {
 #[tokio::test]
 async fn test_pty_initial_output_received() {
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
-    let _session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let _session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     let data = tokio::time::timeout(Duration::from_secs(5), output_rx.recv())
         .await
@@ -50,7 +50,7 @@ async fn test_pty_initial_output_received() {
 #[tokio::test]
 async fn test_pty_echo_command_output() {
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
-    let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let mut session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     // 初期プロンプトが来るまで待つ
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -90,7 +90,7 @@ async fn test_pty_echo_command_output() {
 #[tokio::test]
 async fn test_pty_resize_succeeds() {
     let (output_tx, _) = mpsc::channel::<Vec<u8>>(64);
-    let session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     let new_size = TermSize {
         cols: 120,
@@ -108,7 +108,7 @@ async fn test_pty_resize_succeeds() {
 #[tokio::test]
 async fn test_pty_write_after_resize() {
     let (output_tx, _) = mpsc::channel::<Vec<u8>>(256);
-    let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let mut session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     session
         .resize(TermSize {
@@ -124,7 +124,7 @@ async fn test_pty_write_after_resize() {
 #[tokio::test]
 async fn test_pty_process_running_after_spawn() {
     let (output_tx, _) = mpsc::channel::<Vec<u8>>(64);
-    let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let mut session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     // 起動直後はまだ動いているはず
     let status = session.try_wait();
@@ -139,7 +139,7 @@ async fn test_pty_process_running_after_spawn() {
 #[tokio::test]
 async fn test_pty_process_exits_after_exit_command() {
     let (output_tx, _) = mpsc::channel::<Vec<u8>>(64);
-    let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let mut session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     // 初期化を待つ
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -166,7 +166,7 @@ async fn test_pty_process_exits_after_exit_command() {
 #[tokio::test]
 async fn test_pty_concurrent_read_write_no_deadlock() {
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
-    let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let mut session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     // 読み取りタスクを並行起動
     let read_task = tokio::spawn(async move {
@@ -199,7 +199,7 @@ async fn test_pty_concurrent_read_write_no_deadlock() {
 #[tokio::test]
 async fn test_large_output_does_not_stall() {
     let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(1024);
-    let mut session = PtySession::spawn(default_size(), None, output_tx).unwrap();
+    let mut session = PtySession::spawn(default_size(), None, output_tx, None).unwrap();
 
     // 初期化を待つ
     tokio::time::sleep(Duration::from_millis(500)).await;

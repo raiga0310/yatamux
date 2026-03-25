@@ -170,6 +170,7 @@ impl Server {
                 size,
                 split_from,
                 direction,
+                working_dir,
             } => {
                 let id = PaneId(self.next_pane_id);
                 self.next_pane_id += 1;
@@ -181,6 +182,7 @@ impl Server {
                     self.width_config.clone(),
                     self.pane_output_tx.clone(),
                     self.pane_notification_tx.clone(),
+                    working_dir,
                 )?;
                 self.panes.insert(id, pane);
 

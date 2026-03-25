@@ -113,4 +113,41 @@ mod tests {
             other => panic!("unexpected: {:?}", other),
         }
     }
+
+    // TC-C14-01: CreatePane { working_dir: Some(...) } がシリアライズ/デシリアライズされる
+    #[test]
+    fn create_pane_with_working_dir_roundtrip() {
+        let msg = ClientMessage::CreatePane {
+            surface: SurfaceId(1),
+            split_from: None,
+            direction: None,
+            size: TermSize { cols: 80, rows: 24 },
+            working_dir: Some("C:/Users/test".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::CreatePane { working_dir, .. } => {
+                assert_eq!(working_dir, Some("C:/Users/test".to_string()));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // TC-C14-02: CreatePane { working_dir: None } が後方互換性を保つ
+    #[test]
+    fn create_pane_without_working_dir_backward_compat() {
+        // 旧フォーマット（working_dir フィールドなし）
+        let old_json = r#"{"type":"create_pane","surface":1,"split_from":null,"direction":null,"size":{"cols":80,"rows":24}}"#;
+        let decoded: ClientMessage = serde_json::from_str(old_json).unwrap();
+        match decoded {
+            ClientMessage::CreatePane { working_dir, .. } => {
+                assert_eq!(
+                    working_dir, None,
+                    "旧フォーマットでは working_dir が None になること"
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
 }

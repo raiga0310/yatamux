@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use yatamux_client::connection::ServerConnection;
-use yatamux_protocol::types::PaneId;
+use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 
 /// `yatamux list-panes` — 実行中のペイン一覧を標準出力に表示する
@@ -82,6 +82,85 @@ pub async fn capture_pane(session: &str, pane_id: u32, lines: usize) -> Result<(
     .context("timeout waiting for pane content")??;
 
     print!("{}", content);
+    Ok(())
+}
+
+/// `yatamux split-pane --target <id> --direction <v|h> --dir <path>` — ペインを分割する
+///
+/// 指定ペインを分割して新しいペインを作成する。
+/// `--dir` で作業ディレクトリを指定できる。
+pub async fn split_pane(
+    session: &str,
+    pane_id: u32,
+    direction: SplitDirection,
+    working_dir: Option<String>,
+) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+
+    // まずペイン一覧を取得してサーフェス ID を取得する
+    conn.tx.send(ClientMessage::ListPanes).await?;
+    let panes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PanesListed"
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for pane list")??;
+
+    // 対象ペインのサーフェス ID を取得する（見つからない場合は最初のペインのサーフェスを使用）
+    let surface = panes
+        .iter()
+        .find(|p| p.id == PaneId(pane_id))
+        .or_else(|| panes.first())
+        .map(|p| p.surface)
+        .unwrap_or(SurfaceId(1));
+
+    let size = panes
+        .iter()
+        .find(|p| p.id == PaneId(pane_id))
+        .map(|p| yatamux_protocol::types::TermSize {
+            cols: p.cols,
+            rows: p.rows,
+        })
+        .unwrap_or(yatamux_protocol::types::TermSize { cols: 80, rows: 24 });
+
+    conn.tx
+        .send(ClientMessage::CreatePane {
+            surface,
+            split_from: Some(PaneId(pane_id)),
+            direction: Some(direction),
+            size,
+            working_dir,
+        })
+        .await?;
+
+    let new_pane = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::PaneCreated { id, .. }) => return Ok(id),
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PaneCreated"
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for pane creation")??;
+
+    println!("Created pane {}", new_pane.0);
     Ok(())
 }
 

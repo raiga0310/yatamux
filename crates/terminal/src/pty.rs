@@ -25,10 +25,12 @@ impl PtySession {
     /// - `size`: 初期ターミナルサイズ
     /// - `cmd`: 起動するシェル/コマンド（None の場合 COMSPEC or cmd.exe）
     /// - `output_tx`: PTY からの出力をここに送る
+    /// - `working_dir`: 作業ディレクトリ（None の場合はプロセスの CWD を引き継ぐ）
     pub fn spawn(
         size: TermSize,
         cmd: Option<CommandBuilder>,
         output_tx: mpsc::Sender<Vec<u8>>,
+        working_dir: Option<String>,
     ) -> Result<Self> {
         let pty_system = NativePtySystem::default();
         let pty_size = PtySize {
@@ -40,7 +42,10 @@ impl PtySession {
 
         let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
-        let cmd = cmd.unwrap_or_else(default_shell);
+        let mut cmd = cmd.unwrap_or_else(default_shell);
+        if let Some(dir) = working_dir {
+            cmd.cwd(dir);
+        }
 
         let child = pair
             .slave

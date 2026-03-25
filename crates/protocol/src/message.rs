@@ -33,6 +33,9 @@ pub enum ClientMessage {
         split_from: Option<PaneId>,
         direction: Option<SplitDirection>,
         size: TermSize,
+        /// 作業ディレクトリ（None の場合はサーバープロセスの CWD を引き継ぐ）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
 
     /// ペインにキー入力を送信

@@ -38,6 +38,7 @@ impl Pane {
         width_config: CjkWidthConfig,
         client_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
         client_notification_tx: mpsc::Sender<(PaneId, String)>,
+        working_dir: Option<String>,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
         let title = Arc::new(Mutex::new(String::new()));
@@ -45,7 +46,7 @@ impl Pane {
         let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<Vec<u8>>(256);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCmd>(64);
 
-        let mut pty = yatamux_terminal::PtySession::spawn(size, None, pty_output_tx)?;
+        let mut pty = yatamux_terminal::PtySession::spawn(size, None, pty_output_tx, working_dir)?;
 
         // 子プロセス終了監視タスク（C-9）
         //
