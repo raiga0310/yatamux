@@ -40,9 +40,28 @@ impl<'a> VtProcessor<'a> {
 
 impl<'a> Perform for VtProcessor<'a> {
     fn print(&mut self, c: char) {
-        // 書記素クラスタの完全対応は後続 PR で実装。
-        // 現時点は単一 char を書き込む。
-        self.grid.write_char(&c.to_string(), self.current_style);
+        use unicode_width::UnicodeWidthChar;
+
+        match c {
+            // VS-16 (U+FE0F): 絵文字表示セレクタ → 前セルを 2 セル幅に拡張
+            '\u{FE0F}' => self.grid.apply_vs16(),
+            // VS-15 (U+FE0E): テキスト表示セレクタ → 前セルにテキスト付加（幅変更なし）
+            '\u{FE0E}' => self.grid.combine_with_last_cell(c),
+            // ZWJ (U+200D): ゼロ幅結合子 → 前セルに付加（次の文字が結合される）
+            '\u{200D}' => self.grid.combine_with_last_cell(c),
+            _ => {
+                let w = UnicodeWidthChar::width(c).unwrap_or(0);
+                if w == 0 {
+                    // 一般的な結合文字・BiDi 制御文字 → 前セルに付加
+                    self.grid.combine_with_last_cell(c);
+                } else if self.grid.last_grapheme_ends_with_zwj() {
+                    // 前セルが ZWJ で終わっている → この文字を結合（ZWJ シーケンス完成）
+                    self.grid.combine_with_last_cell(c);
+                } else {
+                    self.grid.write_char(&c.to_string(), self.current_style);
+                }
+            }
+        }
     }
 
     fn execute(&mut self, byte: u8) {

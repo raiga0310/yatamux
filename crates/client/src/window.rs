@@ -916,7 +916,10 @@ mod win32 {
                                 if !handled {
                                     SetTextColor(mem_dc, fg);
                                     SetBkColor(mem_dc, bg);
-                                    let utf16: Vec<u16> = text.encode_utf16().collect();
+                                    // GDI は ZWJ シーケンスをシェーピングできないため、
+                                    // ZWJ 以降は描画せず基底グリフのみ表示する
+                                    let render_str = zwj_render_text(text);
+                                    let utf16: Vec<u16> = render_str.encode_utf16().collect();
                                     let _ = ExtTextOutW(
                                         mem_dc,
                                         x,
@@ -1080,7 +1083,10 @@ mod win32 {
                                     if !handled {
                                         SetTextColor(mem_dc, fg);
                                         SetBkColor(mem_dc, bg);
-                                        let utf16: Vec<u16> = text.encode_utf16().collect();
+                                        // GDI は ZWJ シーケンスをシェーピングできないため、
+                                        // ZWJ 以降は描画せず基底グリフのみ表示する
+                                        let render_str = zwj_render_text(text);
+                                        let utf16: Vec<u16> = render_str.encode_utf16().collect();
                                         let _ = ExtTextOutW(
                                             mem_dc,
                                             x,
@@ -1744,6 +1750,20 @@ mod win32 {
         let _ = LineTo(hdc, x + width, y);
         SelectObject(hdc, old_pen);
         let _ = DeleteObject(pen);
+    }
+
+    /// GDI 描画用テキストを返す
+    ///
+    /// GDI の `ExtTextOutW` は ZWJ シーケンスをシェーピングできないため、
+    /// ZWJ（U+200D）が含まれる場合は最初の ZWJ より前の部分文字列のみを返す。
+    /// これにより基底グリフ（例: 👨）だけが描画され、
+    /// ZWJ 後の文字（例: 💻）がクリップ矩形外にはみ出すのを防ぐ。
+    fn zwj_render_text(text: &str) -> &str {
+        if let Some(pos) = text.find('\u{200D}') {
+            &text[..pos]
+        } else {
+            text
+        }
     }
 
     fn cell_colors(cell: &Cell, _ime: &ImeState) -> (COLORREF, COLORREF) {

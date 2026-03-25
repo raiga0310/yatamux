@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use crate::cell::{Cell, CellStyle};
+use crate::cell::{Cell, CellContent, CellStyle};
 use crate::width::CjkWidthConfig;
 
 /// カーソル位置
@@ -334,20 +334,108 @@ impl Grid {
         self.scroll_bottom = new_rows.saturating_sub(1);
     }
 
+    /// カーソル直前のグラフィームセルに文字を結合する
+    ///
+    /// ZWJ 結合絵文字や VS-15/VS-16 など、前のセルに付加するコードポイントに使用する。
+    /// 前にグラフィームセルが見つからない場合は何もしない。
+    pub fn combine_with_last_cell(&mut self, c: char) {
+        let row = self.cursor.row as usize;
+        let col = self.cursor.col;
+
+        // カーソル直前から Grapheme セルを探す（Continuation はスキップ）
+        for c_idx in (0..col).rev() {
+            match &self.cells[row][c_idx as usize].content {
+                CellContent::Grapheme { .. } => {
+                    if let CellContent::Grapheme { text, .. } =
+                        &mut self.cells[row][c_idx as usize].content
+                    {
+                        text.push(c);
+                        self.dirty[row] = true;
+                    }
+                    return;
+                }
+                CellContent::Continuation => continue,
+                CellContent::Blank => return,
+            }
+        }
+    }
+
+    /// VS-16 (絵文字表示セレクタ) をカーソル直前セルに適用する
+    ///
+    /// 前セルが width=1 の場合は width=2 に拡張し、直後に Continuation セルを挿入する。
+    pub fn apply_vs16(&mut self) {
+        let row = self.cursor.row as usize;
+        let col = self.cursor.col;
+
+        // カーソル直前から Grapheme セルを探す
+        let mut target_col: Option<usize> = None;
+        for c_idx in (0..col).rev() {
+            match &self.cells[row][c_idx as usize].content {
+                CellContent::Grapheme { .. } => {
+                    target_col = Some(c_idx as usize);
+                    break;
+                }
+                CellContent::Continuation => continue,
+                CellContent::Blank => break,
+            }
+        }
+
+        if let Some(col_idx) = target_col {
+            let style = self.cells[row][col_idx].style;
+            let needs_widen = matches!(
+                &self.cells[row][col_idx].content,
+                CellContent::Grapheme { width: 1, .. }
+            );
+            if let CellContent::Grapheme { text, width } = &mut self.cells[row][col_idx].content {
+                text.push('\u{FE0F}');
+                if needs_widen {
+                    *width = 2;
+                }
+            }
+            if needs_widen {
+                // Continuation セルを挿入し、カーソルを 1 つ前進
+                let next_col = col_idx + 1;
+                if next_col < self.cols as usize {
+                    self.cells[row][next_col] = Cell::continuation(style);
+                }
+                let new_cursor = col + 1;
+                if new_cursor >= self.cols {
+                    self.cursor.col = self.cols - 1;
+                    self.flags.last_col_flag = true;
+                } else {
+                    self.cursor.col = new_cursor;
+                }
+            }
+            self.dirty[row] = true;
+        }
+    }
+
+    /// カーソル直前のグラフィームセルのテキストが ZWJ で終わるか調べる
+    pub fn last_grapheme_ends_with_zwj(&self) -> bool {
+        let row = self.cursor.row as usize;
+        let col = self.cursor.col;
+
+        for c_idx in (0..col).rev() {
+            match &self.cells[row][c_idx as usize].content {
+                CellContent::Grapheme { text, .. } => {
+                    return text.ends_with('\u{200D}');
+                }
+                CellContent::Continuation => continue,
+                CellContent::Blank => return false,
+            }
+        }
+        false
+    }
+
     /// 文字をカーソル位置に書き込む
     ///
     /// 全角文字が行末にはみ出す場合は早期折り返しを行う（DECAWM + LCF）。
     pub fn write_char(&mut self, grapheme: &str, style: CellStyle) {
-        let first_char = match grapheme.chars().next() {
-            Some(c) => c,
-            None => return,
+        // str_width で書記素クラスタ全体の幅を計算（VS-16, ZWJ 対応）
+        let width = match self.width_config.str_width(grapheme) {
+            0 => return, // 幅 0（結合文字など）→ skip
+            w => (w as u8).min(2),
         };
-        let width = self.width_config.char_width(first_char);
-
-        if width == 0 {
-            // 結合文字：現在セルに付加（簡易実装）
-            return;
-        }
 
         // DECAWM: last_col_flag が立っていたら折り返し
         if self.flags.last_col_flag && self.flags.auto_wrap {
@@ -845,5 +933,80 @@ mod tests {
         g.enter_alternate_screen();
         g.scroll_up(1);
         assert_eq!(g.scrollback_len(), 0);
+    }
+
+    // TC-04: ZWJ 後の文字が前セルに結合される
+    #[test]
+    fn test_combine_with_last_cell_zwj() {
+        use crate::vt::VtProcessor;
+        use vte::Perform;
+        let mut g = default_grid(10, 3);
+        {
+            let mut vt = VtProcessor::new(&mut g);
+            // 👨‍💻 = 👨 + ZWJ + 💻 を 1 文字ずつ feed
+            vt.print('👨');
+            vt.print('\u{200D}');
+            vt.print('💻');
+        }
+        // col=0 に ZWJ 結合テキストが格納されていること
+        match &g.row(0).unwrap()[0].content {
+            CellContent::Grapheme { text, width } => {
+                assert_eq!(text, "👨\u{200D}💻");
+                assert_eq!(*width, 2);
+            }
+            _ => panic!("col=0 should be a Grapheme"),
+        }
+        // col=1 は Continuation（👨 の 2 セル目）
+        assert_eq!(g.row(0).unwrap()[1].content, CellContent::Continuation);
+        // col=2 は Blank（💻 は新規セルを作らない）
+        assert_eq!(g.row(0).unwrap()[2].content, CellContent::Blank);
+    }
+
+    // TC-05: VS-16 受信後に前セルの幅が 2 になる
+    #[test]
+    fn test_apply_vs16_widens_cell() {
+        let mut g = default_grid(10, 3);
+        // ♀ (width=1 Ambiguous) を書き込む
+        g.write_char("♀", CellStyle::default());
+        // cursor は col=1 にある
+        g.apply_vs16();
+        match &g.row(0).unwrap()[0].content {
+            CellContent::Grapheme { text, width } => {
+                assert!(text.contains('\u{FE0F}'));
+                assert_eq!(*width, 2);
+            }
+            _ => panic!("col=0 should be Grapheme"),
+        }
+        assert_eq!(g.row(0).unwrap()[1].content, CellContent::Continuation);
+    }
+
+    // TC-06: VS-15 は前セルに付加される（幅変更なし）
+    #[test]
+    fn test_combine_vs15_no_width_change() {
+        let mut g = default_grid(10, 3);
+        g.write_char("♀", CellStyle::default());
+        g.combine_with_last_cell('\u{FE0E}');
+        match &g.row(0).unwrap()[0].content {
+            CellContent::Grapheme { text, width } => {
+                assert!(text.ends_with('\u{FE0E}'));
+                assert_eq!(*width, 1);
+            }
+            _ => panic!("col=0 should be Grapheme"),
+        }
+    }
+
+    // TC-10: write_char が ZWJ 文字列を str_width=2 で書く
+    #[test]
+    fn test_write_char_zwj_string() {
+        let mut g = default_grid(10, 3);
+        g.write_char("👨\u{200D}💻", CellStyle::default());
+        match &g.row(0).unwrap()[0].content {
+            CellContent::Grapheme { text, width } => {
+                assert_eq!(text, "👨\u{200D}💻");
+                assert_eq!(*width, 2);
+            }
+            _ => panic!("col=0 should be Grapheme"),
+        }
+        assert_eq!(g.row(0).unwrap()[1].content, CellContent::Continuation);
     }
 }
