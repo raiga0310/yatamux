@@ -273,6 +273,42 @@ mod win32 {
                 .msg_tx
                 .try_send(yatamux_protocol::ClientMessage::ClosePane { pane: active });
         }
+
+        /// スクロールバック + 画面内容を一時ファイルに書き出し、`$EDITOR` で開く
+        ///
+        /// `$EDITOR` が未設定の場合は `vi` を使用する。
+        /// エディタコマンドはアクティブペインへの入力として送信する。
+        fn open_scrollback_in_editor(&self) {
+            use std::io::Write as _;
+
+            let (active, text) = {
+                let store = self.panes.lock().unwrap();
+                let active = store.active;
+                let Some(grid_arc) = store.grids.get(&active) else {
+                    return;
+                };
+                let grid = grid_arc.lock().unwrap();
+                (active, grid.full_content_text())
+            };
+
+            // 一時ファイルに書き出す
+            let tmp_path = std::env::temp_dir().join(format!("yatamux_scroll_{}.txt", active.0));
+            let Ok(mut f) = std::fs::File::create(&tmp_path) else {
+                return;
+            };
+            let _ = f.write_all(text.as_bytes());
+            let _ = f.flush();
+
+            // $EDITOR （未設定時は vi）でファイルを開く
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+            let cmd = format!("{} {}\r", editor, tmp_path.display());
+            let _ = self
+                .msg_tx
+                .try_send(yatamux_protocol::ClientMessage::Input {
+                    pane: active,
+                    data: cmd.into_bytes(),
+                });
+        }
     }
 
     // ── WndProc ──────────────────────────────────────────────────────────────
@@ -449,6 +485,9 @@ mod win32 {
                             }
                             k if k == b'F' as u16 => {
                                 let _ = state.float_tx.try_send(());
+                            }
+                            k if k == b'X' as u16 => {
+                                state.open_scrollback_in_editor();
                             }
                             _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
                         }
@@ -1200,7 +1239,7 @@ mod win32 {
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
-                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  q: 戻る",
+                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  q: 戻る",
             ),
         };
 

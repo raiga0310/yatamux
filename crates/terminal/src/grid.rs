@@ -54,6 +54,67 @@ impl Default for GridFlags {
     }
 }
 
+/// スクロールバックバッファ
+///
+/// 画面外に押し出された行を FIFO で保持する専用型。
+/// `VecDeque` をラップし最大行数管理とテキストダンプを提供する。
+pub struct ScrollbackBuffer {
+    rows: VecDeque<Vec<Cell>>,
+    max_rows: usize,
+}
+
+impl ScrollbackBuffer {
+    pub fn new(max_rows: usize) -> Self {
+        Self {
+            rows: VecDeque::new(),
+            max_rows,
+        }
+    }
+
+    /// 行を末尾に追加する。上限を超えた場合は最古行を破棄する。
+    pub fn push(&mut self, row: Vec<Cell>) {
+        self.rows.push_back(row);
+        if self.rows.len() > self.max_rows {
+            self.rows.pop_front();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&Vec<Cell>> {
+        self.rows.get(idx)
+    }
+
+    /// スクロールバック全行をプレーンテキストとして返す
+    ///
+    /// 各行の末尾空白を除去し、改行（`\n`）で連結する。
+    pub fn as_text(&self) -> String {
+        self.rows
+            .iter()
+            .map(|r| row_to_text(r))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// 1行のセル列をプレーンテキストに変換する（末尾の空白を除去）
+fn row_to_text(row: &[Cell]) -> String {
+    let line: String = row
+        .iter()
+        .filter_map(|cell| match &cell.content {
+            CellContent::Grapheme { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    line.trim_end().to_string()
+}
+
 /// 仮想スクリーンバッファ
 pub struct Grid {
     cols: u16,
@@ -71,12 +132,12 @@ pub struct Grid {
     /// DECSTBM スクロール領域の下端行（0 始まり、inclusive）
     scroll_bottom: u16,
     /// スクロールバックバッファ（画面外に出た行。インデックス 0 が最古）
-    scrollback: VecDeque<Vec<Cell>>,
+    scrollback: ScrollbackBuffer,
 }
 
 impl Grid {
     /// スクロールバックバッファの最大行数
-    pub const SCROLLBACK_MAX: usize = 5000;
+    pub const SCROLLBACK_MAX: usize = 50_000;
 }
 
 /// メインスクリーンのスナップショット（オルタネートスクリーン切り替え用）
@@ -102,7 +163,7 @@ impl Grid {
             saved_main: None,
             scroll_top: 0,
             scroll_bottom,
-            scrollback: VecDeque::new(),
+            scrollback: ScrollbackBuffer::new(Self::SCROLLBACK_MAX),
         }
     }
 
@@ -268,6 +329,24 @@ impl Grid {
     /// スクロールバックの行を取得する（0 が最古、len-1 が最新）
     pub fn scrollback_row(&self, idx: usize) -> Option<&Vec<Cell>> {
         self.scrollback.get(idx)
+    }
+
+    /// スクロールバック + 現在の画面全体をプレーンテキストとして返す
+    ///
+    /// コピー・外部エディタ起動などに使用する。各行末尾の空白は除去される。
+    pub fn full_content_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        // スクロールバック行
+        if !self.scrollback.is_empty() {
+            parts.push(self.scrollback.as_text());
+        }
+        // 現在の画面行
+        for r in 0..self.rows {
+            if let Some(row) = self.row(r) {
+                parts.push(row_to_text(row));
+            }
+        }
+        parts.join("\n")
     }
 
     /// 行頭からカーソル位置までを消去する (`EL 1`)
@@ -521,10 +600,7 @@ impl Grid {
         if is_full_screen {
             for i in 0..n {
                 let row = self.cells[i].clone();
-                self.scrollback.push_back(row);
-                if self.scrollback.len() > Self::SCROLLBACK_MAX {
-                    self.scrollback.pop_front();
-                }
+                self.scrollback.push(row);
             }
         }
 
@@ -895,11 +971,12 @@ mod tests {
         assert_eq!(g.scrollback_len(), 0);
     }
 
-    // TC-03: スクロールバックの上限（5000 行）を超えたら古い行を捨てる
+    // TC-03: スクロールバックの上限を超えたら古い行を捨てる
     #[test]
     fn test_scrollback_max_lines() {
         let mut g = default_grid(10, 3);
-        for _ in 0..=5001 {
+        // 上限 + 1 回スクロールして、上限ちょうどに収まることを確認
+        for _ in 0..=Grid::SCROLLBACK_MAX {
             g.scroll_up(1);
         }
         assert_eq!(g.scrollback_len(), Grid::SCROLLBACK_MAX);
@@ -1008,5 +1085,48 @@ mod tests {
             _ => panic!("col=0 should be Grapheme"),
         }
         assert_eq!(g.row(0).unwrap()[1].content, CellContent::Continuation);
+    }
+
+    // TC-08: SCROLLBACK_MAX が 50,000 である
+    #[test]
+    fn test_scrollback_max_is_50000() {
+        assert_eq!(Grid::SCROLLBACK_MAX, 50_000);
+    }
+
+    // TC-09: ScrollbackBuffer::as_text が末尾空白を除去して改行で連結する
+    #[test]
+    fn test_scrollback_buffer_as_text() {
+        let mut buf = ScrollbackBuffer::new(10);
+        // "foo  " → "foo", "bar" → "bar" の行を作成して push
+        let style = CellStyle::default();
+        let mut row_foo: Vec<Cell> = vec![Cell::blank(); 5];
+        row_foo[0] = Cell::from_grapheme("f".into(), 1, style);
+        row_foo[1] = Cell::from_grapheme("o".into(), 1, style);
+        row_foo[2] = Cell::from_grapheme("o".into(), 1, style);
+        // col 3,4 は Blank（末尾空白相当）
+        buf.push(row_foo);
+
+        let mut row_bar: Vec<Cell> = vec![Cell::blank(); 3];
+        row_bar[0] = Cell::from_grapheme("b".into(), 1, style);
+        row_bar[1] = Cell::from_grapheme("a".into(), 1, style);
+        row_bar[2] = Cell::from_grapheme("r".into(), 1, style);
+        buf.push(row_bar);
+
+        let text = buf.as_text();
+        assert_eq!(text, "foo\nbar");
+    }
+
+    // TC-10: full_content_text() がスクロールバック + 画面内容を含む
+    #[test]
+    fn test_full_content_text_includes_scrollback_and_screen() {
+        let mut g = default_grid(10, 2);
+        // "A" を書いて row 0 をスクロールアウト
+        g.write_char("A", CellStyle::default());
+        g.scroll_up(1); // row 0 がスクロールバックへ
+                        // "B" を画面 row 0 に書く
+        g.write_char("B", CellStyle::default());
+        let text = g.full_content_text();
+        assert!(text.contains('A'), "スクロールバック行 'A' が含まれること");
+        assert!(text.contains('B'), "画面行 'B' が含まれること");
     }
 }
