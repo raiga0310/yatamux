@@ -23,8 +23,8 @@ mod win32 {
     use tokio::sync::mpsc;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::*;
-    use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+    use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
     };
@@ -34,13 +34,13 @@ mod win32 {
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     use std::collections::HashMap;
-    use yatamux_terminal::{Cell, Grid};
-    use yatamux_terminal::cell::CellContent;
     use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
     use yatamux_protocol::ClientMessage;
+    use yatamux_terminal::cell::CellContent;
+    use yatamux_terminal::{Cell, Grid};
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
-    use crate::layout::{PaneRect, PaneStore};
+    use crate::layout::{PaneRect, PaneStore, Toast};
 
     // ── 定数 ────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ mod win32 {
     // Catppuccin Mocha テーマ
     const COLOR_BG: COLORREF = COLORREF(0x00_2E_1E_1E); // base  #1e1e2e
     const COLOR_FG: COLORREF = COLORREF(0x00_F4_D6_CD); // text  #cdd6f4
-    const COLOR_CURSOR: COLORREF = COLORREF(0x00_E7_C2_F5);    // pink     #f5c2e7
+    const COLOR_CURSOR: COLORREF = COLORREF(0x00_E7_C2_F5); // pink     #f5c2e7
     const COLOR_SEPARATOR: COLORREF = COLORREF(0x00_5A_47_45); // surface1 #45475a
     const COLOR_PREEDIT_BG: COLORREF = COLORREF(0x00_5A_47_45); // surface1 #45475a
 
@@ -104,6 +104,8 @@ mod win32 {
         pub cell_height: i32,
         /// GDI フォントハンドル
         pub hfont: HFONT,
+        /// 表示中のトースト通知リスト（Win32 スレッド専用）
+        pub active_toasts: Mutex<Vec<Toast>>,
     }
 
     impl ClientState {
@@ -123,6 +125,7 @@ mod win32 {
                 cell_width,
                 cell_height,
                 hfont,
+                active_toasts: Mutex::new(Vec::new()),
             }
         }
 
@@ -135,12 +138,19 @@ mod win32 {
         /// サーバーへ入力バイト列を送信（アクティブペイン）
         fn send_input(&self, data: Vec<u8>) {
             let active = self.panes.lock().unwrap().active;
-            let _ = self.msg_tx.try_send(ClientMessage::Input { pane: active, data });
+            let _ = self
+                .msg_tx
+                .try_send(ClientMessage::Input { pane: active, data });
         }
 
         /// 全ペインをコンテンツ領域サイズに合わせてリサイズ
         fn resize_all_panes(&self, content_w: i32, content_h: i32) {
-            let total = PaneRect { x: 0, y: 0, w: content_w, h: content_h };
+            let total = PaneRect {
+                x: 0,
+                y: 0,
+                w: content_w,
+                h: content_h,
+            };
             let store = self.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total);
             for (pane_id, rect) in rects {
@@ -279,7 +289,7 @@ mod win32 {
                     // IME 変換中の文字は WM_IME_COMPOSITION で処理済み
                     if !state.ime.state.lock().unwrap().composing {
                         let code = wparam.0 as u32;
-                        let ctrl  = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                        let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                         let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                         // WM_KEYDOWN で処理済みのキーは WM_CHAR を無視する
                         // (TranslateMessage が二重送信を起こすのを防ぐ)
@@ -307,7 +317,7 @@ mod win32 {
             WM_KEYDOWN => {
                 if !state_ptr.is_null() {
                     let state = &*state_ptr;
-                    let ctrl  = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                    let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                     let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
 
                     // Ctrl+Shift+E: 縦分割 (side by side)
@@ -333,7 +343,7 @@ mod win32 {
                     if ctrl && !shift {
                         let focus_fwd = match wparam.0 as u16 {
                             k if k == VK_RIGHT.0 || k == VK_DOWN.0 => Some(true),
-                            k if k == VK_LEFT.0  || k == VK_UP.0   => Some(false),
+                            k if k == VK_LEFT.0 || k == VK_UP.0 => Some(false),
                             _ => None,
                         };
                         if let Some(fwd) = focus_fwd {
@@ -365,15 +375,23 @@ mod win32 {
                         let bracketed = state.active_grid().lock().unwrap().bracketed_paste();
                         if let Some(text) = read_clipboard_text(hwnd) {
                             let mut data = Vec::new();
-                            if bracketed { data.extend_from_slice(b"\x1b[200~"); }
+                            if bracketed {
+                                data.extend_from_slice(b"\x1b[200~");
+                            }
                             data.extend_from_slice(text.as_bytes());
-                            if bracketed { data.extend_from_slice(b"\x1b[201~"); }
+                            if bracketed {
+                                data.extend_from_slice(b"\x1b[201~");
+                            }
                             state.send_input(data);
                         }
                         return LRESULT(0);
                     }
 
-                    let app_cursor = state.active_grid().lock().unwrap().application_cursor_keys();
+                    let app_cursor = state
+                        .active_grid()
+                        .lock()
+                        .unwrap()
+                        .application_cursor_keys();
                     if let Some(vt) = keydown_to_vt(wparam, lparam, app_cursor) {
                         state.send_input(vt);
                         return LRESULT(0);
@@ -408,13 +426,31 @@ mod win32 {
                         write_clipboard_text(hwnd, &data);
                     }
 
+                    // トースト: pending → active に移し、経過時間を進め、期限切れを削除
+                    let has_active_toasts = {
+                        let mut active = state.active_toasts.lock().unwrap();
+                        {
+                            let mut store = state.panes.lock().unwrap();
+                            while let Some(t) = store.pending_toasts.pop_front() {
+                                active.push(t);
+                            }
+                        }
+                        for t in active.iter_mut() {
+                            t.elapsed_ms = t.elapsed_ms.saturating_add(TIMER_INTERVAL_MS);
+                        }
+                        active.retain(|t| t.elapsed_ms < Toast::DURATION_MS);
+                        !active.is_empty()
+                    };
+
                     let needs_repaint = {
                         let store = state.panes.lock().unwrap();
-                        let dirty = store.grids.values()
+                        let dirty = store
+                            .grids
+                            .values()
                             .any(|g| g.lock().unwrap().has_dirty_rows());
                         dirty || state.ime.state.lock().unwrap().composing
                     };
-                    if needs_repaint {
+                    if needs_repaint || has_active_toasts {
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 }
@@ -433,12 +469,12 @@ mod win32 {
                     // モーション通知は mode>=2 のときのみ（ボタン押下中は mode>=2、全モーションは mode==3）
                     let is_motion = msg == WM_MOUSEMOVE;
                     let btn_down = matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN);
-                    let btn_up   = matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP);
+                    let btn_up = matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP);
                     let send = match reporting {
                         0 => false,
-                        1 => btn_down,                         // x10: 押下のみ
-                        2 => btn_down || btn_up || is_motion,  // button: 押下中モーション
-                        _ => btn_down || btn_up || is_motion,  // any: 全モーション
+                        1 => btn_down,                        // x10: 押下のみ
+                        2 => btn_down || btn_up || is_motion, // button: 押下中モーション
+                        _ => btn_down || btn_up || is_motion, // any: 全モーション
                     };
                     if send {
                         // lparam の低 16 bit = X, 高 16 bit = Y (クライアント座標・ピクセル)
@@ -449,7 +485,13 @@ mod win32 {
                         // ボタン番号: 左=0, 右=2, モーション=32+btn
                         let base_btn: u8 = if is_motion {
                             let held = wparam.0 as u32;
-                            let b = if held & 0x0001 != 0 { 0u8 } else if held & 0x0002 != 0 { 2 } else { 3 };
+                            let b = if held & 0x0001 != 0 {
+                                0u8
+                            } else if held & 0x0002 != 0 {
+                                2
+                            } else {
+                                3
+                            };
                             32 + b
                         } else {
                             match msg {
@@ -457,7 +499,9 @@ mod win32 {
                                 _ => 2,
                             }
                         };
-                        if let Some(data) = mouse_to_vt(base_btn, col, row, btn_up && !is_motion, sgr) {
+                        if let Some(data) =
+                            mouse_to_vt(base_btn, col, row, btn_up && !is_motion, sgr)
+                        {
                             state.send_input(data);
                         }
                     }
@@ -521,14 +565,20 @@ mod win32 {
         // ── コンテンツ領域とレイアウト ─────────────────────────────────
         let content_w = (rect.right - PADDING_X * 2).max(1);
         let content_h = (rect.bottom - PADDING_Y * 2).max(1);
-        let total_rect = PaneRect { x: 0, y: 0, w: content_w, h: content_h };
+        let total_rect = PaneRect {
+            x: 0,
+            y: 0,
+            w: content_w,
+            h: content_h,
+        };
 
         // PaneStore を短時間ロックして必要な情報を取得
         let (active_pane, pane_rects, sep_rects, grid_map) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
-            let seps  = store.layout.compute_separator_rects(total_rect);
-            let map: HashMap<PaneId, Arc<Mutex<Grid>>> = store.grids
+            let seps = store.layout.compute_separator_rects(total_rect);
+            let map: HashMap<PaneId, Arc<Mutex<Grid>>> = store
+                .grids
                 .iter()
                 .map(|(&id, g)| (id, Arc::clone(g)))
                 .collect();
@@ -549,13 +599,17 @@ mod win32 {
                 let display_cols = (pane_rect.w / state.cell_width.max(1)).max(1) as usize;
 
                 for row in 0..grid.rows() {
-                    let cells = match grid.row(row) { Some(c) => c, None => continue };
+                    let cells = match grid.row(row) {
+                        Some(c) => c,
+                        None => continue,
+                    };
                     let y = row as i32 * state.cell_height + off_y;
                     let mut x = off_x;
 
                     for cell in cells.iter().take(display_cols) {
                         let cell_rect = RECT {
-                            left: x, top: y,
+                            left: x,
+                            top: y,
                             right: x + state.cell_width,
                             bottom: y + state.cell_height,
                         };
@@ -564,32 +618,70 @@ mod win32 {
                             CellContent::Grapheme { text, width } => {
                                 let (fg, bg) = cell_colors(cell, &ime_state);
                                 let width_px = state.cell_width * (*width as i32);
-                                let wide_rect = RECT { right: x + width_px, ..cell_rect };
+                                let wide_rect = RECT {
+                                    right: x + width_px,
+                                    ..cell_rect
+                                };
 
                                 SetBkColor(mem_dc, bg);
-                                let _ = ExtTextOutW(mem_dc, x, y, ETO_OPAQUE,
-                                    Some(&wide_rect), PCWSTR::null(), 0, None);
+                                let _ = ExtTextOutW(
+                                    mem_dc,
+                                    x,
+                                    y,
+                                    ETO_OPAQUE,
+                                    Some(&wide_rect),
+                                    PCWSTR::null(),
+                                    0,
+                                    None,
+                                );
 
                                 let first_cp = text.chars().next().map(|c| c as u32).unwrap_or(0);
                                 let handled = if (0x2500..=0x259F).contains(&first_cp) {
-                                    draw_box_char(mem_dc, x, y, state.cell_width, state.cell_height, first_cp, fg)
-                                } else { false };
+                                    draw_box_char(
+                                        mem_dc,
+                                        x,
+                                        y,
+                                        state.cell_width,
+                                        state.cell_height,
+                                        first_cp,
+                                        fg,
+                                    )
+                                } else {
+                                    false
+                                };
 
                                 if !handled {
                                     SetTextColor(mem_dc, fg);
                                     SetBkColor(mem_dc, bg);
                                     let utf16: Vec<u16> = text.encode_utf16().collect();
-                                    let _ = ExtTextOutW(mem_dc, x, y, ETO_CLIPPED,
-                                        Some(&wide_rect), PCWSTR(utf16.as_ptr()),
-                                        utf16.len() as u32, None);
+                                    let _ = ExtTextOutW(
+                                        mem_dc,
+                                        x,
+                                        y,
+                                        ETO_CLIPPED,
+                                        Some(&wide_rect),
+                                        PCWSTR(utf16.as_ptr()),
+                                        utf16.len() as u32,
+                                        None,
+                                    );
                                 }
                                 x += state.cell_width;
                             }
-                            CellContent::Continuation => { x += state.cell_width; }
+                            CellContent::Continuation => {
+                                x += state.cell_width;
+                            }
                             CellContent::Blank => {
                                 SetBkColor(mem_dc, COLOR_BG);
-                                let _ = ExtTextOutW(mem_dc, x, y, ETO_OPAQUE,
-                                    Some(&cell_rect), PCWSTR::null(), 0, None);
+                                let _ = ExtTextOutW(
+                                    mem_dc,
+                                    x,
+                                    y,
+                                    ETO_OPAQUE,
+                                    Some(&cell_rect),
+                                    PCWSTR::null(),
+                                    0,
+                                    None,
+                                );
                                 x += state.cell_width;
                             }
                         }
@@ -608,10 +700,29 @@ mod win32 {
                         let (fg, bg) = preedit_segment_colors(&seg.attr);
                         SetTextColor(mem_dc, fg);
                         SetBkColor(mem_dc, bg);
-                        let seg_rect = RECT { left: px, top: py, right: px + seg_width, bottom: py + state.cell_height };
-                        let _ = ExtTextOutW(mem_dc, px, py, ETO_CLIPPED | ETO_OPAQUE,
-                            Some(&seg_rect), PCWSTR(seg_utf16.as_ptr()), seg_utf16.len() as u32, None);
-                        draw_preedit_underline(mem_dc, &seg.attr, px, py + state.cell_height - 2, seg_width);
+                        let seg_rect = RECT {
+                            left: px,
+                            top: py,
+                            right: px + seg_width,
+                            bottom: py + state.cell_height,
+                        };
+                        let _ = ExtTextOutW(
+                            mem_dc,
+                            px,
+                            py,
+                            ETO_CLIPPED | ETO_OPAQUE,
+                            Some(&seg_rect),
+                            PCWSTR(seg_utf16.as_ptr()),
+                            seg_utf16.len() as u32,
+                            None,
+                        );
+                        draw_preedit_underline(
+                            mem_dc,
+                            &seg.attr,
+                            px,
+                            py + state.cell_height - 2,
+                            seg_width,
+                        );
                         px += seg_width;
                     }
                 }
@@ -628,10 +739,18 @@ mod win32 {
 
         // ── セパレーター描画 ────────────────────────────────────────────
         for sep in &sep_rects {
-            fill_rect(mem_dc, COLOR_SEPARATOR,
-                PADDING_X + sep.x, PADDING_Y + sep.y,
-                PADDING_X + sep.x + sep.w, PADDING_Y + sep.y + sep.h);
+            fill_rect(
+                mem_dc,
+                COLOR_SEPARATOR,
+                PADDING_X + sep.x,
+                PADDING_Y + sep.y,
+                PADDING_X + sep.x + sep.w,
+                PADDING_Y + sep.y + sep.h,
+            );
         }
+
+        // ── トースト通知 ────────────────────────────────────────────
+        paint_toasts(mem_dc, rect.right, rect.bottom, state);
 
         // バックバッファを画面にコピー
         BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY).ok();
@@ -643,6 +762,104 @@ mod win32 {
         let _ = DeleteDC(mem_dc);
 
         let _ = EndPaint(hwnd, &ps);
+    }
+
+    /// トースト通知をバックバッファの右下に描画する。
+    ///
+    /// Steam 風のスライドイン（下から上へ 300ms）で最大 3 件まで縦に積む。
+    /// 期限（4000ms）に近づくと消えるのではなく WM_TIMER 側で配列から除去される。
+    unsafe fn paint_toasts(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
+        const TOAST_W: i32 = 300;
+        const TOAST_H: i32 = 64;
+        const TOAST_MARGIN: i32 = 16;
+        const TOAST_GAP: i32 = 8;
+        const TOAST_PADDING: i32 = 12;
+
+        // Catppuccin Mocha: surface0 = #313244, surface2 = #585b70, subtext0 = #a6adc8
+        const COLOR_TOAST_BG: COLORREF = COLORREF(0x00_44_32_31);
+        const COLOR_TOAST_BORDER: COLORREF = COLORREF(0x00_70_5B_58);
+        const COLOR_TOAST_LABEL: COLORREF = COLORREF(0x00_C8_AD_A6);
+
+        let toasts = state.active_toasts.lock().unwrap();
+        // 最新のもの（末尾）を最大 3 件、新しいものほど下に表示
+        let visible: Vec<&Toast> = toasts.iter().rev().take(3).collect();
+
+        for (i, toast) in visible.iter().enumerate() {
+            // スライドオフセット: elapsed < SLIDE_MS のあいだ下から登場
+            let slide_offset = if toast.elapsed_ms < Toast::SLIDE_MS {
+                let remaining = Toast::SLIDE_MS - toast.elapsed_ms;
+                (remaining as i64 * (TOAST_H + TOAST_GAP) as i64 / Toast::SLIDE_MS as i64) as i32
+            } else {
+                0
+            };
+
+            let base_y =
+                win_h - TOAST_MARGIN - TOAST_H - (i as i32) * (TOAST_H + TOAST_GAP) + slide_offset;
+            let base_x = win_w - TOAST_MARGIN - TOAST_W;
+
+            let toast_rect = RECT {
+                left: base_x,
+                top: base_y,
+                right: base_x + TOAST_W,
+                bottom: base_y + TOAST_H,
+            };
+
+            // 背景
+            let bg_brush = CreateSolidBrush(COLOR_TOAST_BG);
+            FillRect(hdc, &toast_rect, bg_brush);
+            let _ = DeleteObject(bg_brush);
+
+            // 枠線（1px）
+            let border_pen = CreatePen(PS_SOLID, 1, COLOR_TOAST_BORDER);
+            let old_pen = SelectObject(hdc, border_pen);
+            let null_brush = GetStockObject(NULL_BRUSH);
+            let old_brush = SelectObject(hdc, null_brush);
+            let _ = Rectangle(
+                hdc,
+                toast_rect.left,
+                toast_rect.top,
+                toast_rect.right,
+                toast_rect.bottom,
+            );
+            SelectObject(hdc, old_pen);
+            SelectObject(hdc, old_brush);
+            let _ = DeleteObject(border_pen);
+
+            SetBkMode(hdc, TRANSPARENT);
+
+            // ラベル行: "Pane N"
+            let label = format!("Pane {}", toast.pane_id.0);
+            let mut label_w: Vec<u16> = label.encode_utf16().collect();
+            let mut label_rect = RECT {
+                left: toast_rect.left + TOAST_PADDING,
+                top: toast_rect.top + 8,
+                right: toast_rect.right - TOAST_PADDING,
+                bottom: toast_rect.top + 30,
+            };
+            SetTextColor(hdc, COLOR_TOAST_LABEL);
+            DrawTextW(
+                hdc,
+                &mut label_w,
+                &mut label_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+
+            // メッセージ行
+            let mut msg_w: Vec<u16> = toast.message.encode_utf16().collect();
+            let mut msg_rect = RECT {
+                left: toast_rect.left + TOAST_PADDING,
+                top: toast_rect.top + 30,
+                right: toast_rect.right - TOAST_PADDING,
+                bottom: toast_rect.bottom - 8,
+            };
+            SetTextColor(hdc, COLOR_FG);
+            DrawTextW(
+                hdc,
+                &mut msg_w,
+                &mut msg_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
     }
 
     /// 罫線文字・ブロック要素を GDI プリミティブで描画する。
@@ -663,21 +880,17 @@ mod win32 {
         let cx = x + w / 2;
         let cy = y + h / 2;
         let x0 = x;
-        let x1 = x + w;        // right edge (exclusive)
+        let x1 = x + w; // right edge (exclusive)
         let y0 = y;
-        let y1 = y + h;        // bottom edge (exclusive)
+        let y1 = y + h; // bottom edge (exclusive)
 
         // 線の太さ: light=1, heavy=2, double=1 (2本で表現)
-        let thin  = 1i32;
+        let thin = 1i32;
         let thick = (w / 6).max(2);
 
         // ペンを作成して DC に選択するクロージャ
-        let make_pen = |width: i32| {
-            CreatePen(PS_SOLID, width, fg)
-        };
-        let set_pen = |pen: HPEN| -> HPEN {
-            HPEN(SelectObject(hdc, pen).0)
-        };
+        let make_pen = |width: i32| CreatePen(PS_SOLID, width, fg);
+        let set_pen = |pen: HPEN| -> HPEN { HPEN(SelectObject(hdc, pen).0) };
         let del_pen = |old: HPEN, pen: HPEN| {
             SelectObject(hdc, old);
             let _ = DeleteObject(pen);
@@ -696,199 +909,296 @@ mod win32 {
 
         match cp {
             // ── 水平線 ──────────────────────────────────────────────────────
-            0x2500 => { // ─ light
-                let p = make_pen(thin); let o = set_pen(p);
+            0x2500 => {
+                // ─ light
+                let p = make_pen(thin);
+                let o = set_pen(p);
                 hline(hdc, x0, x1, cy);
                 del_pen(o, p);
             }
-            0x2501 => { // ━ heavy
-                let p = make_pen(thick); let o = set_pen(p);
+            0x2501 => {
+                // ━ heavy
+                let p = make_pen(thick);
+                let o = set_pen(p);
                 hline(hdc, x0, x1, cy);
                 del_pen(o, p);
             }
             // ── 垂直線 ──────────────────────────────────────────────────────
-            0x2502 => { // │ light
-                let p = make_pen(thin); let o = set_pen(p);
+            0x2502 => {
+                // │ light
+                let p = make_pen(thin);
+                let o = set_pen(p);
                 vline(hdc, cx, y0, y1);
                 del_pen(o, p);
             }
-            0x2503 => { // ┃ heavy
-                let p = make_pen(thick); let o = set_pen(p);
+            0x2503 => {
+                // ┃ heavy
+                let p = make_pen(thick);
+                let o = set_pen(p);
                 vline(hdc, cx, y0, y1);
                 del_pen(o, p);
             }
             // ── 角 (light) ──────────────────────────────────────────────────
-            0x250C => { // ┌
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, cx, x1, cy); vline(hdc, cx, cy, y1);
+            0x250C => {
+                // ┌
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, cx, x1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x2510 => { // ┐
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, cx + 1, cy); vline(hdc, cx, cy, y1);
+            0x2510 => {
+                // ┐
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, cx + 1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x2514 => { // └
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, cx, x1, cy); vline(hdc, cx, y0, cy + 1);
+            0x2514 => {
+                // └
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, cx, x1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
-            0x2518 => { // ┘
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, cx + 1, cy); vline(hdc, cx, y0, cy + 1);
+            0x2518 => {
+                // ┘
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, cx + 1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
             // ── 角 (heavy) ──────────────────────────────────────────────────
-            0x250F => { // ┏
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, cx, x1, cy); vline(hdc, cx, cy, y1);
+            0x250F => {
+                // ┏
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, cx, x1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x2513 => { // ┓
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, x0, cx + 1, cy); vline(hdc, cx, cy, y1);
+            0x2513 => {
+                // ┓
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, x0, cx + 1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x2517 => { // ┗
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, cx, x1, cy); vline(hdc, cx, y0, cy + 1);
+            0x2517 => {
+                // ┗
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, cx, x1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
-            0x251B => { // ┛
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, x0, cx + 1, cy); vline(hdc, cx, y0, cy + 1);
+            0x251B => {
+                // ┛
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, x0, cx + 1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
             // ── T 字 (light) ────────────────────────────────────────────────
-            0x251C => { // ├ vertical + right
-                let p = make_pen(thin); let o = set_pen(p);
-                vline(hdc, cx, y0, y1); hline(hdc, cx, x1, cy);
+            0x251C => {
+                // ├ vertical + right
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                vline(hdc, cx, y0, y1);
+                hline(hdc, cx, x1, cy);
                 del_pen(o, p);
             }
-            0x2524 => { // ┤ vertical + left
-                let p = make_pen(thin); let o = set_pen(p);
-                vline(hdc, cx, y0, y1); hline(hdc, x0, cx + 1, cy);
+            0x2524 => {
+                // ┤ vertical + left
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                vline(hdc, cx, y0, y1);
+                hline(hdc, x0, cx + 1, cy);
                 del_pen(o, p);
             }
-            0x252C => { // ┬ horizontal + down
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, x1, cy); vline(hdc, cx, cy, y1);
+            0x252C => {
+                // ┬ horizontal + down
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, x1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x2534 => { // ┴ horizontal + up
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, x1, cy); vline(hdc, cx, y0, cy + 1);
+            0x2534 => {
+                // ┴ horizontal + up
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, x1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
-            0x253C => { // ┼ cross
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, x1, cy); vline(hdc, cx, y0, y1);
+            0x253C => {
+                // ┼ cross
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, x1, cy);
+                vline(hdc, cx, y0, y1);
                 del_pen(o, p);
             }
             // ── T 字 (heavy) ────────────────────────────────────────────────
-            0x2523 => { // ┣
-                let p = make_pen(thick); let o = set_pen(p);
-                vline(hdc, cx, y0, y1); hline(hdc, cx, x1, cy);
+            0x2523 => {
+                // ┣
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                vline(hdc, cx, y0, y1);
+                hline(hdc, cx, x1, cy);
                 del_pen(o, p);
             }
-            0x252B => { // ┫
-                let p = make_pen(thick); let o = set_pen(p);
-                vline(hdc, cx, y0, y1); hline(hdc, x0, cx + 1, cy);
+            0x252B => {
+                // ┫
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                vline(hdc, cx, y0, y1);
+                hline(hdc, x0, cx + 1, cy);
                 del_pen(o, p);
             }
-            0x2533 => { // ┳
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, x0, x1, cy); vline(hdc, cx, cy, y1);
+            0x2533 => {
+                // ┳
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, x0, x1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x253B => { // ┻
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, x0, x1, cy); vline(hdc, cx, y0, cy + 1);
+            0x253B => {
+                // ┻
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, x0, x1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
-            0x254B => { // ╋
-                let p = make_pen(thick); let o = set_pen(p);
-                hline(hdc, x0, x1, cy); vline(hdc, cx, y0, y1);
+            0x254B => {
+                // ╋
+                let p = make_pen(thick);
+                let o = set_pen(p);
+                hline(hdc, x0, x1, cy);
+                vline(hdc, cx, y0, y1);
                 del_pen(o, p);
             }
             // ── 二重線 ──────────────────────────────────────────────────────
-            0x2550 => { // ═ double horizontal
-                let p = make_pen(thin); let o = set_pen(p);
+            0x2550 => {
+                // ═ double horizontal
+                let p = make_pen(thin);
+                let o = set_pen(p);
                 hline(hdc, x0, x1, cy - 1);
                 hline(hdc, x0, x1, cy + 1);
                 del_pen(o, p);
             }
-            0x2551 => { // ║ double vertical
-                let p = make_pen(thin); let o = set_pen(p);
+            0x2551 => {
+                // ║ double vertical
+                let p = make_pen(thin);
+                let o = set_pen(p);
                 vline(hdc, cx - 1, y0, y1);
                 vline(hdc, cx + 1, y0, y1);
                 del_pen(o, p);
             }
             // ── 丸角 (rounded corners) ──────────────────────────────────────
             // 丸弧の近似として角を L 字型の線分で描画する
-            0x256D => { // ╭ rounded down-right
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, cx, x1, cy); vline(hdc, cx, cy, y1);
+            0x256D => {
+                // ╭ rounded down-right
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, cx, x1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x256E => { // ╮ rounded down-left
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, cx + 1, cy); vline(hdc, cx, cy, y1);
+            0x256E => {
+                // ╮ rounded down-left
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, cx + 1, cy);
+                vline(hdc, cx, cy, y1);
                 del_pen(o, p);
             }
-            0x256F => { // ╯ rounded up-left
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, x0, cx + 1, cy); vline(hdc, cx, y0, cy + 1);
+            0x256F => {
+                // ╯ rounded up-left
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, x0, cx + 1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
-            0x2570 => { // ╰ rounded up-right
-                let p = make_pen(thin); let o = set_pen(p);
-                hline(hdc, cx, x1, cy); vline(hdc, cx, y0, cy + 1);
+            0x2570 => {
+                // ╰ rounded up-right
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                hline(hdc, cx, x1, cy);
+                vline(hdc, cx, y0, cy + 1);
                 del_pen(o, p);
             }
             // ── 斜線 ────────────────────────────────────────────────────────
-            0x2571 => { // ╱ diagonal upper-right to lower-left
-                let p = make_pen(thin); let o = set_pen(p);
-                let _ = MoveToEx(hdc, x0, y1 - 1, None); let _ = LineTo(hdc, x1, y0);
+            0x2571 => {
+                // ╱ diagonal upper-right to lower-left
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                let _ = MoveToEx(hdc, x0, y1 - 1, None);
+                let _ = LineTo(hdc, x1, y0);
                 del_pen(o, p);
             }
-            0x2572 => { // ╲ diagonal upper-left to lower-right
-                let p = make_pen(thin); let o = set_pen(p);
-                let _ = MoveToEx(hdc, x0, y0, None); let _ = LineTo(hdc, x1, y1);
+            0x2572 => {
+                // ╲ diagonal upper-left to lower-right
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                let _ = MoveToEx(hdc, x0, y0, None);
+                let _ = LineTo(hdc, x1, y1);
                 del_pen(o, p);
             }
-            0x2573 => { // ╳ diagonal cross
-                let p = make_pen(thin); let o = set_pen(p);
-                let _ = MoveToEx(hdc, x0, y1 - 1, None); let _ = LineTo(hdc, x1, y0);
-                let _ = MoveToEx(hdc, x0, y0, None); let _ = LineTo(hdc, x1, y1);
+            0x2573 => {
+                // ╳ diagonal cross
+                let p = make_pen(thin);
+                let o = set_pen(p);
+                let _ = MoveToEx(hdc, x0, y1 - 1, None);
+                let _ = LineTo(hdc, x1, y0);
+                let _ = MoveToEx(hdc, x0, y0, None);
+                let _ = LineTo(hdc, x1, y1);
                 del_pen(o, p);
             }
             // ── ブロック要素 (U+2580-U+259F) ────────────────────────────────
-            0x2580 => { // ▀ upper half
+            0x2580 => {
+                // ▀ upper half
                 fill_rect(hdc, fg, x0, y0, x1, cy);
             }
-            0x2584 => { // ▄ lower half
+            0x2584 => {
+                // ▄ lower half
                 fill_rect(hdc, fg, x0, cy, x1, y1);
             }
-            0x2588 => { // █ full
+            0x2588 => {
+                // █ full
                 fill_rect(hdc, fg, x0, y0, x1, y1);
             }
-            0x258C => { // ▌ left half
+            0x258C => {
+                // ▌ left half
                 fill_rect(hdc, fg, x0, y0, cx, y1);
             }
-            0x2590 => { // ▐ right half
+            0x2590 => {
+                // ▐ right half
                 fill_rect(hdc, fg, cx, y0, x1, y1);
             }
-            0x2596 => { // ▖ lower-left quarter
+            0x2596 => {
+                // ▖ lower-left quarter
                 fill_rect(hdc, fg, x0, cy, cx, y1);
             }
-            0x2597 => { // ▗ lower-right quarter
+            0x2597 => {
+                // ▗ lower-right quarter
                 fill_rect(hdc, fg, cx, cy, x1, y1);
             }
-            0x2598 => { // ▘ upper-left quarter
+            0x2598 => {
+                // ▘ upper-left quarter
                 fill_rect(hdc, fg, x0, y0, cx, cy);
             }
-            0x259D => { // ▝ upper-right quarter
+            0x259D => {
+                // ▝ upper-right quarter
                 fill_rect(hdc, fg, cx, y0, x1, cy);
             }
             // 7/8・5/8 ブロック (縦)
@@ -897,14 +1207,14 @@ mod win32 {
             0x2583 => fill_rect(hdc, fg, x0, y0 + h * 5 / 8, x1, y1), // ▃
             0x2585 => fill_rect(hdc, fg, x0, y0 + h * 3 / 8, x1, y1), // ▅
             0x2586 => fill_rect(hdc, fg, x0, y0 + h * 2 / 8, x1, y1), // ▆
-            0x2587 => fill_rect(hdc, fg, x0, y0 + h / 8,     x1, y1), // ▇
+            0x2587 => fill_rect(hdc, fg, x0, y0 + h / 8, x1, y1),     // ▇
             // 横 1/8 ブロック
             0x2589 => fill_rect(hdc, fg, x0, y0, x0 + w * 7 / 8, y1), // ▉
             0x258A => fill_rect(hdc, fg, x0, y0, x0 + w * 6 / 8, y1), // ▊
             0x258B => fill_rect(hdc, fg, x0, y0, x0 + w * 5 / 8, y1), // ▋
             0x258D => fill_rect(hdc, fg, x0, y0, x0 + w * 3 / 8, y1), // ▍
             0x258E => fill_rect(hdc, fg, x0, y0, x0 + w * 2 / 8, y1), // ▎
-            0x258F => fill_rect(hdc, fg, x0, y0, x0 + w / 8,     y1), // ▏
+            0x258F => fill_rect(hdc, fg, x0, y0, x0 + w / 8, y1),     // ▏
             _ => return false,
         }
         true
@@ -913,7 +1223,12 @@ mod win32 {
     /// 塗りつぶし矩形のヘルパー
     unsafe fn fill_rect(hdc: HDC, color: COLORREF, lx: i32, ty: i32, rx: i32, by: i32) {
         let brush = CreateSolidBrush(color);
-        let r = RECT { left: lx, top: ty, right: rx, bottom: by };
+        let r = RECT {
+            left: lx,
+            top: ty,
+            right: rx,
+            bottom: by,
+        };
         windows::Win32::Graphics::Gdi::FillRect(hdc, &r, brush);
         let _ = DeleteObject(brush);
     }
@@ -923,13 +1238,7 @@ mod win32 {
     /// - `TargetConverted`: 太実線（現在の変換候補）
     /// - `Converted`: 実線
     /// - その他: 点線
-    unsafe fn draw_preedit_underline(
-        hdc: HDC,
-        attr: &PreeditAttr,
-        x: i32,
-        y: i32,
-        width: i32,
-    ) {
+    unsafe fn draw_preedit_underline(hdc: HDC, attr: &PreeditAttr, x: i32, y: i32, width: i32) {
         let (pen_style, thickness) = match attr {
             PreeditAttr::TargetConverted => (PS_SOLID, 2u32),
             PreeditAttr::Converted => (PS_SOLID, 1),
@@ -946,8 +1255,16 @@ mod win32 {
     }
 
     fn cell_colors(cell: &Cell, _ime: &ImeState) -> (COLORREF, COLORREF) {
-        let fg = cell.style.fg.map(|c| rgb(c.r, c.g, c.b)).unwrap_or(COLOR_FG);
-        let bg = cell.style.bg.map(|c| rgb(c.r, c.g, c.b)).unwrap_or(COLOR_BG);
+        let fg = cell
+            .style
+            .fg
+            .map(|c| rgb(c.r, c.g, c.b))
+            .unwrap_or(COLOR_FG);
+        let bg = cell
+            .style
+            .bg
+            .map(|c| rgb(c.r, c.g, c.b))
+            .unwrap_or(COLOR_BG);
         if cell.style.reverse {
             (bg, fg)
         } else {
@@ -971,15 +1288,26 @@ mod win32 {
     /// - `release`: ボタン離上イベントか
     /// - `sgr`: `?1006h` SGR 拡張モードか
     fn mouse_to_vt(btn: u8, col: u16, row: u16, release: bool, sgr: bool) -> Option<Vec<u8>> {
-        if col == 0 || row == 0 { return None; }
+        if col == 0 || row == 0 {
+            return None;
+        }
         if sgr {
             // CSI < btn ; col ; row M/m
             let suffix = if release { b'm' } else { b'M' };
             Some(format!("\x1b[<{};{};{}{}", btn, col, row, suffix as char).into_bytes())
         } else {
             // CSI M btn+32 col+32 row+32 (X10 encoding, max col/row = 223)
-            if col > 223 || row > 223 { return None; }
-            Some(vec![0x1b, b'[', b'M', btn + 32, col as u8 + 32, row as u8 + 32])
+            if col > 223 || row > 223 {
+                return None;
+            }
+            Some(vec![
+                0x1b,
+                b'[',
+                b'M',
+                btn + 32,
+                col as u8 + 32,
+                row as u8 + 32,
+            ])
         }
     }
 
@@ -987,7 +1315,9 @@ mod win32 {
 
     /// クリップボードから UTF-8 テキストを読み取る
     unsafe fn read_clipboard_text(hwnd: HWND) -> Option<String> {
-        if OpenClipboard(hwnd).is_err() { return None; }
+        if OpenClipboard(hwnd).is_err() {
+            return None;
+        }
         // CF_UNICODETEXT = 13
         let h = GetClipboardData(13).ok()?;
         // HGLOBAL is *mut c_void in windows-rs 0.58; HANDLE is *mut c_void as well
@@ -997,7 +1327,9 @@ mod win32 {
             None
         } else {
             let mut len = 0usize;
-            while *ptr.add(len) != 0 { len += 1; }
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
             let slice = std::slice::from_raw_parts(ptr, len);
             String::from_utf16(slice).ok()
         };
@@ -1020,7 +1352,9 @@ mod win32 {
         wide.push(0u16);
         let byte_size = wide.len() * 2;
 
-        if OpenClipboard(hwnd).is_err() { return; }
+        if OpenClipboard(hwnd).is_err() {
+            return;
+        }
         let _ = EmptyClipboard();
 
         // CF_UNICODETEXT = 13
@@ -1047,17 +1381,53 @@ mod win32 {
     }
 
     /// 修飾キー状態を引数で受け取るテスト可能な内部実装
-    fn keydown_to_vt_with_mods(wparam: WPARAM, _lparam: LPARAM, ctrl: bool, shift: bool, app_cursor: bool) -> Option<Vec<u8>> {
+    fn keydown_to_vt_with_mods(
+        wparam: WPARAM,
+        _lparam: LPARAM,
+        ctrl: bool,
+        shift: bool,
+        app_cursor: bool,
+    ) -> Option<Vec<u8>> {
         let vk = wparam.0 as u16;
 
         let seq: &[u8] = match VIRTUAL_KEY(vk) {
             // Enter, Escape は WM_CHAR で処理する（TranslateMessage 経由で 1 回だけ送信）
             VK_BACK => b"\x7f",
-            VK_TAB => if shift { b"\x1b[Z" } else { b"\t" },
-            VK_UP    => if app_cursor { b"\x1bOA" } else { b"\x1b[A" },
-            VK_DOWN  => if app_cursor { b"\x1bOB" } else { b"\x1b[B" },
-            VK_RIGHT => if app_cursor { b"\x1bOC" } else { b"\x1b[C" },
-            VK_LEFT  => if app_cursor { b"\x1bOD" } else { b"\x1b[D" },
+            VK_TAB => {
+                if shift {
+                    b"\x1b[Z"
+                } else {
+                    b"\t"
+                }
+            }
+            VK_UP => {
+                if app_cursor {
+                    b"\x1bOA"
+                } else {
+                    b"\x1b[A"
+                }
+            }
+            VK_DOWN => {
+                if app_cursor {
+                    b"\x1bOB"
+                } else {
+                    b"\x1b[B"
+                }
+            }
+            VK_RIGHT => {
+                if app_cursor {
+                    b"\x1bOC"
+                } else {
+                    b"\x1b[C"
+                }
+            }
+            VK_LEFT => {
+                if app_cursor {
+                    b"\x1bOD"
+                } else {
+                    b"\x1b[D"
+                }
+            }
             VK_HOME => b"\x1b[H",
             VK_END => b"\x1b[F",
             VK_INSERT => b"\x1b[2~",
@@ -1142,9 +1512,19 @@ mod win32 {
             // ConPTY の初期値とずれてしまう。
             let client_w = initial_size.cols as i32 * cell_width + PADDING_X * 2;
             let client_h = initial_size.rows as i32 * cell_height + PADDING_Y * 2;
-            let mut wr = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
-            AdjustWindowRectEx(&mut wr, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE::default())
-                .map_err(|e| anyhow::anyhow!("AdjustWindowRectEx failed: {}", e))?;
+            let mut wr = RECT {
+                left: 0,
+                top: 0,
+                right: client_w,
+                bottom: client_h,
+            };
+            AdjustWindowRectEx(
+                &mut wr,
+                WS_OVERLAPPEDWINDOW,
+                false,
+                WINDOW_EX_STYLE::default(),
+            )
+            .map_err(|e| anyhow::anyhow!("AdjustWindowRectEx failed: {}", e))?;
             let win_width = wr.right - wr.left;
             let win_height = wr.bottom - wr.top;
             let title: Vec<u16> = "yatamux\0".encode_utf16().collect();
@@ -1154,8 +1534,10 @@ mod win32 {
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(title.as_ptr()),
                 WS_OVERLAPPEDWINDOW,
-                CW_USEDEFAULT, CW_USEDEFAULT,
-                win_width, win_height,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                win_width,
+                win_height,
                 None,
                 None,
                 hinstance,
@@ -1191,9 +1573,14 @@ mod win32 {
         for (i, &name) in FONT_CANDIDATES.iter().enumerate() {
             let wide: Vec<u16> = format!("{}\0", name).encode_utf16().collect();
             let hfont = CreateFontW(
-                height, 0, 0, 0,
+                height,
+                0,
+                0,
+                0,
                 FW_NORMAL.0 as i32,
-                0, 0, 0,
+                0,
+                0,
+                0,
                 DEFAULT_CHARSET.0 as u32,
                 OUT_DEFAULT_PRECIS.0 as u32,
                 CLIP_DEFAULT_PRECIS.0 as u32,
@@ -1218,7 +1605,7 @@ mod win32 {
             // GetTextFaceW が返す名前はスペースなしの場合があるため
             // 正規化して前方一致でも許容する
             let norm_actual = actual.replace(' ', "").to_lowercase();
-            let norm_want   = name.replace(' ', "").to_lowercase();
+            let norm_want = name.replace(' ', "").to_lowercase();
             let matched = actual.eq_ignore_ascii_case(name) || norm_actual == norm_want;
             tracing::info!(candidate = name, actual = %actual, matched, "font probe");
             if matched || is_last {
@@ -1269,7 +1656,10 @@ mod win32 {
         // H-2: Backspace → DEL (\x7f)  WM_CHAR(\b) は二重送信防止のためスキップ
         #[test]
         fn test_backspace_maps_to_del() {
-            assert_eq!(keydown_to_vt(wvk(VK_BACK), lp(), false), Some(b"\x7f".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_BACK), lp(), false),
+                Some(b"\x7f".to_vec())
+            );
         }
 
         // H-3: Escape は WM_CHAR に委譲（keydown_to_vt は None）
@@ -1283,120 +1673,189 @@ mod win32 {
         // ※ GetKeyState はテスト中 0 を返す（Shift 未押下）
         #[test]
         fn test_tab_maps_to_ht() {
-            assert_eq!(keydown_to_vt(wvk(VK_TAB), lp(), false), Some(b"\t".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_TAB), lp(), false),
+                Some(b"\t".to_vec())
+            );
         }
 
         // H-5: 矢印キー → ANSI シーケンス
         #[test]
         fn test_arrow_up() {
-            assert_eq!(keydown_to_vt(wvk(VK_UP), lp(), false), Some(b"\x1b[A".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_UP), lp(), false),
+                Some(b"\x1b[A".to_vec())
+            );
         }
 
         #[test]
         fn test_arrow_down() {
-            assert_eq!(keydown_to_vt(wvk(VK_DOWN), lp(), false), Some(b"\x1b[B".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_DOWN), lp(), false),
+                Some(b"\x1b[B".to_vec())
+            );
         }
 
         #[test]
         fn test_arrow_right() {
-            assert_eq!(keydown_to_vt(wvk(VK_RIGHT), lp(), false), Some(b"\x1b[C".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_RIGHT), lp(), false),
+                Some(b"\x1b[C".to_vec())
+            );
         }
 
         #[test]
         fn test_arrow_left() {
-            assert_eq!(keydown_to_vt(wvk(VK_LEFT), lp(), false), Some(b"\x1b[D".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_LEFT), lp(), false),
+                Some(b"\x1b[D".to_vec())
+            );
         }
 
         // H-6: 特殊キー → VT シーケンス
         #[test]
         fn test_home() {
-            assert_eq!(keydown_to_vt(wvk(VK_HOME), lp(), false), Some(b"\x1b[H".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_HOME), lp(), false),
+                Some(b"\x1b[H".to_vec())
+            );
         }
 
         #[test]
         fn test_end() {
-            assert_eq!(keydown_to_vt(wvk(VK_END), lp(), false), Some(b"\x1b[F".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_END), lp(), false),
+                Some(b"\x1b[F".to_vec())
+            );
         }
 
         #[test]
         fn test_insert() {
-            assert_eq!(keydown_to_vt(wvk(VK_INSERT), lp(), false), Some(b"\x1b[2~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_INSERT), lp(), false),
+                Some(b"\x1b[2~".to_vec())
+            );
         }
 
         #[test]
         fn test_delete() {
-            assert_eq!(keydown_to_vt(wvk(VK_DELETE), lp(), false), Some(b"\x1b[3~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_DELETE), lp(), false),
+                Some(b"\x1b[3~".to_vec())
+            );
         }
 
         #[test]
         fn test_page_up() {
-            assert_eq!(keydown_to_vt(wvk(VK_PRIOR), lp(), false), Some(b"\x1b[5~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_PRIOR), lp(), false),
+                Some(b"\x1b[5~".to_vec())
+            );
         }
 
         #[test]
         fn test_page_down() {
-            assert_eq!(keydown_to_vt(wvk(VK_NEXT), lp(), false), Some(b"\x1b[6~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_NEXT), lp(), false),
+                Some(b"\x1b[6~".to_vec())
+            );
         }
 
         // H-7: ファンクションキー F1–F12
         #[test]
         fn test_f1() {
-            assert_eq!(keydown_to_vt(wvk(VK_F1), lp(), false), Some(b"\x1bOP".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F1), lp(), false),
+                Some(b"\x1bOP".to_vec())
+            );
         }
 
         #[test]
         fn test_f2() {
-            assert_eq!(keydown_to_vt(wvk(VK_F2), lp(), false), Some(b"\x1bOQ".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F2), lp(), false),
+                Some(b"\x1bOQ".to_vec())
+            );
         }
 
         #[test]
         fn test_f3() {
-            assert_eq!(keydown_to_vt(wvk(VK_F3), lp(), false), Some(b"\x1bOR".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F3), lp(), false),
+                Some(b"\x1bOR".to_vec())
+            );
         }
 
         #[test]
         fn test_f4() {
-            assert_eq!(keydown_to_vt(wvk(VK_F4), lp(), false), Some(b"\x1bOS".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F4), lp(), false),
+                Some(b"\x1bOS".to_vec())
+            );
         }
 
         #[test]
         fn test_f5() {
-            assert_eq!(keydown_to_vt(wvk(VK_F5), lp(), false), Some(b"\x1b[15~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F5), lp(), false),
+                Some(b"\x1b[15~".to_vec())
+            );
         }
 
         #[test]
         fn test_f6() {
-            assert_eq!(keydown_to_vt(wvk(VK_F6), lp(), false), Some(b"\x1b[17~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F6), lp(), false),
+                Some(b"\x1b[17~".to_vec())
+            );
         }
 
         #[test]
         fn test_f7() {
-            assert_eq!(keydown_to_vt(wvk(VK_F7), lp(), false), Some(b"\x1b[18~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F7), lp(), false),
+                Some(b"\x1b[18~".to_vec())
+            );
         }
 
         #[test]
         fn test_f8() {
-            assert_eq!(keydown_to_vt(wvk(VK_F8), lp(), false), Some(b"\x1b[19~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F8), lp(), false),
+                Some(b"\x1b[19~".to_vec())
+            );
         }
 
         #[test]
         fn test_f9() {
-            assert_eq!(keydown_to_vt(wvk(VK_F9), lp(), false), Some(b"\x1b[20~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F9), lp(), false),
+                Some(b"\x1b[20~".to_vec())
+            );
         }
 
         #[test]
         fn test_f10() {
-            assert_eq!(keydown_to_vt(wvk(VK_F10), lp(), false), Some(b"\x1b[21~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F10), lp(), false),
+                Some(b"\x1b[21~".to_vec())
+            );
         }
 
         #[test]
         fn test_f11() {
-            assert_eq!(keydown_to_vt(wvk(VK_F11), lp(), false), Some(b"\x1b[23~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F11), lp(), false),
+                Some(b"\x1b[23~".to_vec())
+            );
         }
 
         #[test]
         fn test_f12() {
-            assert_eq!(keydown_to_vt(wvk(VK_F12), lp(), false), Some(b"\x1b[24~".to_vec()));
+            assert_eq!(
+                keydown_to_vt(wvk(VK_F12), lp(), false),
+                Some(b"\x1b[24~".to_vec())
+            );
         }
 
         // H-4: Shift+Tab → \x1b[Z
@@ -1411,7 +1870,10 @@ mod win32 {
         // H-9: 通常文字キー (例: Space) は None → WM_CHAR で処理される
         #[test]
         fn test_unhandled_key_returns_none() {
-            assert_eq!(keydown_to_vt(WPARAM(VK_SPACE.0 as usize), lp(), false), None);
+            assert_eq!(
+                keydown_to_vt(WPARAM(VK_SPACE.0 as usize), lp(), false),
+                None
+            );
         }
 
         // H-8: Ctrl+A → SOH (\x01)
@@ -1483,7 +1945,6 @@ mod win32 {
             );
         }
     }
-
 }
 
 // ── 公開 API ────────────────────────────────────────────────────────────────
@@ -1496,7 +1957,10 @@ pub use win32::{run_window, ClientState};
 pub fn run_window(
     _panes: std::sync::Arc<std::sync::Mutex<crate::layout::PaneStore>>,
     _msg_tx: tokio::sync::mpsc::Sender<yatamux_protocol::ClientMessage>,
-    _split_tx: tokio::sync::mpsc::Sender<(yatamux_protocol::types::PaneId, yatamux_protocol::types::SplitDirection)>,
+    _split_tx: tokio::sync::mpsc::Sender<(
+        yatamux_protocol::types::PaneId,
+        yatamux_protocol::types::SplitDirection,
+    )>,
     _initial_size: yatamux_protocol::types::TermSize,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")

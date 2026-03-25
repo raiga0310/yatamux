@@ -139,8 +139,14 @@ mod tests {
 
     #[test]
     fn test_ambiguous_width_config() {
-        let narrow_cfg = CjkWidthConfig { ambiguous: AmbiguousWidth::Narrow, overrides: vec![] };
-        let wide_cfg = CjkWidthConfig { ambiguous: AmbiguousWidth::Wide, overrides: vec![] };
+        let narrow_cfg = CjkWidthConfig {
+            ambiguous: AmbiguousWidth::Narrow,
+            overrides: vec![],
+        };
+        let wide_cfg = CjkWidthConfig {
+            ambiguous: AmbiguousWidth::Wide,
+            overrides: vec![],
+        };
 
         // ─ (U+2500) は Ambiguous
         assert_eq!(narrow_cfg.char_width('─'), 1);

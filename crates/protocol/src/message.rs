@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use crate::types::{PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// `Arc<[u8]>` を `Vec<u8>` と同じワイヤーフォーマットで serde する補助モジュール
 mod arc_bytes {
-    use std::sync::Arc;
     use serde::{Deserialize, Deserializer, Serializer};
+    use std::sync::Arc;
 
     pub fn serialize<S: Serializer>(data: &Arc<[u8]>, s: S) -> Result<S::Ok, S::Error> {
         s.collect_seq(data.iter())
@@ -62,7 +62,10 @@ pub enum ServerMessage {
     WorkspaceCreated { id: WorkspaceId, name: String },
 
     /// サーフェス作成完了
-    SurfaceCreated { id: SurfaceId, workspace: WorkspaceId },
+    SurfaceCreated {
+        id: SurfaceId,
+        workspace: WorkspaceId,
+    },
 
     /// ペイン作成完了
     PaneCreated { id: PaneId, surface: SurfaceId },

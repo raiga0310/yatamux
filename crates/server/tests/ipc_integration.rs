@@ -8,10 +8,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use yatamux_client::connection::ServerConnection;
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::ipc::run_ipc_server;
-use tokio::sync::mpsc;
 
 /// テストごとにユニークなセッション名を生成する
 fn unique_session() -> String {
@@ -23,9 +23,7 @@ fn unique_session() -> String {
 /// サーバーを起動し (server_cmd_tx, server_event_rx) を返す
 /// IPC サーバーはバックグラウンドタスクで動作し続ける
 #[allow(dead_code)]
-fn start_ipc_server(
-    session: &str,
-) -> (mpsc::Sender<ClientMessage>, mpsc::Receiver<ServerMessage>) {
+fn start_ipc_server(session: &str) -> (mpsc::Sender<ClientMessage>, mpsc::Receiver<ServerMessage>) {
     use yatamux_server::Server;
 
     let (server_msg_tx, server_msg_rx) = mpsc::channel::<ServerMessage>(256);
@@ -100,7 +98,9 @@ async fn test_ipc_send_receive_message() {
 
     // F-2: CreateWorkspace を送信 → WorkspaceCreated が返る
     conn.tx
-        .send(ClientMessage::CreateWorkspace { name: Some("ipc-test".to_string()) })
+        .send(ClientMessage::CreateWorkspace {
+            name: Some("ipc-test".to_string()),
+        })
         .await
         .unwrap();
 
@@ -146,12 +146,16 @@ async fn test_ipc_multiple_clients() {
     // 両方から送信
     conn1
         .tx
-        .send(ClientMessage::CreateWorkspace { name: Some("client1".to_string()) })
+        .send(ClientMessage::CreateWorkspace {
+            name: Some("client1".to_string()),
+        })
         .await
         .unwrap();
     conn2
         .tx
-        .send(ClientMessage::CreateWorkspace { name: Some("client2".to_string()) })
+        .send(ClientMessage::CreateWorkspace {
+            name: Some("client2".to_string()),
+        })
         .await
         .unwrap();
 
@@ -194,10 +198,13 @@ async fn test_ipc_list_panes_returns_panes_listed() {
     conn.tx.send(ClientMessage::ListPanes).await.unwrap();
 
     let resp = tokio::time::timeout(std::time::Duration::from_secs(2), conn.rx.recv())
-        .await.expect("timeout").expect("closed");
+        .await
+        .expect("timeout")
+        .expect("closed");
     assert!(
         matches!(resp, ServerMessage::PanesListed { .. }),
-        "expected PanesListed, got {:?}", resp
+        "expected PanesListed, got {:?}",
+        resp
     );
 }
 
@@ -219,25 +226,34 @@ async fn test_ipc_send_keys_routes_to_pane() {
     let mut conn = ServerConnection::connect(&session).await.unwrap();
 
     // ワークスペース → サーフェス → ペイン を作成
-    conn.tx.send(ClientMessage::CreateWorkspace { name: None }).await.unwrap();
+    conn.tx
+        .send(ClientMessage::CreateWorkspace { name: None })
+        .await
+        .unwrap();
     let ws_id = loop {
         if let ServerMessage::WorkspaceCreated { id, .. } = conn.rx.recv().await.unwrap() {
             break id;
         }
     };
-    conn.tx.send(ClientMessage::CreateSurface { workspace: ws_id }).await.unwrap();
+    conn.tx
+        .send(ClientMessage::CreateSurface { workspace: ws_id })
+        .await
+        .unwrap();
     let surf_id = loop {
         if let ServerMessage::SurfaceCreated { id, .. } = conn.rx.recv().await.unwrap() {
             break id;
         }
     };
     use yatamux_protocol::types::TermSize;
-    conn.tx.send(ClientMessage::CreatePane {
-        surface: surf_id,
-        split_from: None,
-        direction: None,
-        size: TermSize { cols: 80, rows: 24 },
-    }).await.unwrap();
+    conn.tx
+        .send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: None,
+            direction: None,
+            size: TermSize { cols: 80, rows: 24 },
+        })
+        .await
+        .unwrap();
     let pane_id = loop {
         if let ServerMessage::PaneCreated { id, .. } = conn.rx.recv().await.unwrap() {
             break id;
@@ -245,10 +261,13 @@ async fn test_ipc_send_keys_routes_to_pane() {
     };
 
     // Input を送信 → Output が返ってくることを確認
-    conn.tx.send(ClientMessage::Input {
-        pane: pane_id,
-        data: b"echo yatamux\r".to_vec(),
-    }).await.unwrap();
+    conn.tx
+        .send(ClientMessage::Input {
+            pane: pane_id,
+            data: b"echo yatamux\r".to_vec(),
+        })
+        .await
+        .unwrap();
 
     let got_output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
@@ -258,8 +277,12 @@ async fn test_ipc_send_keys_routes_to_pane() {
                 _ => continue,
             }
         }
-    }).await;
-    assert!(got_output.is_ok(), "should receive Output from pane after Input");
+    })
+    .await;
+    assert!(
+        got_output.is_ok(),
+        "should receive Output from pane after Input"
+    );
 }
 
 // F-8: 存在しない PaneId に Input を送っても Error は返らない（silently ignore）
@@ -279,10 +302,13 @@ async fn test_ipc_send_keys_to_unknown_pane_is_ignored() {
 
     let mut conn = ServerConnection::connect(&session).await.unwrap();
     use yatamux_protocol::types::PaneId;
-    conn.tx.send(ClientMessage::Input {
-        pane: PaneId(9999),
-        data: b"hello\r".to_vec(),
-    }).await.unwrap();
+    conn.tx
+        .send(ClientMessage::Input {
+            pane: PaneId(9999),
+            data: b"hello\r".to_vec(),
+        })
+        .await
+        .unwrap();
 
     // Error または無応答（サーバーが存在しないペインを無視）を許容
     // 現実装では存在しないペインへの Input は silently ignore するため
@@ -293,9 +319,13 @@ async fn test_ipc_send_keys_to_unknown_pane_is_ignored() {
                 return true;
             }
         }
-    }).await;
+    })
+    .await;
     // 現実装は silently ignore: エラーは来ない
-    assert!(got_error.is_err(), "Input to unknown pane should be silently ignored (no Error)");
+    assert!(
+        got_error.is_err(),
+        "Input to unknown pane should be silently ignored (no Error)"
+    );
 }
 
 // F-5: 不正な JSON を送っても接続が維持される（次のメッセージが処理できる）
@@ -334,7 +364,9 @@ async fn test_ipc_invalid_json_does_not_drop_connection() {
         name: Some("after-invalid".to_string()),
     })
     .unwrap();
-    pipe.write_all(format!("{}\n", valid).as_bytes()).await.unwrap();
+    pipe.write_all(format!("{}\n", valid).as_bytes())
+        .await
+        .unwrap();
 
     // ServerConnection で読むのでなく、直接 BufReader で読む
     use tokio::io::AsyncBufReadExt;

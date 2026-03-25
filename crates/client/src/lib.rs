@@ -56,6 +56,6 @@ pub mod session;
 pub mod window;
 
 pub use ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr, PreeditSegment};
-pub use layout::{LayoutNode, PaneRect, PaneStore};
+pub use layout::{LayoutNode, PaneRect, PaneStore, Toast};
 pub use session::{LayoutNodeDef, LayoutSnapshot};
 pub use window::run_window;

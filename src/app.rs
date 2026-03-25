@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use yatamux_client::{run_window, PaneStore};
+use yatamux_client::{run_window, PaneStore, Toast};
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
@@ -32,7 +32,10 @@ const DEFAULT_ROWS: u16 = 24;
 
 /// アプリを起動する
 pub async fn run() -> Result<()> {
-    let size = TermSize { cols: DEFAULT_COLS, rows: DEFAULT_ROWS };
+    let size = TermSize {
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+    };
 
     // ── サーバーをインプロセスで起動 ────────────────────────────────────
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(256);
@@ -66,18 +69,24 @@ pub async fn run() -> Result<()> {
     });
 
     // ── ワークスペース → サーフェス → 初期ペイン 作成 ───────────────────
-    client_tx.send(ClientMessage::CreateWorkspace { name: None }).await?;
+    client_tx
+        .send(ClientMessage::CreateWorkspace { name: None })
+        .await?;
     let ws_id = wait_for!(server_rx, ServerMessage::WorkspaceCreated { id, .. } => id)?;
 
-    client_tx.send(ClientMessage::CreateSurface { workspace: ws_id }).await?;
+    client_tx
+        .send(ClientMessage::CreateSurface { workspace: ws_id })
+        .await?;
     let surf_id = wait_for!(server_rx, ServerMessage::SurfaceCreated { id, .. } => id)?;
 
-    client_tx.send(ClientMessage::CreatePane {
-        surface: surf_id,
-        split_from: None,
-        direction: None,
-        size,
-    }).await?;
+    client_tx
+        .send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: None,
+            direction: None,
+            size,
+        })
+        .await?;
     let pane_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
 
     tracing::info!("Pane {:?} created, opening window", pane_id);
@@ -101,8 +110,7 @@ pub async fn run() -> Result<()> {
     });
 
     // ── ペイン分割要求チャネル（Window → この tokio タスク）────────────
-    let (split_tx, mut split_rx) =
-        mpsc::channel::<(PaneId, SplitDirection)>(8);
+    let (split_tx, mut split_rx) = mpsc::channel::<(PaneId, SplitDirection)>(8);
 
     // ── サーバー出力 + ペイン分割ハンドラ ───────────────────────────────
     let pane_store2 = Arc::clone(&pane_store);
@@ -178,6 +186,16 @@ pub async fn run() -> Result<()> {
                             sinks.remove(&pane);
                             pane_store2.lock().unwrap().grids.remove(&pane);
                         }
+                        ServerMessage::Notification { pane, body } => {
+                            let mut store = pane_store2.lock().unwrap();
+                            if pane != store.active {
+                                store.pending_toasts.push_back(Toast {
+                                    pane_id: pane,
+                                    message: body,
+                                    elapsed_ms: 0,
+                                });
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -186,10 +204,7 @@ pub async fn run() -> Result<()> {
     });
 
     // ── Win32 ウィンドウ（spawn_blocking でメッセージループ実行）────────
-    tokio::task::spawn_blocking(move || {
-        run_window(pane_store, msg_tx, split_tx, size)
-    })
-    .await??;
+    tokio::task::spawn_blocking(move || run_window(pane_store, msg_tx, split_tx, size)).await??;
 
     Ok(())
 }

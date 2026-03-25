@@ -3,10 +3,10 @@
 //! `vte` クレートのステートマシンをラップし、
 //! VT エスケープシーケンスを Grid 操作に変換する。
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use vte::{Params, Parser, Perform};
-use crate::cell::{Cell, Color, CellStyle};
+use crate::cell::{Cell, CellStyle, Color};
 use crate::grid::Grid;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use vte::{Params, Parser, Perform};
 
 /// VT シーケンスを受け取って Grid を更新するプロセッサ
 pub struct VtProcessor<'a> {
@@ -18,6 +18,8 @@ pub struct VtProcessor<'a> {
     pub notification: Option<String>,
     /// OSC 52 クリップボードデータ（base64 デコード済みバイト列）
     pub clipboard_data: Option<Vec<u8>>,
+    /// OSC 133;D — シェルコマンド終了通知
+    pub command_finished: bool,
 }
 
 impl<'a> VtProcessor<'a> {
@@ -28,6 +30,7 @@ impl<'a> VtProcessor<'a> {
             title: None,
             notification: None,
             clipboard_data: None,
+            command_finished: false,
         }
     }
 }
@@ -58,8 +61,15 @@ impl<'a> Perform for VtProcessor<'a> {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
-        let p: Vec<u16> = params.iter()
+    fn csi_dispatch(
+        &mut self,
+        params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        let p: Vec<u16> = params
+            .iter()
             .map(|sub| sub.first().copied().unwrap_or(0))
             .collect();
 
@@ -110,7 +120,7 @@ impl<'a> Perform for VtProcessor<'a> {
             },
             // DECSTBM — スクロール領域設定 (CSI Pt;Pb r)
             'r' if _intermediates.is_empty() => {
-                let top    = p.first().copied().unwrap_or(1).max(1);
+                let top = p.first().copied().unwrap_or(1).max(1);
                 let bottom = p.get(1).copied().unwrap_or(self.grid.rows());
                 self.grid.set_scroll_region(top, bottom);
             }
@@ -230,23 +240,24 @@ impl<'a> Perform for VtProcessor<'a> {
                 let enable = action == 'h';
                 for &param in &p {
                     match param {
-                        1    => self.grid.set_application_cursor_keys(enable), // DECCKM
-                        7    => self.grid.set_auto_wrap(enable),               // DECAWM
-                        25   => self.grid.set_cursor_visible(enable),          // カーソル表示
-                        1049 => {                                               // オルタネートスクリーン
+                        1 => self.grid.set_application_cursor_keys(enable), // DECCKM
+                        7 => self.grid.set_auto_wrap(enable),               // DECAWM
+                        25 => self.grid.set_cursor_visible(enable),         // カーソル表示
+                        1049 => {
+                            // オルタネートスクリーン
                             if enable {
                                 self.grid.enter_alternate_screen();
                             } else {
                                 self.grid.leave_alternate_screen();
                             }
                         }
-                        2004 => self.grid.set_bracketed_paste(enable),         // ブラケットペースト
+                        2004 => self.grid.set_bracketed_paste(enable), // ブラケットペースト
                         // マウス報告モード
                         1000 => self.grid.set_mouse_reporting(if enable { 1 } else { 0 }),
                         1002 => self.grid.set_mouse_reporting(if enable { 2 } else { 0 }),
                         1003 => self.grid.set_mouse_reporting(if enable { 3 } else { 0 }),
-                        1006 => self.grid.set_mouse_sgr(enable),               // SGR 拡張
-                        1015 => self.grid.set_mouse_sgr(enable),               // URXVT (SGR と同等扱い)
+                        1006 => self.grid.set_mouse_sgr(enable), // SGR 拡張
+                        1015 => self.grid.set_mouse_sgr(enable), // URXVT (SGR と同等扱い)
                         // フォーカスイベント
                         1004 => self.grid.set_focus_events(enable),
                         _ => {}
@@ -258,7 +269,9 @@ impl<'a> Perform for VtProcessor<'a> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if params.is_empty() { return; }
+        if params.is_empty() {
+            return;
+        }
         let cmd = std::str::from_utf8(params[0]).unwrap_or("");
         match cmd {
             // OSC 0 / 2: ウィンドウタイトル
@@ -285,17 +298,30 @@ impl<'a> Perform for VtProcessor<'a> {
                     }
                 }
             }
+            // OSC 133: シェルインテグレーション（FinalTerm 互換）
+            // D[;exit_code] — コマンド終了
+            "133" => {
+                let subcode = params
+                    .get(1)
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .unwrap_or("");
+                if subcode == "D" || subcode.starts_with("D;") {
+                    self.command_finished = true;
+                }
+            }
             // OSC 52: クリップボード書き込み
             // 形式: \x1b]52;<kind>;<base64data>\x07
             // kind が "c"（クリップボード）のときのみ処理する
             "52" => {
                 // params[1] = kind ("c", "p", "q", "s" 等)
                 // params[2] = base64 エンコードされたデータ
-                let kind = params.get(1)
+                let kind = params
+                    .get(1)
                     .and_then(|b| std::str::from_utf8(b).ok())
                     .unwrap_or("");
                 if kind == "c" {
-                    let b64 = params.get(2)
+                    let b64 = params
+                        .get(2)
                         .and_then(|b| std::str::from_utf8(b).ok())
                         .unwrap_or("");
                     // 不正な base64 は無視（panic しない）
@@ -326,29 +352,29 @@ impl<'a> VtProcessor<'a> {
         while i < params.len() {
             match params[i] {
                 // ── リセット ────────────────────────────────────────────
-                0  => self.current_style = CellStyle::default(),
+                0 => self.current_style = CellStyle::default(),
                 // ── 属性オン ────────────────────────────────────────────
-                1  => self.current_style.bold          = true,
-                3  => self.current_style.italic        = true,
-                4  => self.current_style.underline     = true,
-                5  => self.current_style.blink         = true,
-                7  => self.current_style.reverse       = true,
-                9  => self.current_style.strikethrough = true,
+                1 => self.current_style.bold = true,
+                3 => self.current_style.italic = true,
+                4 => self.current_style.underline = true,
+                5 => self.current_style.blink = true,
+                7 => self.current_style.reverse = true,
+                9 => self.current_style.strikethrough = true,
                 // ── 属性オフ ────────────────────────────────────────────
-                22 => self.current_style.bold          = false,
-                23 => self.current_style.italic        = false,
-                24 => self.current_style.underline     = false,
-                25 => self.current_style.blink         = false,
-                27 => self.current_style.reverse       = false,
+                22 => self.current_style.bold = false,
+                23 => self.current_style.italic = false,
+                24 => self.current_style.underline = false,
+                25 => self.current_style.blink = false,
+                27 => self.current_style.reverse = false,
                 29 => self.current_style.strikethrough = false,
                 // ── ANSI 基本色 fg (30-37) ───────────────────────────────
                 30..=37 => self.current_style.fg = Some(ansi16(params[i] as u8 - 30)),
-                39       => self.current_style.fg = None, // デフォルト fg
+                39 => self.current_style.fg = None, // デフォルト fg
                 // ── ANSI 基本色 bg (40-47) ───────────────────────────────
                 40..=47 => self.current_style.bg = Some(ansi16(params[i] as u8 - 40)),
-                49       => self.current_style.bg = None, // デフォルト bg
+                49 => self.current_style.bg = None, // デフォルト bg
                 // ── 明るい fg (90-97) ────────────────────────────────────
-                90..=97  => self.current_style.fg = Some(ansi16(params[i] as u8 - 90 + 8)),
+                90..=97 => self.current_style.fg = Some(ansi16(params[i] as u8 - 90 + 8)),
                 // ── 明るい bg (100-107) ──────────────────────────────────
                 100..=107 => self.current_style.bg = Some(ansi16(params[i] as u8 - 100 + 8)),
                 // ── 拡張色 fg: 38;5;N (256色) / 38;2;R;G;B (RGB) ────────
@@ -373,21 +399,21 @@ impl<'a> VtProcessor<'a> {
 /// ANSI 16色パレット（xterm 標準）
 fn ansi16(index: u8) -> Color {
     const P: [(u8, u8, u8); 16] = [
-        (  0,   0,   0), // 0  Black
-        (128,   0,   0), // 1  Red
-        (  0, 128,   0), // 2  Green
-        (128, 128,   0), // 3  Yellow
-        (  0,   0, 128), // 4  Blue
-        (128,   0, 128), // 5  Magenta
-        (  0, 128, 128), // 6  Cyan
+        (0, 0, 0),       // 0  Black
+        (128, 0, 0),     // 1  Red
+        (0, 128, 0),     // 2  Green
+        (128, 128, 0),   // 3  Yellow
+        (0, 0, 128),     // 4  Blue
+        (128, 0, 128),   // 5  Magenta
+        (0, 128, 128),   // 6  Cyan
         (192, 192, 192), // 7  White
         (128, 128, 128), // 8  Bright Black (Gray)
-        (255,   0,   0), // 9  Bright Red
-        (  0, 255,   0), // 10 Bright Green
-        (255, 255,   0), // 11 Bright Yellow
-        (  0,   0, 255), // 12 Bright Blue
-        (255,   0, 255), // 13 Bright Magenta
-        (  0, 255, 255), // 14 Bright Cyan
+        (255, 0, 0),     // 9  Bright Red
+        (0, 255, 0),     // 10 Bright Green
+        (255, 255, 0),   // 11 Bright Yellow
+        (0, 0, 255),     // 12 Bright Blue
+        (255, 0, 255),   // 13 Bright Magenta
+        (0, 255, 255),   // 14 Bright Cyan
         (255, 255, 255), // 15 Bright White
     ];
     let (r, g, b) = P[index as usize % 16];
@@ -445,11 +471,11 @@ pub fn feed_bytes(parser: &mut Parser, processor: &mut VtProcessor<'_>, data: &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use base64::Engine as _;
     use crate::cell::CellContent;
     use crate::grid::Grid;
     use crate::width::CjkWidthConfig;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine as _;
 
     fn make_grid(cols: u16, rows: u16) -> Grid {
         Grid::new(cols, rows, CjkWidthConfig::default())
@@ -533,9 +559,15 @@ mod tests {
         feed(&mut g, b"ABCDE"); // col 0-4 に書き込み
         g.move_cursor(2, 0);
         feed(&mut g, b"\x1b[K"); // EL 0
-        // col 0-1 (A, B) は残る
-        assert!(matches!(g.row(0).unwrap()[0].content, CellContent::Grapheme { .. }));
-        assert!(matches!(g.row(0).unwrap()[1].content, CellContent::Grapheme { .. }));
+                                 // col 0-1 (A, B) は残る
+        assert!(matches!(
+            g.row(0).unwrap()[0].content,
+            CellContent::Grapheme { .. }
+        ));
+        assert!(matches!(
+            g.row(0).unwrap()[1].content,
+            CellContent::Grapheme { .. }
+        ));
         // col 2-4 は Blank
         assert_eq!(g.row(0).unwrap()[2].content, CellContent::Blank);
         assert_eq!(g.row(0).unwrap()[3].content, CellContent::Blank);
@@ -561,8 +593,11 @@ mod tests {
         feed(&mut g, b"BBBBB"); // row 1
         g.move_cursor(0, 1);
         feed(&mut g, b"\x1b[J"); // ED 0 (カーソルから下)
-        // row 0 は残る
-        assert!(matches!(g.row(0).unwrap()[0].content, CellContent::Grapheme { .. }));
+                                 // row 0 は残る
+        assert!(matches!(
+            g.row(0).unwrap()[0].content,
+            CellContent::Grapheme { .. }
+        ));
         // row 1 は消える
         assert_eq!(g.row(1).unwrap()[0].content, CellContent::Blank);
     }
@@ -741,7 +776,10 @@ mod tests {
         feed(&mut g, b"\x1b[?1049l"); // main に戻る
         assert!(!g.is_alternate_screen());
         // メイン画面の "Hello" が復元されている
-        assert!(matches!(g.row(0).unwrap()[0].content, CellContent::Grapheme { .. }));
+        assert!(matches!(
+            g.row(0).unwrap()[0].content,
+            CellContent::Grapheme { .. }
+        ));
     }
 
     // T-02: EL 1 — 行頭からカーソルまで消去
@@ -751,12 +789,15 @@ mod tests {
         feed(&mut g, b"ABCDE");
         g.move_cursor(2, 0); // col 2 にカーソル
         feed(&mut g, b"\x1b[1K"); // EL 1
-        // col 0,1,2 が Blank に
+                                  // col 0,1,2 が Blank に
         assert_eq!(g.row(0).unwrap()[0].content, CellContent::Blank);
         assert_eq!(g.row(0).unwrap()[1].content, CellContent::Blank);
         assert_eq!(g.row(0).unwrap()[2].content, CellContent::Blank);
         // col 3,4 は残る
-        assert!(matches!(g.row(0).unwrap()[3].content, CellContent::Grapheme { .. }));
+        assert!(matches!(
+            g.row(0).unwrap()[3].content,
+            CellContent::Grapheme { .. }
+        ));
     }
 
     // T-02: EL 2 — 行全体を消去
@@ -778,13 +819,16 @@ mod tests {
         feed(&mut g, b"Row0\r\nRow1\r\nRow2");
         g.move_cursor(2, 1); // row 1, col 2 にカーソル
         feed(&mut g, b"\x1b[1J"); // ED 1
-        // row 0 は全消え
+                                  // row 0 は全消え
         assert_eq!(g.row(0).unwrap()[0].content, CellContent::Blank);
         // row 1 の col 0-2 も消える
         assert_eq!(g.row(1).unwrap()[0].content, CellContent::Blank);
         assert_eq!(g.row(1).unwrap()[2].content, CellContent::Blank);
         // row 2 は残る
-        assert!(matches!(g.row(2).unwrap()[0].content, CellContent::Grapheme { .. }));
+        assert!(matches!(
+            g.row(2).unwrap()[0].content,
+            CellContent::Grapheme { .. }
+        ));
     }
 
     // T-03: ED 2 — カーソル位置を変えずに全画面消去
@@ -880,7 +924,14 @@ mod tests {
         let mut g = make_grid(80, 24);
         feed(&mut g, b"\x1b[100mA"); // Bright Black bg
         let style = g.row(0).unwrap()[0].style;
-        assert_eq!(style.bg, Some(Color { r: 128, g: 128, b: 128 }));
+        assert_eq!(
+            style.bg,
+            Some(Color {
+                r: 128,
+                g: 128,
+                b: 128
+            })
+        );
     }
 
     // ── T-07: SGR 256色 ───────────────────────────────────────────────────
@@ -929,7 +980,14 @@ mod tests {
         let mut g = make_grid(80, 24);
         feed(&mut g, b"\x1b[38;2;255;128;0mA");
         let style = g.row(0).unwrap()[0].style;
-        assert_eq!(style.fg, Some(Color { r: 255, g: 128, b: 0 }));
+        assert_eq!(
+            style.fg,
+            Some(Color {
+                r: 255,
+                g: 128,
+                b: 0
+            })
+        );
     }
 
     // T-08: 48;2;0;0;255 — 背景 RGB 青
@@ -947,7 +1005,7 @@ mod tests {
     #[test]
     fn test_sgr_italic_off() {
         let mut g = make_grid(80, 24);
-        feed(&mut g, b"\x1b[3m");  // italic on
+        feed(&mut g, b"\x1b[3m"); // italic on
         feed(&mut g, b"\x1b[23mA"); // italic off
         assert!(!g.row(0).unwrap()[0].style.italic);
     }
@@ -1016,7 +1074,7 @@ mod tests {
         let mut g = make_grid(80, 24);
         // 上 1–22 行をスクロール領域に設定（最終 2 行をステータスバーに残す）
         feed(&mut g, b"\x1b[1;22r");
-        assert_eq!(g.scroll_top(), 0,  "scroll_top は 0 始まり");
+        assert_eq!(g.scroll_top(), 0, "scroll_top は 0 始まり");
         assert_eq!(g.scroll_bottom(), 21, "scroll_bottom は 0 始まり 21");
     }
 
@@ -1024,8 +1082,8 @@ mod tests {
     #[test]
     fn test_decstbm_reset() {
         let mut g = make_grid(80, 24);
-        feed(&mut g, b"\x1b[1;22r");  // 部分設定
-        feed(&mut g, b"\x1b[r");      // リセット
+        feed(&mut g, b"\x1b[1;22r"); // 部分設定
+        feed(&mut g, b"\x1b[r"); // リセット
         assert_eq!(g.scroll_top(), 0);
         assert_eq!(g.scroll_bottom(), 23);
     }

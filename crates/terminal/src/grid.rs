@@ -96,9 +96,15 @@ impl Grid {
         }
     }
 
-    pub fn cols(&self) -> u16 { self.cols }
-    pub fn rows(&self) -> u16 { self.rows }
-    pub fn cursor(&self) -> CursorPos { self.cursor }
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+    pub fn cursor(&self) -> CursorPos {
+        self.cursor
+    }
 
     /// オルタネートスクリーンに切り替える (`CSI ?1049h`)
     ///
@@ -291,7 +297,8 @@ impl Grid {
     /// グリッドをリサイズ（ConPTY リサイズ時に呼び出し）
     pub fn resize(&mut self, new_cols: u16, new_rows: u16) {
         // 行数調整
-        self.cells.resize_with(new_rows as usize, || vec![Cell::blank(); new_cols as usize]);
+        self.cells
+            .resize_with(new_rows as usize, || vec![Cell::blank(); new_cols as usize]);
         // 各行の列数調整
         for row in &mut self.cells {
             row.resize_with(new_cols as usize, Cell::blank);
@@ -631,7 +638,10 @@ mod tests {
         g.move_cursor(1, 0); // col 1 に移動
         g.erase_line_right();
         // A は残る
-        assert!(matches!(g.row(0).unwrap()[0].content, CellContent::Grapheme { .. }));
+        assert!(matches!(
+            g.row(0).unwrap()[0].content,
+            CellContent::Grapheme { .. }
+        ));
         // B, C は消える
         assert_eq!(g.row(0).unwrap()[1].content, CellContent::Blank);
         assert_eq!(g.row(0).unwrap()[2].content, CellContent::Blank);
@@ -647,7 +657,10 @@ mod tests {
         g.move_cursor(0, 1);
         g.erase_display_below();
         // row 0 の A は残る
-        assert!(matches!(g.row(0).unwrap()[0].content, CellContent::Grapheme { .. }));
+        assert!(matches!(
+            g.row(0).unwrap()[0].content,
+            CellContent::Grapheme { .. }
+        ));
         // row 1 の B は消える
         assert_eq!(g.row(1).unwrap()[0].content, CellContent::Blank);
     }
@@ -656,7 +669,11 @@ mod tests {
     #[test]
     fn test_cell_style_bold_reverse() {
         let mut g = default_grid(80, 24);
-        let style = CellStyle { bold: true, reverse: true, ..CellStyle::default() };
+        let style = CellStyle {
+            bold: true,
+            reverse: true,
+            ..CellStyle::default()
+        };
         g.write_char("Y", style);
         let cell = &g.row(0).unwrap()[0];
         assert!(cell.style.bold);
@@ -713,7 +730,11 @@ mod tests {
         for _ in 0..6 {
             g.write_char("X", CellStyle::default());
         }
-        assert_eq!(g.cursor().row, 1, "DECAWM on: 5 文字目以降は row 1 に折り返す");
+        assert_eq!(
+            g.cursor().row,
+            1,
+            "DECAWM on: 5 文字目以降は row 1 に折り返す"
+        );
     }
 
     // C-9: normalize_nfc は NFD → NFC を変換する
@@ -722,6 +743,6 @@ mod tests {
         let nfd = "\u{110B}\u{1161}"; // NFD: ㅇ + ㅏ
         let nfc = normalize_nfc(nfd);
         assert_eq!(nfc, "아"); // NFC: U+C544
-        assert_ne!(nfc, nfd);  // 変換されていることを確認
+        assert_ne!(nfc, nfd); // 変換されていることを確認
     }
 }

@@ -21,7 +21,11 @@ pub async fn list_panes(session: &str) -> Result<()> {
             match conn.rx.recv().await {
                 Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
                 Some(_) => continue,
-                None => return Err(anyhow::anyhow!("server closed connection before sending PanesListed")),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PanesListed"
+                    ))
+                }
             }
         }
     })
@@ -31,10 +35,16 @@ pub async fn list_panes(session: &str) -> Result<()> {
     if panes.is_empty() {
         println!("(no panes)");
     } else {
-        println!("{:<6} {:<8} {:<6} {:<6} title", "pane", "surface", "cols", "rows");
+        println!(
+            "{:<6} {:<8} {:<6} {:<6} title",
+            "pane", "surface", "cols", "rows"
+        );
         println!("{}", "-".repeat(40));
         for p in &panes {
-            println!("{:<6} {:<8} {:<6} {:<6} {}", p.id.0, p.surface.0, p.cols, p.rows, p.title);
+            println!(
+                "{:<6} {:<8} {:<6} {:<6} {}",
+                p.id.0, p.surface.0, p.cols, p.rows, p.title
+            );
         }
     }
     Ok(())
@@ -50,7 +60,10 @@ pub async fn send_keys(session: &str, pane_id: u32, text: &str) -> Result<()> {
 
     let data = unescape(text);
     conn.tx
-        .send(ClientMessage::Input { pane: PaneId(pane_id), data })
+        .send(ClientMessage::Input {
+            pane: PaneId(pane_id),
+            data,
+        })
         .await?;
 
     Ok(())
@@ -63,10 +76,22 @@ fn unescape(s: &str) -> Vec<u8> {
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.peek() {
-                Some('n') => { chars.next(); out.push(b'\n'); }
-                Some('r') => { chars.next(); out.push(b'\r'); }
-                Some('t') => { chars.next(); out.push(b'\t'); }
-                Some('\\') => { chars.next(); out.push(b'\\'); }
+                Some('n') => {
+                    chars.next();
+                    out.push(b'\n');
+                }
+                Some('r') => {
+                    chars.next();
+                    out.push(b'\r');
+                }
+                Some('t') => {
+                    chars.next();
+                    out.push(b'\t');
+                }
+                Some('\\') => {
+                    chars.next();
+                    out.push(b'\\');
+                }
                 _ => out.push(b'\\'),
             }
         } else {

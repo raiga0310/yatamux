@@ -4,9 +4,9 @@
 //! パイプ名は ipc.rs の PIPE_PREFIX と同じ規則: \\.\pipe\yatamux-{session}
 
 use anyhow::{Context, Result};
-use yatamux_protocol::{ClientMessage, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+use yatamux_protocol::{ClientMessage, ServerMessage};
 
 pub struct ServerConnection {
     pub tx: mpsc::Sender<ClientMessage>,

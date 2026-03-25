@@ -2,7 +2,7 @@
 //!
 //! `Arc<Mutex<PaneStore>>` でウィンドウスレッドと tokio タスクが共有する。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use yatamux_protocol::types::{PaneId, SplitDirection};
@@ -55,8 +55,7 @@ impl LayoutNode {
                 true
             }
             LayoutNode::Split { first, second, .. } => {
-                first.split_leaf(parent, child, dir)
-                    || second.split_leaf(parent, child, dir)
+                first.split_leaf(parent, child, dir) || second.split_leaf(parent, child, dir)
             }
             _ => false,
         }
@@ -91,23 +90,48 @@ impl LayoutNode {
     pub fn compute_rects(&self, r: PaneRect) -> Vec<(PaneId, PaneRect)> {
         match self {
             LayoutNode::Leaf(id) => vec![(*id, r)],
-            LayoutNode::Split { direction, ratio, first, second } => {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
                 let sep = Self::SEP_PX;
                 let (r1, r2) = match direction {
                     SplitDirection::Vertical => {
                         let w1 = (((r.w - sep) as f32 * ratio) as i32).max(1);
                         let w2 = (r.w - w1 - sep).max(1);
                         (
-                            PaneRect { x: r.x, y: r.y, w: w1, h: r.h },
-                            PaneRect { x: r.x + w1 + sep, y: r.y, w: w2, h: r.h },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y,
+                                w: w1,
+                                h: r.h,
+                            },
+                            PaneRect {
+                                x: r.x + w1 + sep,
+                                y: r.y,
+                                w: w2,
+                                h: r.h,
+                            },
                         )
                     }
                     SplitDirection::Horizontal => {
                         let h1 = (((r.h - sep) as f32 * ratio) as i32).max(1);
                         let h2 = (r.h - h1 - sep).max(1);
                         (
-                            PaneRect { x: r.x, y: r.y, w: r.w, h: h1 },
-                            PaneRect { x: r.x, y: r.y + h1 + sep, w: r.w, h: h2 },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y,
+                                w: r.w,
+                                h: h1,
+                            },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y + h1 + sep,
+                                w: r.w,
+                                h: h2,
+                            },
                         )
                     }
                 };
@@ -122,25 +146,60 @@ impl LayoutNode {
     pub fn compute_separator_rects(&self, r: PaneRect) -> Vec<PaneRect> {
         match self {
             LayoutNode::Leaf(_) => vec![],
-            LayoutNode::Split { direction, ratio, first, second } => {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
                 let sep = Self::SEP_PX;
                 let (r1, r2, sep_rect) = match direction {
                     SplitDirection::Vertical => {
                         let w1 = (((r.w - sep) as f32 * ratio) as i32).max(1);
                         let w2 = (r.w - w1 - sep).max(1);
                         (
-                            PaneRect { x: r.x, y: r.y, w: w1, h: r.h },
-                            PaneRect { x: r.x + w1 + sep, y: r.y, w: w2, h: r.h },
-                            PaneRect { x: r.x + w1, y: r.y, w: sep, h: r.h },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y,
+                                w: w1,
+                                h: r.h,
+                            },
+                            PaneRect {
+                                x: r.x + w1 + sep,
+                                y: r.y,
+                                w: w2,
+                                h: r.h,
+                            },
+                            PaneRect {
+                                x: r.x + w1,
+                                y: r.y,
+                                w: sep,
+                                h: r.h,
+                            },
                         )
                     }
                     SplitDirection::Horizontal => {
                         let h1 = (((r.h - sep) as f32 * ratio) as i32).max(1);
                         let h2 = (r.h - h1 - sep).max(1);
                         (
-                            PaneRect { x: r.x, y: r.y, w: r.w, h: h1 },
-                            PaneRect { x: r.x, y: r.y + h1 + sep, w: r.w, h: h2 },
-                            PaneRect { x: r.x, y: r.y + h1, w: r.w, h: sep },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y,
+                                w: r.w,
+                                h: h1,
+                            },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y + h1 + sep,
+                                w: r.w,
+                                h: h2,
+                            },
+                            PaneRect {
+                                x: r.x,
+                                y: r.y + h1,
+                                w: r.w,
+                                h: sep,
+                            },
                         )
                     }
                 };
@@ -153,6 +212,24 @@ impl LayoutNode {
     }
 }
 
+/// Win32 スレッドが表示するトースト通知
+#[derive(Clone, Debug)]
+pub struct Toast {
+    /// 発生元ペイン ID
+    pub pane_id: PaneId,
+    /// 通知メッセージ
+    pub message: String,
+    /// 生成からの経過ミリ秒
+    pub elapsed_ms: u32,
+}
+
+impl Toast {
+    /// トースト全体の表示時間（ms）
+    pub const DURATION_MS: u32 = 4000;
+    /// スライドインにかける時間（ms）
+    pub const SLIDE_MS: u32 = 300;
+}
+
 /// クライアント側のペイン状態（ウィンドウスレッドと tokio タスクで共有）
 pub struct PaneStore {
     /// ペイン ID → グリッドの Arc
@@ -163,6 +240,8 @@ pub struct PaneStore {
     pub active: PaneId,
     /// OSC 52 で要求されたクリップボードデータ（Win32 スレッドが取り出して SetClipboardData）
     pub pending_clipboard: Option<Vec<u8>>,
+    /// 未処理のトースト通知キュー（tokio → Win32 スレッドへの引き渡し）
+    pub pending_toasts: VecDeque<Toast>,
 }
 
 impl PaneStore {
@@ -174,6 +253,7 @@ impl PaneStore {
             layout: LayoutNode::Leaf(pane_id),
             active: pane_id,
             pending_clipboard: None,
+            pending_toasts: VecDeque::new(),
         }
     }
 }

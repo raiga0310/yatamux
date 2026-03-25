@@ -5,13 +5,13 @@
 //!   2. PTY 書き込み / リサイズ（クライアント入力 → ConPTY input）
 //!   3. VT 処理は PTY 読み取りタスク内でインライン実行
 
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use anyhow::Result;
 use tracing::{debug, info};
 
 use yatamux_protocol::types::{PaneId, TermSize};
-use yatamux_terminal::{Grid, CjkWidthConfig};
+use yatamux_terminal::{CjkWidthConfig, Grid};
 
 /// ペイン書き込みタスクへの制御コマンド
 enum PtyCmd {
@@ -37,6 +37,7 @@ impl Pane {
         size: TermSize,
         width_config: CjkWidthConfig,
         client_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
+        client_notification_tx: mpsc::Sender<(PaneId, String)>,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
         let title = Arc::new(Mutex::new(String::new()));
@@ -76,7 +77,7 @@ impl Pane {
 
             while let Some(data) = pty_output_rx.recv().await {
                 // Grid 更新
-                {
+                let (notif, cmd_finished) = {
                     let mut g = grid_clone.lock().await;
                     let mut proc = yatamux_terminal::vt::VtProcessor::new(&mut g);
                     yatamux_terminal::vt::feed_bytes(&mut parser, &mut proc, &data);
@@ -84,6 +85,18 @@ impl Pane {
                     if let Some(t) = proc.title.take() {
                         *title_clone.lock().await = t;
                     }
+                    (proc.notification.take(), proc.command_finished)
+                };
+
+                // OSC 9/99/777 通知を転送
+                if let Some(body) = notif {
+                    let _ = client_notification_tx.send((id, body)).await;
+                }
+                // OSC 133;D コマンド終了通知を転送
+                if cmd_finished {
+                    let _ = client_notification_tx
+                        .send((id, "Command finished".to_string()))
+                        .await;
                 }
 
                 // クライアントに生データを転送（Arc でラップしてファンアウト時のコピーを回避）
@@ -106,14 +119,18 @@ impl Pane {
 
     /// ペインに入力を送信
     pub async fn send_input(&self, data: Vec<u8>) -> Result<()> {
-        self.cmd_tx.send(PtyCmd::Input(data)).await
+        self.cmd_tx
+            .send(PtyCmd::Input(data))
+            .await
             .map_err(|_| anyhow::anyhow!("Pane {:?} cmd channel closed", self.id))
     }
 
     /// ペインをリサイズ（グリッドと PTY の両方）
     pub async fn resize(&self, size: TermSize) -> Result<()> {
         self.grid.lock().await.resize(size.cols, size.rows);
-        self.cmd_tx.send(PtyCmd::Resize(size)).await
+        self.cmd_tx
+            .send(PtyCmd::Resize(size))
+            .await
             .map_err(|_| anyhow::anyhow!("Pane {:?} cmd channel closed", self.id))
     }
 }

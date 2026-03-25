@@ -38,19 +38,20 @@ impl PtySession {
             pixel_height: 0,
         };
 
-        let pair = pty_system
-            .openpty(pty_size)
-            .context("Failed to open PTY")?;
+        let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
         let cmd = cmd.unwrap_or_else(default_shell);
 
-        let child = pair.slave
+        let child = pair
+            .slave
             .spawn_command(cmd)
             .context("Failed to spawn child process")?;
 
         // PTY 読み取りスレッド（ConPTY 出力 → output_tx）
         // Microsoft の推奨：読み書きを別スレッドで処理しデッドロックを防ぐ
-        let mut reader = pair.master.try_clone_reader()
+        let mut reader = pair
+            .master
+            .try_clone_reader()
             .context("Failed to clone PTY reader")?;
 
         tokio::task::spawn_blocking(move || {
@@ -69,7 +70,9 @@ impl PtySession {
         });
 
         // take_writer() で書き込み側を取得
-        let writer = pair.master.take_writer()
+        let writer = pair
+            .master
+            .take_writer()
             .context("Failed to take PTY writer")?;
 
         Ok(Self {
@@ -85,18 +88,22 @@ impl PtySession {
     /// バッファに残らず ConPTY に即座に届くようにする。
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         use std::io::Write;
-        self.writer.write_all(data).context("Failed to write to PTY")?;
+        self.writer
+            .write_all(data)
+            .context("Failed to write to PTY")?;
         self.writer.flush().context("Failed to flush PTY")
     }
 
     /// PTY をリサイズする
     pub fn resize(&self, size: TermSize) -> Result<()> {
-        self.master.resize(PtySize {
-            rows: size.rows,
-            cols: size.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        }).context("Failed to resize PTY")
+        self.master
+            .resize(PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to resize PTY")
     }
 
     /// 子プロセスが終了しているか確認（非ブロッキング）

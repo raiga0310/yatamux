@@ -29,8 +29,8 @@
 //! Leaf(A)  ─[Ctrl+Shift+E]→  Split { Vertical, 0.5, Leaf(A), Leaf(B) }
 //! ```
 
+pub mod ipc;
 pub mod pane;
 pub mod session;
-pub mod ipc;
 
 pub use session::Server;

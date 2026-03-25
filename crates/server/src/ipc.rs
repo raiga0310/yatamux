@@ -49,7 +49,10 @@ pub async fn run_ipc_server(
 
         loop {
             info!("Waiting for client connection...");
-            server.connect().await.context("Named pipe connect failed")?;
+            server
+                .connect()
+                .await
+                .context("Named pipe connect failed")?;
             info!("Client connected");
 
             // 次の接続用インスタンスを先に準備
