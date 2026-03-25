@@ -86,6 +86,7 @@ use anyhow::{bail, Result};
 
 mod app;
 mod cli;
+mod layout_config;
 
 /// デフォルトセッション名（IPC パイプ名のサフィックス）
 pub const DEFAULT_SESSION: &str = "default";
@@ -121,6 +122,14 @@ async fn main() -> Result<()> {
             eprintln!("Usage: yatamux [list-panes | send-keys --pane <id> <text>]");
             bail!("unknown subcommand");
         }
-        None => app::run().await,
+        None => {
+            // --layout <name> フラグを解析
+            let layout_name = args
+                .iter()
+                .position(|a| a == "--layout")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            app::run(layout_name).await
+        }
     }
 }
