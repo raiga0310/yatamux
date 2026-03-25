@@ -161,6 +161,8 @@ pub struct PaneStore {
     pub layout: LayoutNode,
     /// フォーカスされているペイン ID
     pub active: PaneId,
+    /// OSC 52 で要求されたクリップボードデータ（Win32 スレッドが取り出して SetClipboardData）
+    pub pending_clipboard: Option<Vec<u8>>,
 }
 
 impl PaneStore {
@@ -171,6 +173,7 @@ impl PaneStore {
             grids,
             layout: LayoutNode::Leaf(pane_id),
             active: pane_id,
+            pending_clipboard: None,
         }
     }
 }

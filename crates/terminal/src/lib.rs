@@ -68,10 +68,16 @@ impl TerminalSink {
         }
     }
 
-    /// VT バイト列をパースしてグリッドに適用する
-    pub fn feed(&mut self, data: &[u8]) {
+    /// VT バイト列をパースしてグリッドに適用する。
+    ///
+    /// OSC 52 クリップボード要求が含まれていた場合は
+    /// `Some(decoded_bytes)` を返す。それ以外は `None`。
+    pub fn feed(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let mut g = self.grid.lock().unwrap();
         let mut proc = vt::VtProcessor::new(&mut g);
         vt::feed_bytes(&mut self.parser, &mut proc, data);
+        proc.clipboard_data
     }
 }
+
+// 対応 VT シーケンス（更新版）: OSC 52 クリップボード書き込み（feed() の戻り値で通知）

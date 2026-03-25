@@ -3,6 +3,7 @@
 //! `vte` クレートのステートマシンをラップし、
 //! VT エスケープシーケンスを Grid 操作に変換する。
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use vte::{Params, Parser, Perform};
 use crate::cell::{Cell, Color, CellStyle};
 use crate::grid::Grid;
@@ -15,6 +16,8 @@ pub struct VtProcessor<'a> {
     pub title: Option<String>,
     /// OSC 通知本文（OSC 9/99/777）
     pub notification: Option<String>,
+    /// OSC 52 クリップボードデータ（base64 デコード済みバイト列）
+    pub clipboard_data: Option<Vec<u8>>,
 }
 
 impl<'a> VtProcessor<'a> {
@@ -24,6 +27,7 @@ impl<'a> VtProcessor<'a> {
             current_style: CellStyle::default(),
             title: None,
             notification: None,
+            clipboard_data: None,
         }
     }
 }
@@ -281,6 +285,25 @@ impl<'a> Perform for VtProcessor<'a> {
                     }
                 }
             }
+            // OSC 52: クリップボード書き込み
+            // 形式: \x1b]52;<kind>;<base64data>\x07
+            // kind が "c"（クリップボード）のときのみ処理する
+            "52" => {
+                // params[1] = kind ("c", "p", "q", "s" 等)
+                // params[2] = base64 エンコードされたデータ
+                let kind = params.get(1)
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .unwrap_or("");
+                if kind == "c" {
+                    let b64 = params.get(2)
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .unwrap_or("");
+                    // 不正な base64 は無視（panic しない）
+                    if let Ok(decoded) = BASE64_STANDARD.decode(b64) {
+                        self.clipboard_data = Some(decoded);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -422,6 +445,8 @@ pub fn feed_bytes(parser: &mut Parser, processor: &mut VtProcessor<'_>, data: &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine as _;
     use crate::cell::CellContent;
     use crate::grid::Grid;
     use crate::width::CjkWidthConfig;
@@ -1046,5 +1071,75 @@ mod tests {
             matches!(row0[0].content, CellContent::Blank),
             "SU でスクロール後、先頭行は空白になる"
         );
+    }
+
+    // ── OSC 52 クリップボード ─────────────────────────────────────────────
+
+    fn osc52_proc(data: &[u8]) -> Option<Vec<u8>> {
+        let mut g = make_grid(80, 24);
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(&mut g);
+        feed_bytes(&mut parser, &mut proc, data);
+        proc.clipboard_data
+    }
+
+    // TC-01: ASCII 文字列を BEL 終端でコピー
+    #[test]
+    fn test_osc52_ascii_bel() {
+        // "hello" の base64 = "aGVsbG8="
+        let result = osc52_proc(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(result, Some(b"hello".to_vec()));
+    }
+
+    // TC-02: 日本語 UTF-8 のコピー
+    #[test]
+    fn test_osc52_utf8_japanese() {
+        // "こんにちは" の base64
+        use std::io::Write;
+        let text = "こんにちは".as_bytes();
+        let b64 = BASE64_STANDARD.encode(text);
+        let seq = format!("\x1b]52;c;{}\x07", b64);
+        let result = osc52_proc(seq.as_bytes());
+        assert_eq!(result, Some(text.to_vec()));
+    }
+
+    // TC-03: ST 終端（\x1b\x5c）のサポート
+    #[test]
+    fn test_osc52_st_terminator() {
+        let result = osc52_proc(b"\x1b]52;c;aGVsbG8=\x1b\\");
+        assert_eq!(result, Some(b"hello".to_vec()));
+    }
+
+    // TC-04: 空データでクリップボードをクリア
+    #[test]
+    fn test_osc52_empty_data() {
+        let result = osc52_proc(b"\x1b]52;c;\x07");
+        assert_eq!(result, Some(b"".to_vec()));
+    }
+
+    // TC-05: `c` 以外のクリップボード種別は無視
+    #[test]
+    fn test_osc52_non_clipboard_type_ignored() {
+        let result = osc52_proc(b"\x1b]52;p;aGVsbG8=\x07");
+        assert_eq!(result, None);
+    }
+
+    // TC-06: 不正な base64 は無視（panic しない）
+    #[test]
+    fn test_osc52_invalid_base64() {
+        let result = osc52_proc(b"\x1b]52;c;!!!invalid!!!\x07");
+        assert_eq!(result, None);
+    }
+
+    // TC-07: 複数回の OSC 52 で最新値に上書き
+    #[test]
+    fn test_osc52_overwrite() {
+        // "first" = "Zmlyc3Q=", "second" = "c2Vjb25k"
+        let mut g = make_grid(80, 24);
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(&mut g);
+        feed_bytes(&mut parser, &mut proc, b"\x1b]52;c;Zmlyc3Q=\x07");
+        feed_bytes(&mut parser, &mut proc, b"\x1b]52;c;c2Vjb25k\x07");
+        assert_eq!(proc.clipboard_data, Some(b"second".to_vec()));
     }
 }

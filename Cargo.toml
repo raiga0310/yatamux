@@ -43,6 +43,9 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dwm",
 ] }
 
+# Base64 (OSC 52 クリップボード)
+base64 = "0.22"
+
 # Config
 toml = "0.8"
 

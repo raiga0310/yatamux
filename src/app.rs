@@ -145,7 +145,10 @@ pub async fn run() -> Result<()> {
                     match msg {
                         ServerMessage::Output { pane, data } => {
                             if let Some(sink) = sinks.get_mut(&pane) {
-                                sink.feed(&data);
+                                // feed() は OSC 52 クリップボードデータがあれば Some を返す
+                                if let Some(clip) = sink.feed(&data) {
+                                    pane_store2.lock().unwrap().pending_clipboard = Some(clip);
+                                }
                             }
                         }
                         ServerMessage::PaneCreated { id: new_id, .. } => {
