@@ -74,7 +74,16 @@ pub enum ServerMessage {
     },
 
     /// ペイン作成完了
-    PaneCreated { id: PaneId, surface: SurfaceId },
+    PaneCreated {
+        id: PaneId,
+        surface: SurfaceId,
+        /// 分割元ペイン ID（IPC 経由の CreatePane で設定される）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split_from: Option<PaneId>,
+        /// 分割方向（IPC 経由の CreatePane で設定される）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<SplitDirection>,
+    },
 
     /// ペインからの出力データ（VT シーケンス）
     Output {

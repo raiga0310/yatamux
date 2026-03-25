@@ -14,9 +14,9 @@ use tracing::{debug, info};
 use yatamux_protocol::types::{PaneId, TermSize};
 use yatamux_terminal::{CjkWidthConfig, Grid};
 
-/// ListPanes でのデッドロックを避けるため、サイズとタイトルは std::sync::Mutex で保持する。
-/// tokio::sync::Mutex の .lock().await は pane_output_rx が詰まると
-/// handle_client_message 内でデッドロックを起こす可能性がある。
+// ListPanes でのデッドロックを避けるため、サイズとタイトルは std::sync::Mutex で保持する。
+// tokio::sync::Mutex の .lock().await は pane_output_rx が詰まると
+// handle_client_message 内でデッドロックを起こす可能性がある。
 
 /// ペイン書き込みタスクへの制御コマンド
 enum PtyCmd {

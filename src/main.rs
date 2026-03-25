@@ -145,12 +145,29 @@ enum Commands {
     /// アクティブなペイン一覧を表示
     ListPanes,
     /// 指定ペインにキー入力を送信
+    ///
+    /// エスケープシーケンス: \n=LF, \r=CR, \t=TAB, \\=バックスラッシュ
+    ///
+    /// 注意: Windows パス（例: C:\Users\name）の \n や \r はエスケープ変換される。
+    /// パスをそのまま送る場合は --raw を使用すること。
+    ///
+    /// 例:
+    ///   yatamux send-keys --pane 1 --enter "cargo test"
+    ///   yatamux send-keys --pane 1 "echo hello\r"
+    ///   yatamux send-keys --pane 1 --raw --enter "C:\Users\raiga\dev"
+    #[command(verbatim_doc_comment)]
     SendKeys {
         /// 送信先ペイン ID
         #[arg(long, value_name = "ID")]
         pane: u32,
-        /// 送信するテキスト
+        /// 送信するテキスト（エスケープ変換あり: \n=LF \r=CR \t=TAB \\=バックスラッシュ）
         text: String,
+        /// 末尾に CR（Enter）を自動付加する
+        #[arg(long)]
+        enter: bool,
+        /// エスケープ変換を無効化してテキストをそのまま送信（Windows パスなどに使用）
+        #[arg(long)]
+        raw: bool,
     },
     /// 指定ペインの内容を表示（スクロールバック末尾 N 行 + 現在画面）
     CapturePane {
@@ -214,9 +231,12 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::ListPanes) => cli::list_panes(DEFAULT_SESSION).await,
-        Some(Commands::SendKeys { pane, text }) => {
-            cli::send_keys(DEFAULT_SESSION, pane, &text).await
-        }
+        Some(Commands::SendKeys {
+            pane,
+            text,
+            enter,
+            raw,
+        }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw).await,
         Some(Commands::CapturePane { target, lines }) => {
             cli::capture_pane(DEFAULT_SESSION, target, lines).await
         }

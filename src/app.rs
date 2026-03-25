@@ -302,7 +302,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                 }
                             }
                         }
-                        ServerMessage::PaneCreated { id: new_id, .. } => {
+                        ServerMessage::PaneCreated { id: new_id, split_from: ipc_split_from, direction: ipc_direction, .. } => {
                             // on_pane_created フックを発火（fire-and-forget）
                             if let Some(cmd) = &hooks.on_pane_created {
                                 if crate::config::HooksConfig::is_enabled(&Some(cmd.clone())) {
@@ -487,6 +487,20 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                     pane: parent_id,
                                     size: new_size,
                                 }).await;
+                            } else if let (Some(parent_id), Some(direction)) =
+                                (ipc_split_from, ipc_direction)
+                            {
+                                // IPC 経由（split-pane CLI）で作成されたペイン
+                                // pending には積まれていないが GUI レイアウトに反映する必要がある
+                                let new_sink = TerminalSink::new(size.cols, size.rows);
+                                let new_grid = Arc::clone(&new_sink.grid);
+                                sinks.insert(new_id, new_sink);
+                                {
+                                    let mut store = pane_store2.lock().unwrap();
+                                    store.grids.insert(new_id, new_grid);
+                                    store.layout.split_leaf(parent_id, new_id, direction);
+                                    store.active = new_id;
+                                }
                             }
                         }
                         ServerMessage::PaneClosed { pane } => {

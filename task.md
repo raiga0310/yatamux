@@ -301,6 +301,88 @@ AIが現在のカレントディレクトリの制約を超え、別リポジト
 - [x] `src/cli.rs` に `split-pane` サブコマンドを追加（`--target`, `--direction`, `--dir` オプション）
 - [x] `docs/test-plan-split-pane-dir.md` 作成済み
 
+### ~~B-5: `split-pane` CLI で作ったペインが GUI に表示されない~~ ✅ 対応済み 【優先度: 高】
+
+`yatamux split-pane` で作成したペインがサーバー側（`list-panes` で確認可）には存在するが、
+GUI のレイアウトツリー（`PaneStore`）に反映されず、画面に表示されない。
+ステータスバーのペイン数カウントも更新されない。
+
+#### 根本原因
+
+`app.rs` の `ServerMessage::PaneCreated` ハンドラは以下の優先順位で処理を分岐する：
+
+1. `layout_switch.is_some()` → レイアウト切り替えフロー
+2. `pending_float` → フローティングペイン
+3. `pending.pop_front().is_some()` → **GUI（キーボードショートカット）起点の分割** → `PaneStore` を更新
+4. **それ以外 → 何もしない** ← IPC 経由の `CreatePane` はここに落ちる
+
+`pending` はキーボードショートカット（`split_tx`）経由でのみ積まれる。
+IPC クライアントが `CreatePane` を送っても `pending` に積まれないため、
+`PaneCreated` が届いても `PaneStore.grids`・`layout` が更新されず GUI に反映されない。
+
+#### 修正方針
+
+`PaneCreated` ハンドラの else 節（現在は何もしない）で、
+IPC 起点のペインとして GUI レイアウトに追加する処理を入れる。
+
+- `PaneStore.grids` に新しい `Grid` を追加
+- `layout.split_leaf(active, new_id, direction)` でレイアウトツリーに追加
+  - ただし IPC 側は `split_from` ペイン ID と `direction` を持っているので、
+    `PaneCreated` に `split_from` と `direction` を含める必要がある
+- `active` を新しいペイン ID に更新
+
+#### 必要な変更
+
+- `ServerMessage::PaneCreated` に `split_from: Option<PaneId>` と `direction: Option<SplitDirection>` を追加（`protocol/src/message.rs`）
+- サーバー側で `PaneCreated` 送信時にこれらを設定する（`session.rs` または `server/src/lib.rs`）
+- `app.rs` の else 節でレイアウト更新処理を実装
+
+#### サブタスク
+- [x] `ServerMessage::PaneCreated` に `split_from` / `direction` を追加（`protocol/src/message.rs`）
+- [x] サーバー側で `PaneCreated` 送信時に `split_from` / `direction` を設定（`session.rs`）
+- [x] `app.rs` の `PaneCreated` ハンドラに IPC 起点ペイン追加処理を実装（else 節）
+
+---
+
+### ~~I-1: `send-keys` の使い勝手改善 — エージェントが `--help` 一読で成功できるように~~ ✅ 対応済み 【優先度: 高】
+
+`send-keys` を初めて使うエージェント（Claude Code 等）が `--help` を読んだだけで一発成功できない問題が複数ある。
+
+#### 現状の問題
+
+1. **`\r` が CR に変換されるという仕様が `--help` に記載されていない**
+   - Enter を送るには `\r` を文字列末尾に付ける必要があるが、全く記述がない
+   - エージェントは自然に `"echo hello"` と送り、コマンドが実行されないことに気づかない
+
+2. **Windows パスに `\r` が含まれると意図せず Enter として解釈される**
+   - 例: `"dir C:\Users\raiga\dev"` → `unescape()` が `\r` を CR に変換してしまい、
+     `dir C:\Users` + Enter + `aiga\dev` という2コマンドになる
+   - `--help` にこの危険な副作用の警告がない
+
+3. **エスケープシーケンス仕様が `--help` に書かれていない**
+   - `\r`=CR、`\n`=LF、`\t`=TAB、`\\`=バックスラッシュ の変換ルールが不明
+
+#### 理想状態
+
+`yatamux send-keys --help` を読んだエージェントが、何も試行錯誤せずに初回で正しいコマンドを送れる。
+
+#### 解決策の候補（実装時に選択）
+
+- **A: `--enter` フラグを追加**（推奨）
+  - `--enter` を付けると末尾に CR を自動付加する
+  - `\r` のエスケープ変換はそのまま残す（明示的に使いたい場合向け）
+  - `--help` の Examples に `send-keys --pane 2 --enter "echo hello"` と明示
+- **B: パス中の `\r` 問題を回避するため `--raw` モードを追加**
+  - `--raw` を付けるとエスケープ変換を一切しない（リテラル送信）
+  - `--enter` と組み合わせて `--raw --enter` で「パスをそのまま送って Enter」が実現できる
+- **C: `--help` の改善のみ（最小対応）**
+  - エスケープ仕様と使用例（Windows パスの注意）を `--help` に追記するだけ
+
+#### サブタスク
+- [x] `--enter` フラグ追加（末尾に CR を自動付加）
+- [x] `--raw` フラグ追加（エスケープ変換なしでリテラル送信。Windows パス対応）
+- [x] `--help` の doc コメントにエスケープ仕様・注意点・使用例を追記
+
 ### C-15: AIオーケストレーション向け Claude Code 統合スキル提供 【優先度: 中】
 `using-cmux` 相当。Yatamux本体の機能追加ではなく、Claude Codeに「Yatamuxの操作方法」を教えるためのインターフェースを提供する。
 

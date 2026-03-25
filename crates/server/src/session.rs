@@ -205,7 +205,12 @@ impl Server {
                 }
 
                 self.client_tx
-                    .send(ServerMessage::PaneCreated { id, surface })
+                    .send(ServerMessage::PaneCreated {
+                        id,
+                        surface,
+                        split_from,
+                        direction,
+                    })
                     .await
                     .context("Failed to send PaneCreated")?;
             }
@@ -499,7 +504,7 @@ mod tests {
             .await
             .unwrap();
             match recv_one(&mut rx).await {
-                ServerMessage::PaneCreated { id, surface } => {
+                ServerMessage::PaneCreated { id, surface, .. } => {
                     assert_eq!(surface, surf_id);
                     assert_eq!(id, yatamux_protocol::types::PaneId(1));
                 }

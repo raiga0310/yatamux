@@ -103,9 +103,7 @@ impl PtySession {
     ///
     /// `take_child()` の前に呼ぶこと。`Pane::Drop` で子プロセスを終了させるために使用する。
     /// `take_child()` 後は `child` が `None` になるため `None` を返す。
-    pub fn clone_child_killer(
-        &self,
-    ) -> Option<Box<dyn portable_pty::ChildKiller + Send + Sync>> {
+    pub fn clone_child_killer(&self) -> Option<Box<dyn portable_pty::ChildKiller + Send + Sync>> {
         self.child.as_ref().map(|c| c.clone_killer())
     }
 

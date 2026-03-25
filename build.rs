@@ -15,9 +15,7 @@ fn main() {
         // /MANIFEST:EMBED  : マニフェストを PE バイナリに埋め込む
         // /MANIFESTINPUT:  : 追加で合成するマニフェストファイル
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-        println!(
-            "cargo:rustc-link-arg=/MANIFESTINPUT:{manifest_dir}/manifest.xml"
-        );
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{manifest_dir}/manifest.xml");
         println!("cargo:rerun-if-changed=manifest.xml");
     }
     println!("cargo:rerun-if-changed=build.rs");

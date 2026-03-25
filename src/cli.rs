@@ -164,15 +164,30 @@ pub async fn split_pane(
     Ok(())
 }
 
-/// `yatamux send-keys --pane <id> <text>` — 指定ペインにテキストを送信する
+/// `yatamux send-keys --pane <id> [--enter] [--raw] <text>` — 指定ペインにテキストを送信する
 ///
-/// `\n` は LF (0x0A)、`\r` は CR (0x0D) として解釈する。
-pub async fn send_keys(session: &str, pane_id: u32, text: &str) -> Result<()> {
+/// - `--enter`: 末尾に CR (0x0D) を自動付加する。コマンド実行に使用。
+/// - `--raw`: エスケープ変換を無効化してテキストをそのまま送信する。Windows パスに使用。
+/// - デフォルト（オプションなし）: `\n`=LF、`\r`=CR、`\t`=TAB、`\\`=バックスラッシュ に変換。
+pub async fn send_keys(
+    session: &str,
+    pane_id: u32,
+    text: &str,
+    enter: bool,
+    raw: bool,
+) -> Result<()> {
     let conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
 
-    let data = unescape(text);
+    let mut data = if raw {
+        text.as_bytes().to_vec()
+    } else {
+        unescape(text)
+    };
+    if enter {
+        data.push(b'\r');
+    }
     conn.tx
         .send(ClientMessage::Input {
             pane: PaneId(pane_id),
