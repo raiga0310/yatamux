@@ -40,14 +40,17 @@ impl From<&LayoutNode> for LayoutNodeDef {
     fn from(node: &LayoutNode) -> Self {
         match node {
             LayoutNode::Leaf(id) => LayoutNodeDef::Leaf { id: *id },
-            LayoutNode::Split { direction, ratio, first, second } => {
-                LayoutNodeDef::Split {
-                    direction: *direction,
-                    ratio: *ratio,
-                    first: Box::new(LayoutNodeDef::from(first.as_ref())),
-                    second: Box::new(LayoutNodeDef::from(second.as_ref())),
-                }
-            }
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => LayoutNodeDef::Split {
+                direction: *direction,
+                ratio: *ratio,
+                first: Box::new(LayoutNodeDef::from(first.as_ref())),
+                second: Box::new(LayoutNodeDef::from(second.as_ref())),
+            },
         }
     }
 }
@@ -68,8 +71,7 @@ impl LayoutSnapshot {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let toml = self.to_toml()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let toml = self.to_toml().map_err(std::io::Error::other)?;
         std::fs::write(path, toml)
     }
 
@@ -83,7 +85,9 @@ impl LayoutSnapshot {
     /// `%APPDATA%\yatamux\session.toml` のパスを返す
     pub fn default_path() -> std::path::PathBuf {
         let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(base).join("yatamux").join("session.toml")
+        std::path::PathBuf::from(base)
+            .join("yatamux")
+            .join("session.toml")
     }
 }
 
@@ -179,7 +183,9 @@ mod tests {
         };
         let def = LayoutNodeDef::from(&node);
         match def {
-            LayoutNodeDef::Split { direction, ratio, .. } => {
+            LayoutNodeDef::Split {
+                direction, ratio, ..
+            } => {
                 assert_eq!(direction, SplitDirection::Vertical);
                 assert!((ratio - 0.4).abs() < f32::EPSILON);
             }
@@ -207,7 +213,15 @@ mod tests {
     fn test_default_path_contains_yatamux() {
         let path = LayoutSnapshot::default_path();
         let s = path.to_string_lossy();
-        assert!(s.contains("yatamux"), "パスに 'yatamux' が含まれること: {}", s);
-        assert!(s.ends_with("session.toml"), "末尾が session.toml であること: {}", s);
+        assert!(
+            s.contains("yatamux"),
+            "パスに 'yatamux' が含まれること: {}",
+            s
+        );
+        assert!(
+            s.ends_with("session.toml"),
+            "末尾が session.toml であること: {}",
+            s
+        );
     }
 }
