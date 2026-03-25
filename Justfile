@@ -25,8 +25,10 @@ test:
     cargo test
 
 # cargo install でリリースビルドして ~/.cargo/bin/yatamux.exe にインストール
+# --features cli でコンソールサブシステムビルドにすることで
+# --help / --version が PowerShell で正常に動作する（Enter 不要）
 install:
-    cargo install --path .
+    cargo install --path . --features cli
 
 # clippy
 lint:

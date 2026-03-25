@@ -47,6 +47,9 @@ windows = { version = "0.58", features = [
 # Base64 (OSC 52 クリップボード)
 base64 = "0.22"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
 # Config
 toml = "0.8"
 
@@ -77,7 +80,13 @@ tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 
+clap = { workspace = true }
 yatamux-server = { path = "crates/server" }
+
+[target.'cfg(windows)'.dependencies]
+# AttachConsole + CreateFileW("CONOUT$") + SetStdHandle で
+# リリース GUI ビルドでも --help などの出力を親コンソールに届ける
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security"] }
 yatamux-client = { path = "crates/client" }
 yatamux-protocol = { path = "crates/protocol" }
 yatamux-terminal = { path = "crates/terminal" }

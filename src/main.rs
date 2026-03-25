@@ -82,7 +82,43 @@
     windows_subsystem = "windows"
 )]
 
-use anyhow::{bail, Result};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+/// 親プロセスのコンソール（PowerShell 等）にアタッチし、
+/// `println!` / clap の出力が届くよう stdout/stderr を CONOUT$ にリダイレクトする。
+///
+/// リリースビルドは `windows_subsystem = "windows"` により stdout が無効なため、
+/// `--help` / `--version` などの表示前にこの関数を呼ぶ必要がある。
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    unsafe {
+        // 親プロセス（PowerShell 等）のコンソールにアタッチ
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() {
+            // CONOUT$ への書き込みハンドルを取得し stdout/stderr に設定する。
+            // AttachConsole だけでは GUI サブシステムプロセスの GetStdHandle が
+            // NULL のままのため SetStdHandle で上書きが必要。
+            if let Ok(h) = CreateFileW(
+                windows::core::w!("CONOUT$"),
+                0x4000_0000, // GENERIC_WRITE
+                FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            ) {
+                let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+                let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+            }
+        }
+    }
+}
 
 mod app;
 mod cli;
@@ -92,6 +128,32 @@ mod layout_config;
 /// デフォルトセッション名（IPC パイプ名のサフィックス）
 pub const DEFAULT_SESSION: &str = "default";
 
+/// CJK 対応 Windows ターミナルマルチプレクサ
+#[derive(Parser)]
+#[command(name = "yatamux", version, about)]
+struct Cli {
+    /// 起動時に適用するレイアウト名（%APPDATA%\yatamux\layouts\<NAME>.toml）
+    #[arg(long, value_name = "NAME")]
+    layout: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// アクティブなペイン一覧を表示
+    ListPanes,
+    /// 指定ペインにキー入力を送信
+    SendKeys {
+        /// 送信先ペイン ID
+        #[arg(long, value_name = "ID")]
+        pane: u32,
+        /// 送信するテキスト
+        text: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
@@ -99,41 +161,35 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-
-    match args.get(1).map(String::as_str) {
-        Some("list-panes") => cli::list_panes(DEFAULT_SESSION).await,
-        Some("send-keys") => {
-            let pane_pos = args.iter().position(|a| a == "--pane");
-            let pane_id = pane_pos
-                .and_then(|i| args.get(i + 1))
-                .and_then(|s| s.parse::<u32>().ok());
-            // text は --pane <id> の直後の引数
-            let text = pane_pos.and_then(|i| args.get(i + 2)).cloned();
-            match (pane_id, text) {
-                (Some(id), Some(t)) => cli::send_keys(DEFAULT_SESSION, id, &t).await,
-                _ => {
-                    eprintln!("Usage: yatamux send-keys --pane <id> <text>");
-                    bail!("missing arguments");
-                }
+    #[cfg(windows)]
+    {
+        if std::env::args().count() > 1 {
+            // CLI 引数あり: 親コンソール（PowerShell 等）にアタッチして出力を有効化。
+            // `cli` フィーチャービルド（コンソールサブシステム）では既に stdout 有効だが
+            // 親コンソールに明示的に繋ぐことで出力先を統一する。
+            attach_parent_console();
+        } else {
+            // 引数なし = GUI 起動。`cli` フィーチャービルドはコンソールサブシステムなので
+            // 起動時にコンソールウィンドウが開く。FreeConsole() で即座に解放する。
+            // GUI サブシステムビルドではコンソールがないため no-op になる。
+            unsafe {
+                use windows::Win32::System::Console::FreeConsole;
+                let _ = FreeConsole();
             }
         }
-        Some(other) => {
-            eprintln!("Unknown subcommand: {other}");
-            eprintln!("Usage: yatamux [list-panes | send-keys --pane <id> <text>]");
-            bail!("unknown subcommand");
+    }
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::ListPanes) => cli::list_panes(DEFAULT_SESSION).await,
+        Some(Commands::SendKeys { pane, text }) => {
+            cli::send_keys(DEFAULT_SESSION, pane, &text).await
         }
         None => {
-            // --layout <name> フラグを解析
-            let layout_name = args
-                .iter()
-                .position(|a| a == "--layout")
-                .and_then(|i| args.get(i + 1))
-                .cloned();
-            // アプリ設定を読み込む（ファイルが存在しない場合はデフォルト）
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
-            app::run(layout_name, app_config).await
+            app::run(cli.layout, app_config).await
         }
     }
 }
