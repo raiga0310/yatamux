@@ -460,6 +460,90 @@ pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
     results
 }
 
+/// コピーモードのカーソルと選択状態
+///
+/// `cursor` はスクリーン座標（col, row）の 0-based インデックス。
+/// `anchor` が `Some` の場合はビジュアル選択が有効。
+#[derive(Clone, Debug)]
+pub struct CopyState {
+    /// カーソル位置 (col, row)（スクリーン座標、0-based）
+    pub cursor: (usize, usize),
+    /// 選択アンカー — None = カーソルのみ、Some = ビジュアル選択中
+    pub anchor: Option<(usize, usize)>,
+}
+
+impl CopyState {
+    /// 指定位置でコピーモードを初期化する
+    pub fn new(col: usize, row: usize) -> Self {
+        Self {
+            cursor: (col, row),
+            anchor: None,
+        }
+    }
+
+    /// カーソルを指定方向に移動する（cols/rows でクランプ）
+    pub fn move_cursor(&mut self, dcol: isize, drow: isize, cols: usize, rows: usize) {
+        let new_col = (self.cursor.0 as isize + dcol)
+            .max(0)
+            .min(cols.saturating_sub(1) as isize) as usize;
+        let new_row = (self.cursor.1 as isize + drow)
+            .max(0)
+            .min(rows.saturating_sub(1) as isize) as usize;
+        self.cursor = (new_col, new_row);
+    }
+
+    /// ビジュアル選択のアンカーをカーソル位置に設定する（トグル）
+    pub fn toggle_anchor(&mut self) {
+        if self.anchor.is_some() {
+            self.anchor = None;
+        } else {
+            self.anchor = Some(self.cursor);
+        }
+    }
+
+    /// 選択範囲の (row_start, row_end) を返す（None = 選択なし）
+    pub fn selection_rows(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        let (_, ar) = anchor;
+        let (_, cr) = self.cursor;
+        Some((ar.min(cr), ar.max(cr)))
+    }
+
+    /// セル (col, row) が現在の選択範囲内かどうかを判定する
+    pub fn is_selected(&self, col: usize, row: usize) -> bool {
+        let anchor = match self.anchor {
+            Some(a) => a,
+            None => return false,
+        };
+        let (ac, ar) = anchor;
+        let (cc, cr) = self.cursor;
+
+        // 行範囲を確定
+        let (row_min, row_max) = (ar.min(cr), ar.max(cr));
+        if row < row_min || row > row_max {
+            return false;
+        }
+
+        // 単一行選択
+        if row_min == row_max {
+            let (col_min, col_max) = (ac.min(cc), ac.max(cc));
+            return col >= col_min && col <= col_max;
+        }
+
+        // 複数行選択: 先頭行・末尾行・中間行で判定
+        if row == row_min {
+            let start_col = if ar < cr { ac } else { cc };
+            return col >= start_col;
+        }
+        if row == row_max {
+            let end_col = if ar < cr { cc } else { ac };
+            return col <= end_col;
+        }
+        // 中間行はすべて選択
+        true
+    }
+}
+
 /// Win32 スレッドが表示するトースト通知
 #[derive(Clone, Debug)]
 pub struct Toast {
@@ -502,6 +586,8 @@ pub struct PaneStore {
     pub should_quit: bool,
     /// レイアウトランチャー UI の状態（Some = 表示中）
     pub launcher: Option<LauncherState>,
+    /// コピーモードの状態（Some = コピーモード中）
+    pub copy_mode: Option<CopyState>,
 }
 
 impl PaneStore {
@@ -520,6 +606,7 @@ impl PaneStore {
             pre_float_active: None,
             should_quit: false,
             launcher: None,
+            copy_mode: None,
         }
     }
 
@@ -963,5 +1050,83 @@ mod tests {
         // ツリーが Split(1, 3) になっていることを確認
         let ids = layout.pane_ids();
         assert_eq!(ids, vec![PaneId(1), PaneId(3)]);
+    }
+
+    // ── CopyState テスト (C-12) ─────────────────────────────────────────────
+
+    // TC-C12-01: CopyState が正しく初期化される
+    #[test]
+    fn test_copy_state_init() {
+        let cs = CopyState::new(0, 0);
+        assert_eq!(cs.cursor, (0, 0));
+        assert!(cs.anchor.is_none());
+    }
+
+    // TC-C12-02: カーソル移動が端でクランプされる
+    #[test]
+    fn test_copy_state_cursor_clamp() {
+        let mut cs = CopyState::new(0, 0);
+        // 左端・上端からさらに左・上へ
+        cs.move_cursor(-1, 0, 80, 24);
+        assert_eq!(cs.cursor, (0, 0), "col should clamp at 0");
+        cs.move_cursor(0, -1, 80, 24);
+        assert_eq!(cs.cursor, (0, 0), "row should clamp at 0");
+        // 右端・下端へ移動してからさらに右・下へ
+        cs.move_cursor(100, 100, 80, 24);
+        assert_eq!(cs.cursor, (79, 23), "should clamp at (cols-1, rows-1)");
+        cs.move_cursor(1, 0, 80, 24);
+        assert_eq!(cs.cursor.0, 79, "col should clamp at cols-1");
+        cs.move_cursor(0, 1, 80, 24);
+        assert_eq!(cs.cursor.1, 23, "row should clamp at rows-1");
+    }
+
+    // TC-C12-03: アンカーのセット/アンセットが正しく動作する
+    #[test]
+    fn test_copy_state_anchor_toggle() {
+        let mut cs = CopyState::new(5, 3);
+        assert!(cs.anchor.is_none());
+        cs.toggle_anchor();
+        assert_eq!(cs.anchor, Some((5, 3)));
+        // カーソルを移動してもアンカーは変わらない
+        cs.move_cursor(3, 2, 80, 24);
+        assert_eq!(cs.anchor, Some((5, 3)));
+        assert_eq!(cs.cursor, (8, 5));
+        // 再度トグルでアンカーをクリア
+        cs.toggle_anchor();
+        assert!(cs.anchor.is_none());
+    }
+
+    // TC-C12-04: is_selected が単一行選択を正しく判定する
+    #[test]
+    fn test_copy_state_is_selected_single_row() {
+        let mut cs = CopyState::new(2, 3);
+        cs.toggle_anchor(); // anchor = (2, 3)
+        cs.move_cursor(3, 0, 80, 24); // cursor = (5, 3)
+                                      // col 2-5 が選択されている
+        assert!(cs.is_selected(2, 3));
+        assert!(cs.is_selected(4, 3));
+        assert!(cs.is_selected(5, 3));
+        assert!(!cs.is_selected(1, 3));
+        assert!(!cs.is_selected(6, 3));
+        assert!(!cs.is_selected(3, 2)); // 別の行
+    }
+
+    // TC-C12-05: is_selected が複数行選択を正しく判定する
+    #[test]
+    fn test_copy_state_is_selected_multi_row() {
+        let mut cs = CopyState::new(5, 2);
+        cs.toggle_anchor(); // anchor = (5, 2)
+        cs.move_cursor(3, 2, 80, 24); // cursor = (8, 4)
+                                      // 先頭行: col >= 5
+        assert!(cs.is_selected(5, 2));
+        assert!(cs.is_selected(79, 2));
+        assert!(!cs.is_selected(4, 2));
+        // 中間行: すべて選択
+        assert!(cs.is_selected(0, 3));
+        assert!(cs.is_selected(79, 3));
+        // 末尾行: col <= 8
+        assert!(cs.is_selected(0, 4));
+        assert!(cs.is_selected(8, 4));
+        assert!(!cs.is_selected(9, 4));
     }
 }

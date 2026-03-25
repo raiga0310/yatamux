@@ -46,7 +46,8 @@ mod win32 {
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
     use crate::layout::{
-        list_available_layouts, Direction, LauncherState, LayoutPreview, PaneRect, PaneStore, Toast,
+        list_available_layouts, CopyState, Direction, LauncherState, LayoutPreview, PaneRect,
+        PaneStore, Toast,
     };
     use crate::notification::NativeToastMsg;
 
@@ -102,10 +103,12 @@ mod win32 {
     /// `Normal`: 全キー入力を PTY に透過する通常状態。
     /// `Pane`: ペイン操作（移動・分割・削除）を受け付けるワンショットモード。
     ///         1 キー操作後に自動で `Normal` に戻る。
+    /// `Copy`: テキスト選択・クリップボードコピーモード。
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum ClientMode {
         Normal,
         Pane,
+        Copy,
     }
 
     /// ステータスバーの高さは `cell_height` × 1 行分
@@ -500,6 +503,95 @@ mod win32 {
                         return LRESULT(0);
                     }
 
+                    // ── Copy モードのキー処理 ────────────────────────────
+                    if state.mode.get() == ClientMode::Copy {
+                        let vk = wparam.0 as u16;
+                        state.skip_char.set(true);
+
+                        // グリッドサイズを取得
+                        let (cols, rows) = {
+                            let g = state.active_grid();
+                            let g = g.lock().unwrap();
+                            (g.cols() as usize, g.rows() as usize)
+                        };
+
+                        match vk {
+                            // Esc / q: コピーモード終了
+                            k if k == VK_ESCAPE.0 || k == b'Q' as u16 => {
+                                state.mode.set(ClientMode::Normal);
+                                state.panes.lock().unwrap().copy_mode = None;
+                            }
+                            // h / 左矢印: 左移動
+                            k if k == b'H' as u16 || k == VK_LEFT.0 => {
+                                let mut store = state.panes.lock().unwrap();
+                                if let Some(cm) = &mut store.copy_mode {
+                                    cm.move_cursor(-1, 0, cols, rows);
+                                }
+                            }
+                            // l / 右矢印: 右移動
+                            k if k == b'L' as u16 || k == VK_RIGHT.0 => {
+                                let mut store = state.panes.lock().unwrap();
+                                if let Some(cm) = &mut store.copy_mode {
+                                    cm.move_cursor(1, 0, cols, rows);
+                                }
+                            }
+                            // k / 上矢印: 上移動
+                            k if k == b'K' as u16 || k == VK_UP.0 => {
+                                let mut store = state.panes.lock().unwrap();
+                                if let Some(cm) = &mut store.copy_mode {
+                                    cm.move_cursor(0, -1, cols, rows);
+                                }
+                            }
+                            // j / 下矢印: 下移動
+                            k if k == b'J' as u16 || k == VK_DOWN.0 => {
+                                let mut store = state.panes.lock().unwrap();
+                                if let Some(cm) = &mut store.copy_mode {
+                                    cm.move_cursor(0, 1, cols, rows);
+                                }
+                            }
+                            // v: ビジュアル選択トグル
+                            k if k == b'V' as u16 => {
+                                let mut store = state.panes.lock().unwrap();
+                                if let Some(cm) = &mut store.copy_mode {
+                                    cm.toggle_anchor();
+                                }
+                            }
+                            // y / Enter: 選択テキストをコピーしてノーマルモードへ
+                            k if k == b'Y' as u16 || k == VK_RETURN.0 => {
+                                let clip_data = {
+                                    let store = state.panes.lock().unwrap();
+                                    if let Some(cm) = &store.copy_mode {
+                                        if let Some((row_start, row_end)) = cm.selection_rows() {
+                                            let active = store.active;
+                                            if let Some(grid_arc) = store.grids.get(&active) {
+                                                let grid = grid_arc.lock().unwrap();
+                                                let text = grid.extract_text(row_start, row_end);
+                                                Some(text.into_bytes())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                };
+                                {
+                                    let mut store = state.panes.lock().unwrap();
+                                    if let Some(data) = clip_data {
+                                        store.pending_clipboard = Some(data);
+                                    }
+                                    store.copy_mode = None;
+                                }
+                                state.mode.set(ClientMode::Normal);
+                            }
+                            _ => {}
+                        }
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+
                     // ── Pane モードのキー処理 ────────────────────────────
                     if state.mode.get() == ClientMode::Pane {
                         let vk = wparam.0 as u16;
@@ -542,31 +634,40 @@ mod win32 {
                             return LRESULT(0);
                         }
 
-                        state.mode.set(ClientMode::Normal);
                         state.skip_char.set(true); // WM_CHAR を抑制
                         match vk {
-                            k if k == b'E' as u16 => {
-                                state.request_split(SplitDirection::Vertical);
+                            k if k == b'V' as u16 => {
+                                // コピーモードに入る（Normal への遷移は skip）
+                                state.mode.set(ClientMode::Copy);
+                                state.panes.lock().unwrap().copy_mode = Some(CopyState::new(0, 0));
                             }
-                            k if k == b'O' as u16 => {
-                                state.request_split(SplitDirection::Horizontal);
+                            _ => {
+                                state.mode.set(ClientMode::Normal);
+                                match vk {
+                                    k if k == b'E' as u16 => {
+                                        state.request_split(SplitDirection::Vertical);
+                                    }
+                                    k if k == b'O' as u16 => {
+                                        state.request_split(SplitDirection::Horizontal);
+                                    }
+                                    k if k == b'W' as u16 => {
+                                        state.close_active_pane();
+                                    }
+                                    k if k == b'F' as u16 => {
+                                        let _ = state.float_tx.try_send(());
+                                    }
+                                    k if k == b'X' as u16 => {
+                                        state.open_scrollback_in_editor();
+                                    }
+                                    k if k == b'L' as u16 => {
+                                        // レイアウトランチャーを開く
+                                        let entries = list_available_layouts();
+                                        state.panes.lock().unwrap().launcher =
+                                            Some(LauncherState::new(entries));
+                                    }
+                                    _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
+                                }
                             }
-                            k if k == b'W' as u16 => {
-                                state.close_active_pane();
-                            }
-                            k if k == b'F' as u16 => {
-                                let _ = state.float_tx.try_send(());
-                            }
-                            k if k == b'X' as u16 => {
-                                state.open_scrollback_in_editor();
-                            }
-                            k if k == b'L' as u16 => {
-                                // レイアウトランチャーを開く
-                                let entries = list_available_layouts();
-                                state.panes.lock().unwrap().launcher =
-                                    Some(LauncherState::new(entries));
-                            }
-                            _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
                         }
                         let _ = InvalidateRect(hwnd, None, false);
                         return LRESULT(0);
@@ -944,7 +1045,7 @@ mod win32 {
         };
 
         // PaneStore を短時間ロックして必要な情報を取得
-        let (active_pane, scroll_offset, pane_rects, sep_rects, grid_map) = {
+        let (active_pane, scroll_offset, pane_rects, sep_rects, grid_map, copy_mode_state) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
             let seps = store.layout.compute_separator_rects(total_rect);
@@ -953,7 +1054,8 @@ mod win32 {
                 .iter()
                 .map(|(&id, g)| (id, Arc::clone(g)))
                 .collect();
-            (store.active, store.scroll_offset, rects, seps, map)
+            let cm = store.copy_mode.clone();
+            (store.active, store.scroll_offset, rects, seps, map, cm)
         };
 
         // ── 各ペインを描画 ──────────────────────────────────────────────
@@ -1116,8 +1218,52 @@ mod win32 {
                     }
                 }
 
-                // カーソル（アクティブペインのみ）
-                if is_active && grid.cursor_visible() {
+                // コピーモード: 選択ハイライトとコピーカーソル（アクティブペインのみ）
+                if is_active {
+                    if let Some(ref cm) = copy_mode_state {
+                        // 選択範囲のハイライト
+                        if cm.anchor.is_some() {
+                            for row in 0..grid.rows() as usize {
+                                for col_idx in 0..display_cols {
+                                    if cm.is_selected(col_idx, row) {
+                                        let hx = col_idx as i32 * state.cell_width + off_x;
+                                        let hy = row as i32 * state.cell_height + off_y;
+                                        // 半透明の選択ハイライト（反転色で重ね描き）
+                                        let sel_brush = CreateSolidBrush(COLORREF(0x00_A0_60_44)); // 選択色 (B G R)
+                                        let sel_rect = RECT {
+                                            left: hx,
+                                            top: hy,
+                                            right: hx + state.cell_width,
+                                            bottom: hy + state.cell_height,
+                                        };
+                                        FillRect(mem_dc, &sel_rect, sel_brush);
+                                        let _ = DeleteObject(sel_brush);
+                                    }
+                                }
+                            }
+                        }
+
+                        // コピーカーソル（ブロック型）
+                        let (cc, cr) = cm.cursor;
+                        if cc < display_cols && cr < grid.rows() as usize {
+                            let cx = cc as i32 * state.cell_width + off_x;
+                            let cy = cr as i32 * state.cell_height + off_y;
+                            // ブロックカーソル（アウトライン）
+                            let cur_brush = CreateSolidBrush(COLOR_CURSOR);
+                            let cur_rect = RECT {
+                                left: cx,
+                                top: cy,
+                                right: cx + state.cell_width,
+                                bottom: cy + state.cell_height,
+                            };
+                            FrameRect(mem_dc, &cur_rect, cur_brush);
+                            let _ = DeleteObject(cur_brush);
+                        }
+                    }
+                }
+
+                // カーソル（アクティブペインのみ、コピーモードでない場合）
+                if is_active && grid.cursor_visible() && copy_mode_state.is_none() {
                     let cur = grid.cursor();
                     let cx = cur.col as i32 * state.cell_width + off_x;
                     let cy = cur.row as i32 * state.cell_height + off_y;
@@ -1294,11 +1440,12 @@ mod win32 {
     /// - 左: `[NORMAL]` / `[PANE]` + キーバインドヒント
     /// - 右: `pane X/N`（アクティブペイン番号 / 総ペイン数）
     unsafe fn paint_status_bar(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
-        // Catppuccin Mocha: mantle = #181825, subtext1 = #bac2de, blue = #89b4fa, peach = #fab387
+        // Catppuccin Mocha: mantle = #181825, subtext1 = #bac2de, blue = #89b4fa, peach = #fab387, green = #a6e3a1
         const COLOR_STATUS_BG: COLORREF = COLORREF(0x00_25_18_18); // mantle
         const COLOR_STATUS_FG: COLORREF = COLORREF(0x00_DE_C2_BA); // subtext1
         const COLOR_MODE_NORMAL: COLORREF = COLORREF(0x00_FA_B4_89); // blue (#89b4fa → BGR)
         const COLOR_MODE_PANE: COLORREF = COLORREF(0x00_87_AB_FA); // peach (#fab387 → BGR)
+        const COLOR_MODE_COPY: COLORREF = COLORREF(0x00_A1_E3_A6); // green (#a6e3a1 → BGR)
 
         let bar_h = state.cell_height * STATUS_BAR_ROWS;
         let bar_y = win_h - bar_h;
@@ -1326,7 +1473,12 @@ mod win32 {
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
-                " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  </>: リサイズ  L: レイアウト  q: 戻る",
+                " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  V: コピー  </>: リサイズ  L: レイアウト  q: 戻る",
+            ),
+            ClientMode::Copy => (
+                " COPY ",
+                COLOR_MODE_COPY,
+                " hjkl/矢印: 移動  v: 選択  y/Enter: コピー  q/Esc: 終了",
             ),
         };
 
