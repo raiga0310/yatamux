@@ -117,17 +117,24 @@ pub async fn split_pane(
     .await
     .context("timeout waiting for pane list")??;
 
-    // 対象ペインのサーフェス ID を取得する（見つからない場合は最初のペインのサーフェスを使用）
-    let surface = panes
+    // 対象ペインを探す。見つからない場合は最初のペインにフォールバック
+    let target_pane = panes
         .iter()
         .find(|p| p.id == PaneId(pane_id))
-        .or_else(|| panes.first())
+        .or_else(|| panes.first());
+
+    let surface = target_pane
         .map(|p| p.surface)
         .unwrap_or(SurfaceId(1));
 
-    let size = panes
-        .iter()
-        .find(|p| p.id == PaneId(pane_id))
+    // split_from には実際に存在するペイン ID を使う
+    // デフォルトの --target 0 は存在しないため、フォールバック後の ID を使わないと
+    // split_pane_tree がツリー内で対象 Leaf を見つけられず、新ペインがツリーに入らない
+    let split_from_id = target_pane
+        .map(|p| p.id)
+        .unwrap_or(PaneId(pane_id));
+
+    let size = target_pane
         .map(|p| yatamux_protocol::types::TermSize {
             cols: p.cols,
             rows: p.rows,
@@ -137,7 +144,7 @@ pub async fn split_pane(
     conn.tx
         .send(ClientMessage::CreatePane {
             surface,
-            split_from: Some(PaneId(pane_id)),
+            split_from: Some(split_from_id),
             direction: Some(direction),
             size,
             working_dir,
