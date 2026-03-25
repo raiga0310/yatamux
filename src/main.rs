@@ -193,9 +193,12 @@ async fn main() -> Result<()> {
     {
         if std::env::args().count() > 1 {
             // CLI 引数あり: 親コンソール（PowerShell 等）にアタッチして出力を有効化。
-            // `cli` フィーチャービルド（コンソールサブシステム）では既に stdout 有効だが
-            // 親コンソールに明示的に繋ぐことで出力先を統一する。
             attach_parent_console();
+            // UTF-8 コードページに切り替えて日本語文字化けを防ぐ。
+            unsafe {
+                use windows::Win32::System::Console::SetConsoleOutputCP;
+                let _ = SetConsoleOutputCP(65001);
+            }
         } else {
             // 引数なし = GUI 起動。`cli` フィーチャービルドはコンソールサブシステムなので
             // 起動時にコンソールウィンドウが開く。FreeConsole() で即座に解放する。
