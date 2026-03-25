@@ -47,6 +47,9 @@ windows = { version = "0.58", features = [
 # Base64 (OSC 52 クリップボード)
 base64 = "0.22"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
 # Config
 toml = "0.8"
 
@@ -77,6 +80,7 @@ tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 
+clap = { workspace = true }
 yatamux-server = { path = "crates/server" }
 yatamux-client = { path = "crates/client" }
 yatamux-protocol = { path = "crates/protocol" }
