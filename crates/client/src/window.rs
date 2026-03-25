@@ -338,7 +338,7 @@ mod win32 {
                 let cs = &*(lparam.0 as *const CREATESTRUCTW);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
                 // PTY 出力を画面に反映するための定期再描画タイマーを開始
-                SetTimer(hwnd, TIMER_REPAINT, TIMER_INTERVAL_MS, None);
+                SetTimer(Some(hwnd), TIMER_REPAINT, TIMER_INTERVAL_MS, None);
                 // DWM ダークモードタイトルバー（Windows 10 1903+ / Windows 11）
                 let dark: i32 = 1;
                 let _ = DwmSetWindowAttribute(
@@ -403,7 +403,7 @@ mod win32 {
                     state.ime.update_candidate_window(hwnd, cursor_pixel);
 
                     // 再描画（プリエディット表示更新）
-                    let _ = InvalidateRect(hwnd, None, false);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
             }
@@ -413,7 +413,7 @@ mod win32 {
                 if !state_ptr.is_null() {
                     let state = &*state_ptr;
                     state.ime.on_end_composition();
-                    let _ = InvalidateRect(hwnd, None, false);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -499,7 +499,7 @@ mod win32 {
                             }
                         }
                         state.skip_char.set(true);
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
 
@@ -588,7 +588,7 @@ mod win32 {
                             }
                             _ => {}
                         }
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
 
@@ -630,7 +630,7 @@ mod win32 {
                                 .layout
                                 .adjust_ratio(active, delta);
                             state.skip_char.set(true);
-                            let _ = InvalidateRect(hwnd, None, false);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
                             return LRESULT(0);
                         }
 
@@ -669,7 +669,7 @@ mod win32 {
                                 }
                             }
                         }
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
 
@@ -677,7 +677,7 @@ mod win32 {
                     if ctrl && !shift && wparam.0 == b'F' as usize {
                         let _ = state.float_tx.try_send(());
                         state.skip_char.set(true);
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
 
@@ -685,7 +685,7 @@ mod win32 {
                     if ctrl && !shift && wparam.0 == b'B' as usize {
                         state.mode.set(ClientMode::Pane);
                         state.skip_char.set(true); // \x02 を PTY に送らない
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
 
@@ -707,7 +707,7 @@ mod win32 {
                     // Ctrl+Tab: 次のペイン / Ctrl+Shift+Tab: 前のペイン
                     if ctrl && wparam.0 == VK_TAB.0 as usize {
                         state.cycle_pane(!shift);
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
 
@@ -722,7 +722,7 @@ mod win32 {
                         };
                         if let Some(d) = dir {
                             state.focus_pane_dir(d);
-                            let _ = InvalidateRect(hwnd, None, false);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
                             return LRESULT(0);
                         }
                     }
@@ -801,7 +801,7 @@ mod win32 {
                             store.scroll_offset = store.scroll_offset.saturating_sub(lines);
                         }
                     }
-                    let _ = InvalidateRect(hwnd, None, false);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
             }
@@ -862,7 +862,7 @@ mod win32 {
                         dirty || state.ime.state.lock().unwrap().composing
                     };
                     if needs_repaint || has_active_toasts {
-                        let _ = InvalidateRect(hwnd, None, false);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
                 LRESULT(0)
@@ -898,7 +898,7 @@ mod win32 {
                             }
                         };
                         if float_handled || state.focus_pane_at(px, py) {
-                            let _ = InvalidateRect(hwnd, None, false);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                     }
 
@@ -1000,7 +1000,7 @@ mod win32 {
 
             // ── ウィンドウ破棄 ──────────────────────────────────────────
             WM_DESTROY => {
-                let _ = KillTimer(hwnd, TIMER_REPAINT);
+                let _ = KillTimer(Some(hwnd), TIMER_REPAINT);
                 remove_tray_icon(hwnd);
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -1019,17 +1019,17 @@ mod win32 {
         // バックバッファ（ちらつき防止）
         let mut rect = RECT::default();
         GetClientRect(hwnd, &mut rect).ok();
-        let mem_dc = CreateCompatibleDC(hdc);
+        let mem_dc = CreateCompatibleDC(Some(hdc));
         let mem_bmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
-        let old_bmp = SelectObject(mem_dc, mem_bmp);
+        let old_bmp = SelectObject(mem_dc, mem_bmp.into());
 
         // 背景塗りつぶし
         let bg_brush = CreateSolidBrush(COLOR_BG);
         FillRect(mem_dc, &rect, bg_brush);
-        let _ = DeleteObject(bg_brush);
+        let _ = DeleteObject(bg_brush.into());
 
         // フォント設定
-        let old_font = SelectObject(mem_dc, state.hfont);
+        let old_font = SelectObject(mem_dc, state.hfont.into());
         SetBkMode(mem_dc, OPAQUE);
 
         // ── コンテンツ領域とレイアウト ─────────────────────────────────
@@ -1254,7 +1254,7 @@ mod win32 {
                                 bottom: cy + state.cell_height,
                             };
                             FrameRect(mem_dc, &cur_rect, cur_brush);
-                            let _ = DeleteObject(cur_brush);
+                            let _ = DeleteObject(cur_brush.into());
                         }
                     }
                 }
@@ -1390,9 +1390,9 @@ mod win32 {
                     // 枠線（2px）
                     const COLOR_FLOAT_BORDER: COLORREF = COLORREF(0x00_FA_B4_89); // peach
                     let border_pen = CreatePen(PS_SOLID, 2, COLOR_FLOAT_BORDER);
-                    let old_pen = SelectObject(mem_dc, border_pen);
+                    let old_pen = SelectObject(mem_dc, border_pen.into());
                     let null_brush = GetStockObject(NULL_BRUSH);
-                    let old_brush = SelectObject(mem_dc, null_brush);
+                    let old_brush = SelectObject(mem_dc, null_brush.into());
                     let _ = Rectangle(
                         mem_dc,
                         off_x - 2,
@@ -1402,7 +1402,7 @@ mod win32 {
                     );
                     SelectObject(mem_dc, old_brush);
                     SelectObject(mem_dc, old_pen);
-                    let _ = DeleteObject(border_pen);
+                    let _ = DeleteObject(border_pen.into());
                 }
             }
         }
@@ -1417,12 +1417,12 @@ mod win32 {
         paint_launcher(mem_dc, rect.right, rect.bottom, state);
 
         // バックバッファを画面にコピー
-        BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY).ok();
+        BitBlt(hdc, 0, 0, rect.right, rect.bottom, Some(mem_dc), 0, 0, SRCCOPY).ok();
 
         // リソース解放
         SelectObject(mem_dc, old_font);
         SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(mem_bmp);
+        let _ = DeleteObject(mem_bmp.into());
         let _ = DeleteDC(mem_dc);
 
         let _ = EndPaint(hwnd, &ps);
@@ -1456,7 +1456,7 @@ mod win32 {
         };
         let bg_brush = CreateSolidBrush(COLOR_STATUS_BG);
         FillRect(hdc, &bar_rect, bg_brush);
-        let _ = DeleteObject(bg_brush);
+        let _ = DeleteObject(bg_brush.into());
 
         SetBkColor(hdc, COLOR_STATUS_BG);
         SetBkMode(hdc, OPAQUE);
@@ -1580,13 +1580,13 @@ mod win32 {
             // 背景
             let bg_brush = CreateSolidBrush(COLOR_TOAST_BG);
             FillRect(hdc, &toast_rect, bg_brush);
-            let _ = DeleteObject(bg_brush);
+            let _ = DeleteObject(bg_brush.into());
 
             // 枠線（1px）
             let border_pen = CreatePen(PS_SOLID, 1, COLOR_TOAST_BORDER);
-            let old_pen = SelectObject(hdc, border_pen);
+            let old_pen = SelectObject(hdc, border_pen.into());
             let null_brush = GetStockObject(NULL_BRUSH);
-            let old_brush = SelectObject(hdc, null_brush);
+            let old_brush = SelectObject(hdc, null_brush.into());
             let _ = Rectangle(
                 hdc,
                 toast_rect.left,
@@ -1596,7 +1596,7 @@ mod win32 {
             );
             SelectObject(hdc, old_pen);
             SelectObject(hdc, old_brush);
-            let _ = DeleteObject(border_pen);
+            let _ = DeleteObject(border_pen.into());
 
             SetBkMode(hdc, TRANSPARENT);
 
@@ -1707,7 +1707,7 @@ mod win32 {
         };
         let overlay_brush = CreateSolidBrush(COLOR_OVERLAY);
         FillRect(hdc, &overlay_rect, overlay_brush);
-        let _ = DeleteObject(overlay_brush);
+        let _ = DeleteObject(overlay_brush.into());
 
         // ポップアップ背景
         let popup_rect = RECT {
@@ -1718,7 +1718,7 @@ mod win32 {
         };
         let popup_brush = CreateSolidBrush(COLOR_POPUP_BG);
         FillRect(hdc, &popup_rect, popup_brush);
-        let _ = DeleteObject(popup_brush);
+        let _ = DeleteObject(popup_brush.into());
 
         SetBkMode(hdc, TRANSPARENT);
 
@@ -1747,7 +1747,7 @@ mod win32 {
             bottom: sep_y + 1,
         };
         FillRect(hdc, &sep_rect, sep_brush);
-        let _ = DeleteObject(sep_brush);
+        let _ = DeleteObject(sep_brush.into());
 
         // 左右パネルの垂直セパレーター
         let vsep_x = popup_x + list_w;
@@ -1759,7 +1759,7 @@ mod win32 {
             bottom: popup_y + popup_h - ch,
         };
         FillRect(hdc, &vsep_rect, vsep_brush);
-        let _ = DeleteObject(vsep_brush);
+        let _ = DeleteObject(vsep_brush.into());
 
         let items_top = sep_y + 1 + ch / 4;
 
@@ -1796,7 +1796,7 @@ mod win32 {
                     };
                     let sel_brush = CreateSolidBrush(COLOR_SEL_BG);
                     FillRect(hdc, &sel_rect, sel_brush);
-                    let _ = DeleteObject(sel_brush);
+                    let _ = DeleteObject(sel_brush.into());
                     SetTextColor(hdc, COLOR_SEL_FG);
                 } else {
                     SetTextColor(hdc, COLOR_TEXT);
@@ -1939,7 +1939,7 @@ mod win32 {
                 // 外枠を border 色で塗る → 内側を pane 色で上塗り（1px ボーダー効果）
                 let border_brush = CreateSolidBrush(color_border);
                 FillRect(hdc, rect, border_brush);
-                let _ = DeleteObject(border_brush);
+                let _ = DeleteObject(border_brush.into());
 
                 let inner = RECT {
                     left: rect.left + 1,
@@ -1949,7 +1949,7 @@ mod win32 {
                 };
                 let pane_brush = CreateSolidBrush(color_pane);
                 FillRect(hdc, &inner, pane_brush);
-                let _ = DeleteObject(pane_brush);
+                let _ = DeleteObject(pane_brush.into());
 
                 // コマンドテキストを左上に描画（内側に収まるようクリップ）
                 if let Some(Some(cmd)) = commands.get(id.0 as usize) {
@@ -2033,7 +2033,7 @@ mod win32 {
                 };
                 let sep_brush = CreateSolidBrush(color_sep);
                 FillRect(hdc, &sep_rect, sep_brush);
-                let _ = DeleteObject(sep_brush);
+                let _ = DeleteObject(sep_brush.into());
 
                 draw_preview_node(
                     hdc,
@@ -2091,10 +2091,10 @@ mod win32 {
 
         // ペンを作成して DC に選択するクロージャ
         let make_pen = |width: i32| CreatePen(PS_SOLID, width, fg);
-        let set_pen = |pen: HPEN| -> HPEN { HPEN(SelectObject(hdc, pen).0) };
+        let set_pen = |pen: HPEN| -> HPEN { HPEN(SelectObject(hdc, pen.into()).0) };
         let del_pen = |old: HPEN, pen: HPEN| {
-            SelectObject(hdc, old);
-            let _ = DeleteObject(pen);
+            SelectObject(hdc, old.into());
+            let _ = DeleteObject(pen.into());
         };
 
         // 水平線セグメント
@@ -2431,7 +2431,7 @@ mod win32 {
             bottom: by,
         };
         windows::Win32::Graphics::Gdi::FillRect(hdc, &r, brush);
-        let _ = DeleteObject(brush);
+        let _ = DeleteObject(brush.into());
     }
 
     /// プリエディット下線を描画する
@@ -2448,11 +2448,11 @@ mod win32 {
         };
 
         let pen = CreatePen(pen_style, thickness as i32, COLOR_FG);
-        let old_pen = SelectObject(hdc, pen);
+        let old_pen = SelectObject(hdc, pen.into());
         let _ = MoveToEx(hdc, x, y, None);
         let _ = LineTo(hdc, x + width, y);
         SelectObject(hdc, old_pen);
-        let _ = DeleteObject(pen);
+        let _ = DeleteObject(pen.into());
     }
 
     /// GDI 描画用テキストを返す
@@ -2530,7 +2530,7 @@ mod win32 {
 
     /// クリップボードから UTF-8 テキストを読み取る
     unsafe fn read_clipboard_text(hwnd: HWND) -> Option<String> {
-        if OpenClipboard(hwnd).is_err() {
+        if OpenClipboard(Some(hwnd)).is_err() {
             return None;
         }
         // CF_UNICODETEXT = 13
@@ -2567,7 +2567,7 @@ mod win32 {
         wide.push(0u16);
         let byte_size = wide.len() * 2;
 
-        if OpenClipboard(hwnd).is_err() {
+        if OpenClipboard(Some(hwnd)).is_err() {
             return;
         }
         let _ = EmptyClipboard();
@@ -2580,7 +2580,7 @@ mod win32 {
                 let _ = GlobalUnlock(hglobal);
                 // SetClipboardData takes ownership of hglobal on success;
                 // on failure we should free it, but for simplicity we skip that here.
-                let _ = SetClipboardData(13, windows::Win32::Foundation::HANDLE(hglobal.0));
+                let _ = SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(hglobal.0)));
             }
         }
         let _ = CloseClipboard();
@@ -2764,7 +2764,7 @@ mod win32 {
                 win_height,
                 None,
                 None,
-                hinstance,
+                Some(HINSTANCE(hinstance.0)),
                 Some(state_ptr as *const _),
             )?;
 
@@ -2780,7 +2780,7 @@ mod win32 {
 
             // クリーンアップ
             let _ = Box::from_raw(state_ptr); // Drop ClientState
-            let _ = DeleteObject(hfont);
+            let _ = DeleteObject(hfont.into());
 
             Ok(())
         }
@@ -2843,15 +2843,15 @@ mod win32 {
                 0,
                 0,
                 0,
-                DEFAULT_CHARSET.0 as u32,
-                OUT_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32,
-                CLEARTYPE_QUALITY.0 as u32,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
                 (FIXED_PITCH.0 | FF_MODERN.0) as u32,
                 PCWSTR(wide.as_ptr()),
             );
 
-            let old = SelectObject(hdc, hfont);
+            let old = SelectObject(hdc, hfont.into());
 
             // 実際に割り当てられたフォント名を取得して一致確認
             let mut face = [0u16; 64];
@@ -2861,7 +2861,7 @@ mod win32 {
                 .trim_end_matches('\0')
                 .to_string();
 
-            SelectObject(hdc, old);
+            SelectObject(hdc, old.into());
 
             let is_last = i == FONT_CANDIDATES.len() - 1;
             // GetTextFaceW が返す名前はスペースなしの場合があるため
@@ -2874,7 +2874,7 @@ mod win32 {
                 ReleaseDC(None, hdc);
                 return hfont;
             }
-            let _ = DeleteObject(hfont);
+            let _ = DeleteObject(hfont.into());
         }
 
         // ここには到達しない（candidates は空でない）が、コンパイラ用
@@ -2885,7 +2885,7 @@ mod win32 {
     /// 仮の DC でフォントのセルサイズを計測する
     unsafe fn measure_cell_size(hfont: HFONT) -> anyhow::Result<(i32, i32)> {
         let hdc = GetDC(None);
-        let old_font = SelectObject(hdc, hfont);
+        let old_font = SelectObject(hdc, hfont.into());
         let mut tm = TEXTMETRICW::default();
         let _ = GetTextMetricsW(hdc, &mut tm);
         SelectObject(hdc, old_font);

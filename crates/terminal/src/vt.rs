@@ -517,9 +517,7 @@ fn parse_extended_color(params: &[u16], i: &mut usize) -> Option<Color> {
 
 /// バイト列を VT パースして Grid に適用
 pub fn feed_bytes(parser: &mut Parser, processor: &mut VtProcessor<'_>, data: &[u8]) {
-    for &byte in data {
-        parser.advance(processor, byte);
-    }
+    parser.advance(processor, data);
 }
 
 #[cfg(test)]
