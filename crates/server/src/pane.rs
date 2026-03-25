@@ -77,7 +77,7 @@ impl Pane {
 
             while let Some(data) = pty_output_rx.recv().await {
                 // Grid 更新
-                let (notif, cmd_finished) = {
+                let (notif, cmd_finished, bell) = {
                     let mut g = grid_clone.lock().await;
                     let mut proc = yatamux_terminal::vt::VtProcessor::new(&mut g);
                     yatamux_terminal::vt::feed_bytes(&mut parser, &mut proc, &data);
@@ -85,7 +85,7 @@ impl Pane {
                     if let Some(t) = proc.title.take() {
                         *title_clone.lock().await = t;
                     }
-                    (proc.notification.take(), proc.command_finished)
+                    (proc.notification.take(), proc.command_finished, proc.bell)
                 };
 
                 // OSC 9/99/777 通知を転送
@@ -98,6 +98,10 @@ impl Pane {
                         .send((id, "Command finished".to_string()))
                         .await;
                 }
+                // BEL（\x07）通知を転送
+                if bell {
+                    let _ = client_notification_tx.send((id, "Bell".to_string())).await;
+                }
 
                 // クライアントに生データを転送（Arc でラップしてファンアウト時のコピーを回避）
                 let data: Arc<[u8]> = Arc::from(data);
@@ -105,6 +109,10 @@ impl Pane {
                     break;
                 }
             }
+            // PTY が終了したことをクライアントに通知（F-4a）
+            let _ = client_notification_tx
+                .send((id, "Process exited".to_string()))
+                .await;
             info!("Pane {:?} output task ended", id);
         });
 

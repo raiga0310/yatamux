@@ -20,6 +20,8 @@ pub struct VtProcessor<'a> {
     pub clipboard_data: Option<Vec<u8>>,
     /// OSC 133;D — シェルコマンド終了通知
     pub command_finished: bool,
+    /// BEL（0x07）受信フラグ
+    pub bell: bool,
 }
 
 impl<'a> VtProcessor<'a> {
@@ -31,6 +33,7 @@ impl<'a> VtProcessor<'a> {
             notification: None,
             clipboard_data: None,
             command_finished: false,
+            bell: false,
         }
     }
 }
@@ -55,8 +58,10 @@ impl<'a> Perform for VtProcessor<'a> {
                     self.grid.move_cursor(cur.col - 1, cur.row);
                 }
             }
-            // BEL — 無視
-            0x07 => {}
+            // BEL — 通知フラグを立てる
+            0x07 => {
+                self.bell = true;
+            }
             _ => {}
         }
     }
@@ -1199,5 +1204,25 @@ mod tests {
         feed_bytes(&mut parser, &mut proc, b"\x1b]52;c;Zmlyc3Q=\x07");
         feed_bytes(&mut parser, &mut proc, b"\x1b]52;c;c2Vjb25k\x07");
         assert_eq!(proc.clipboard_data, Some(b"second".to_vec()));
+    }
+
+    // TC-03: BEL バイト受信で bell フラグが立つ
+    #[test]
+    fn test_vt_bell_sets_flag() {
+        let mut g = make_grid(80, 24);
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(&mut g);
+        feed_bytes(&mut parser, &mut proc, b"\x07");
+        assert!(proc.bell);
+    }
+
+    // TC-04: BEL を含まない入力では bell フラグが立たない
+    #[test]
+    fn test_vt_no_bell_without_bel_byte() {
+        let mut g = make_grid(80, 24);
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(&mut g);
+        feed_bytes(&mut parser, &mut proc, b"hello world");
+        assert!(!proc.bell);
     }
 }

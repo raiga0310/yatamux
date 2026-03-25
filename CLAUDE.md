@@ -56,6 +56,7 @@ src/app.rs         起動オーケストレーション。
 | `ipc_out_rx` | `mpsc<ServerMessage>` | fan_out → IPC サーバー |
 | `msg_tx` | `mpsc<ClientMessage>` | Win32 スレッド → merged_tx（Input/Resize） |
 | `split_tx` | `mpsc<(PaneId, SplitDirection)>` | Win32 スレッド → app.rs（分割要求） |
+| `client_notification_tx` | `mpsc<(PaneId, String)>` | Pane タスク → app.rs（通知イベント） |
 
 ### クレート責務
 
@@ -74,14 +75,15 @@ src/app.rs         起動オーケストレーション。
 - `ipc.rs`: `run_ipc_server()` が Named Pipe を listen し、JSON 行形式で `ClientMessage` / `ServerMessage` を送受信する。
 
 **`yatamux-client`** — Win32 ウィンドウ・レンダリング
-- `window.rs`: `WndProc` 実装。`SetWindowLongPtrW(GWLP_USERDATA)` で `ClientState` ポインタを保持。`WM_TIMER` で OSC 52 クリップボードデータ（`pending_clipboard`）を Win32 `SetClipboardData` で書き出す。
-- `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。
-- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>` を持つ。
+- `window.rs`: `WndProc` 実装。`SetWindowLongPtrW(GWLP_USERDATA)` で `ClientState` ポインタを保持。`WM_TIMER` で OSC 52 クリップボードデータ（`pending_clipboard`）を Win32 `SetClipboardData` で書き出す。トースト通知は `paint_toasts()` で右下に描画（最大3件表示、スライドイン・フェードアウトアニメーション付き）。
+- `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。
+- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>` と `pending_toasts: VecDeque<Toast>` を持つ。
 - `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
 
 **`yatamux-protocol`** — メッセージ型定義のみ。ロジックなし。
 - `ServerMessage::Output.data` は `Arc<[u8]>` 型（ファンアウト時のコピーレス配信のため）。
+- `ServerMessage::Notification { pane, body }`: OSC 9/99/777、BEL（`\x07`）、PTY 終了時などに発火。`app.rs` がバックグラウンドペインからの通知を `pending_toasts` に変換する。
 
 ### レンダリングの仕組み
 
@@ -117,6 +119,50 @@ Ctrl+Shift+E/O
 - `WM_SIZE` では `ClientMessage::Resize` を `msg_tx` 経由で送信してサーバー側 ConPTY にも通知すること（クライアント側 Grid だけリサイズすると ConPTY とずれる）。
 - DWM ダークタイトルバーは `DWMWINDOWATTRIBUTE(20)` = `DWMWA_USE_IMMERSIVE_DARK_MODE`（Windows 10 1903 以降）。
 - フォント優先順位: HackGen Console NF → HackGen35 Console NF → Cascadia Mono → MS Gothic（最終フォールバック）。
+
+## 実装フロー
+
+機能追加・バグ修正を行う際は、以下の順序を必ず守ること。
+
+### 1. テストケースを Markdown に起票
+
+`docs/test-plan-<機能名>.md` を作成し、実装前にテストケースを列挙する。
+既存の例: `docs/test-plan-osc52.md`, `docs/test-plan-session.md`, `docs/test-plan-notifications.md`, `docs/test-plan-scrollback.md`
+
+```markdown
+## テスト計画: <機能名>
+
+### TC-01: <ケース名>
+- **前提**: ...
+- **操作**: ...
+- **期待結果**: ...
+```
+
+### 2. TDD（テスト駆動開発）
+
+1. テストケースに対応する `#[test]` / `#[tokio::test]` を先に書く（Red）
+2. テストが通る最小限の実装を書く（Green）
+3. リファクタリング（Refactor）
+
+Win32 依存のある `yatamux-client` のテストは `#[cfg(test)]` ブロック内で
+`ClientState` を直接構築して検証する（ウィンドウを実際に開かない）。
+VT シーケンス関連は `yatamux-terminal` 側で単体テストを書く。
+
+### 3. Clippy・テスト・フォーマットを通す
+
+```powershell
+cargo clippy -- -D warnings   # 警告をエラーとして扱う
+cargo test                     # 全テスト
+cargo fmt --check              # フォーマット確認（just fmt で自動修正）
+```
+
+または `just` が使える場合:
+
+```powershell
+just lint && just test && just fmt
+```
+
+すべてパスしてから PR を出すこと。
 
 ## task.md
 
