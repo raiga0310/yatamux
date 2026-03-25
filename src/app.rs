@@ -177,6 +177,9 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
     // ── フローティングペイン要求チャネル（Window → この tokio タスク）──
     let (float_tx, mut float_rx) = mpsc::channel::<()>(4);
 
+    // ── レイアウトランチャー切り替えチャネル（Window → この tokio タスク）
+    let (layout_tx, mut layout_rx) = mpsc::channel::<String>(4);
+
     // ── サーバー出力 + ペイン分割ハンドラ ───────────────────────────────
     let pane_store2 = Arc::clone(&pane_store);
     let notif_backend2 = Arc::clone(&notif_backend);
@@ -187,6 +190,8 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
         let mut pending: VecDeque<(PaneId, SplitDirection, TermSize)> = VecDeque::new();
         // 次の PaneCreated がフローティングペイン用かどうか
         let mut pending_float = false;
+        // レイアウト切り替えフェーズ（None = 通常動作）
+        let mut layout_switch: Option<LayoutPhase> = None;
 
         loop {
             tokio::select! {
@@ -215,6 +220,44 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                 store.show_float();
                             }
                         }
+                    }
+                }
+
+                // レイアウト切り替え要求
+                Some(name) = layout_rx.recv() => {
+                    // 実行中の分割・フローティング要求をキャンセル
+                    pending.clear();
+                    pending_float = false;
+
+                    let pane_ids: Vec<PaneId> = {
+                        let store = pane_store2.lock().unwrap();
+                        let mut ids: Vec<PaneId> = store.grids.keys().cloned().collect();
+                        // フローティングペインも閉じる
+                        if let Some(float_id) = store.floating {
+                            if !ids.contains(&float_id) {
+                                ids.push(float_id);
+                            }
+                        }
+                        ids
+                    };
+                    let remaining = pane_ids.len();
+                    for id in pane_ids {
+                        let _ = client_tx.send(ClientMessage::ClosePane { pane: id }).await;
+                    }
+                    if remaining == 0 {
+                        // ペインなし（通常は起こらない）→ 即座に新ペイン作成
+                        let config_path = LayoutConfig::layout_path(&name);
+                        if let Ok(config) = LayoutConfig::load(&config_path) {
+                            let _ = client_tx.send(ClientMessage::CreatePane {
+                                surface: surf_id,
+                                split_from: None,
+                                direction: None,
+                                size,
+                            }).await;
+                            layout_switch = Some(LayoutPhase::WaitingFirst { config });
+                        }
+                    } else {
+                        layout_switch = Some(LayoutPhase::Closing { name, remaining });
                     }
                 }
 
@@ -270,7 +313,141 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                     });
                                 }
                             }
-                            if pending_float {
+                            // レイアウト切り替え用ペイン作成処理（通常の分割より優先）
+                            if let Some(phase) = layout_switch.take() {
+                                match phase {
+                                    LayoutPhase::WaitingFirst { config } => {
+                                        let new_sink =
+                                            TerminalSink::new(size.cols, size.rows);
+                                        let new_grid = Arc::clone(&new_sink.grid);
+                                        sinks.insert(new_id, new_sink);
+
+                                        // 最初のペインのコマンドを送信
+                                        if let Some(cmd) =
+                                            config.panes.first().and_then(|p| p.command.as_ref())
+                                        {
+                                            let mut input = cmd.clone().into_bytes();
+                                            input.push(b'\r');
+                                            let _ = client_tx
+                                                .send(ClientMessage::Input {
+                                                    pane: new_id,
+                                                    data: input,
+                                                })
+                                                .await;
+                                        }
+
+                                        let new_layout = LayoutNode::Leaf(new_id);
+                                        let new_grids = vec![(new_id, new_grid)];
+
+                                        // 残りペイン設定をキューに積む
+                                        let queue: std::collections::VecDeque<
+                                            (SplitDirection, Option<String>),
+                                        > = config
+                                            .panes
+                                            .iter()
+                                            .skip(1)
+                                            .map(|p| {
+                                                let dir = match p.split {
+                                                    Some(SplitDir::Horizontal) => {
+                                                        SplitDirection::Horizontal
+                                                    }
+                                                    _ => SplitDirection::Vertical,
+                                                };
+                                                (dir, p.command.clone())
+                                            })
+                                            .collect();
+
+                                        if queue.is_empty() {
+                                            // 1ペインレイアウト → 即完了
+                                            finalize_layout_switch(
+                                                &pane_store2,
+                                                new_layout,
+                                                new_grids,
+                                                new_id,
+                                            );
+                                        } else {
+                                            // 次のペインを作成
+                                            let (next_dir, _) = queue[0].clone();
+                                            let _ = client_tx
+                                                .send(ClientMessage::CreatePane {
+                                                    surface: surf_id,
+                                                    split_from: Some(new_id),
+                                                    direction: Some(next_dir),
+                                                    size,
+                                                })
+                                                .await;
+                                            layout_switch = Some(LayoutPhase::Applying {
+                                                queue,
+                                                layout: new_layout,
+                                                grids: new_grids,
+                                                prev: new_id,
+                                                active: new_id,
+                                            });
+                                        }
+                                    }
+                                    LayoutPhase::Applying {
+                                        mut queue,
+                                        mut layout,
+                                        mut grids,
+                                        prev,
+                                        ..
+                                    } => {
+                                        // queue[0] が今作成されたペインの設定
+                                        let (dir, cmd) = queue.pop_front().unwrap();
+
+                                        let new_sink =
+                                            TerminalSink::new(size.cols, size.rows);
+                                        let new_grid = Arc::clone(&new_sink.grid);
+                                        sinks.insert(new_id, new_sink);
+                                        grids.push((new_id, new_grid));
+                                        layout.split_leaf(prev, new_id, dir);
+
+                                        if let Some(cmd) = cmd {
+                                            let mut input = cmd.into_bytes();
+                                            input.push(b'\r');
+                                            let _ = client_tx
+                                                .send(ClientMessage::Input {
+                                                    pane: new_id,
+                                                    data: input,
+                                                })
+                                                .await;
+                                        }
+
+                                        if queue.is_empty() {
+                                            // 全ペイン作成完了
+                                            finalize_layout_switch(
+                                                &pane_store2,
+                                                layout,
+                                                grids,
+                                                new_id,
+                                            );
+                                        } else {
+                                            // 次のペインを作成
+                                            let (next_dir, _) = queue[0].clone();
+                                            let _ = client_tx
+                                                .send(ClientMessage::CreatePane {
+                                                    surface: surf_id,
+                                                    split_from: Some(new_id),
+                                                    direction: Some(next_dir),
+                                                    size,
+                                                })
+                                                .await;
+                                            layout_switch = Some(LayoutPhase::Applying {
+                                                queue,
+                                                layout,
+                                                grids,
+                                                prev: new_id,
+                                                active: new_id,
+                                            });
+                                        }
+                                    }
+                                    other => {
+                                        // Closing フェーズ中は PaneCreated は来ないはずだが
+                                        // 念のため戻す
+                                        layout_switch = Some(other);
+                                    }
+                                }
+                            } else if pending_float {
                                 // フローティングペイン作成完了
                                 pending_float = false;
                                 let float_size = TermSize { cols: DEFAULT_COLS, rows: DEFAULT_ROWS };
@@ -322,17 +499,59 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                 }
                             }
                             sinks.remove(&pane);
-                            let mut store = pane_store2.lock().unwrap();
-                            store.grids.remove(&pane);
-                            let next = store.layout.remove_pane(pane);
-                            if store.active == pane {
-                                if let Some(next_id) = next {
-                                    store.active = next_id;
+                            {
+                                let mut store = pane_store2.lock().unwrap();
+                                store.grids.remove(&pane);
+                                if store.floating == Some(pane) {
+                                    store.floating = None;
+                                    store.floating_visible = false;
+                                }
+                                if layout_switch.is_none() {
+                                    // 通常の閉じる処理
+                                    let next = store.layout.remove_pane(pane);
+                                    if store.active == pane {
+                                        if let Some(next_id) = next {
+                                            store.active = next_id;
+                                        }
+                                    }
+                                    // C-9: 全ペインが閉じられたらアプリ終了
+                                    if store.grids.is_empty() {
+                                        store.should_quit = true;
+                                    }
                                 }
                             }
-                            // C-9: 全ペインが閉じられたらアプリ終了
-                            if store.grids.is_empty() {
-                                store.should_quit = true;
+                            // レイアウト切り替え中のカウントダウン
+                            if let Some(LayoutPhase::Closing { remaining, .. }) =
+                                &mut layout_switch
+                            {
+                                *remaining -= 1;
+                                if *remaining == 0 {
+                                    if let Some(LayoutPhase::Closing { name, .. }) =
+                                        layout_switch.take()
+                                    {
+                                        let config_path = LayoutConfig::layout_path(&name);
+                                        match LayoutConfig::load(&config_path) {
+                                            Ok(config) => {
+                                                let _ = client_tx
+                                                    .send(ClientMessage::CreatePane {
+                                                        surface: surf_id,
+                                                        split_from: None,
+                                                        direction: None,
+                                                        size,
+                                                    })
+                                                    .await;
+                                                layout_switch =
+                                                    Some(LayoutPhase::WaitingFirst { config });
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "レイアウト読み込み失敗: {:#}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         ServerMessage::Notification { pane, body } => {
@@ -358,6 +577,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
             app_focused,
             native_notif_queue,
             float_tx,
+            layout_tx,
         )
     })
     .await??;
@@ -494,6 +714,47 @@ async fn restore_node(
             ))
         }
     }
+}
+
+/// レイアウト切り替えのフェーズ
+enum LayoutPhase {
+    /// 既存ペインが全て閉じるまで待機
+    Closing { name: String, remaining: usize },
+    /// 最初の新規ペインの PaneCreated を待機
+    WaitingFirst { config: LayoutConfig },
+    /// 残りペインを順次作成中
+    Applying {
+        /// 未送信の (dir, cmd) キュー（front が直近に送った CreatePane の設定）
+        queue: std::collections::VecDeque<(SplitDirection, Option<String>)>,
+        layout: LayoutNode,
+        grids: Vec<(PaneId, Arc<Mutex<yatamux_terminal::Grid>>)>,
+        /// 直前に作成されたペイン ID（次の split_from に使う）
+        prev: PaneId,
+        // active は finalize 時に最後の new_id を直接使うため省略可だが型合わせで保持
+        #[allow(dead_code)]
+        active: PaneId,
+    },
+}
+
+/// レイアウト切り替え完了時に PaneStore を更新する
+fn finalize_layout_switch(
+    pane_store: &Arc<Mutex<PaneStore>>,
+    layout: LayoutNode,
+    grids: Vec<(PaneId, Arc<Mutex<yatamux_terminal::Grid>>)>,
+    active: PaneId,
+) {
+    let mut store = pane_store.lock().unwrap();
+    store.grids.clear();
+    for (id, grid) in grids {
+        store.grids.insert(id, grid);
+    }
+    store.layout = layout;
+    store.active = active;
+    store.floating = None;
+    store.floating_visible = false;
+    store.scroll_offset = 0;
+    store.launcher = None;
+    store.should_quit = false;
 }
 
 /// サーバーからの特定メッセージを待つマクロ
