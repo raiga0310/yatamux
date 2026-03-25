@@ -37,13 +37,19 @@ just fmt          # rustfmt
 外部 CLI・エージェント向けに Named Pipe IPC サーバー（`\\.\pipe\yatamux-{session}`）も常時起動する。
 
 ```
-src/main.rs        エントリポイント。tokio::main。
+src/main.rs        エントリポイント。tokio::main。--layout <name> フラグを解析し
+                   AppConfig（%APPDATA%\yatamux\config.toml）を読み込んで app::run() へ渡す。
 src/app.rs         起動オーケストレーション。
                    ① Server を起動（server_out_tx → fan_out タスク → GUI/IPC へ配信）
                    ② IPC サーバーを起動（外部 CLI 接続受け付け）
                    ③ Workspace → Surface → 初期 Pane を作成
-                   ④ tokio::select! ループ（出力ルーティング＋ペイン分割処理）
-                   ⑤ spawn_blocking で Win32 メッセージループを起動
+                   ④ セッション復元 / --layout 設定 / 初期ペインのみ の3パスで起動
+                   ⑤ tokio::select! ループ（出力ルーティング＋ペイン分割＋フローティング
+                      ＋フック発火＋通知ルーティング）
+                   ⑥ spawn_blocking で Win32 メッセージループを起動
+src/config.rs      AppConfig / HooksConfig。%APPDATA%\yatamux\config.toml から読み込む。
+                   on_pane_created / on_pane_closed フックを cmd.exe /C で非同期発火。
+src/layout_config.rs  宣言的レイアウト設定。%APPDATA%\yatamux\layouts\<name>.toml から読み込む。
 ```
 
 ### チャネル構成
@@ -56,7 +62,8 @@ src/app.rs         起動オーケストレーション。
 | `ipc_out_rx` | `mpsc<ServerMessage>` | fan_out → IPC サーバー |
 | `msg_tx` | `mpsc<ClientMessage>` | Win32 スレッド → merged_tx（Input/Resize） |
 | `split_tx` | `mpsc<(PaneId, SplitDirection)>` | Win32 スレッド → app.rs（分割要求） |
-| `client_notification_tx` | `mpsc<(PaneId, String)>` | Pane タスク → app.rs（通知イベント） |
+| `client_notification_tx` | `mpsc<(PaneId, String)>` | Pane タスク → Server 内部（session.rs 経由で `ServerMessage::Notification` に変換後 fan_out へ） |
+| `float_tx` | `mpsc<()>` | Win32 スレッド → app.rs（フローティングペイン表示/生成要求） |
 
 ### クレート責務
 
@@ -75,9 +82,9 @@ src/app.rs         起動オーケストレーション。
 - `ipc.rs`: `run_ipc_server()` が Named Pipe を listen し、JSON 行形式で `ClientMessage` / `ServerMessage` を送受信する。
 
 **`yatamux-client`** — Win32 ウィンドウ・レンダリング
-- `window.rs`: `WndProc` 実装。`SetWindowLongPtrW(GWLP_USERDATA)` で `ClientState` ポインタを保持。`WM_TIMER` で OSC 52 クリップボードデータ（`pending_clipboard`）を Win32 `SetClipboardData` で書き出す。トースト通知は `paint_toasts()` で右下に描画（最大3件表示、スライドイン・フェードアウトアニメーション付き）。
+- `window.rs`: `WndProc` 実装。`SetWindowLongPtrW(GWLP_USERDATA)` で `ClientState` ポインタを保持。`WM_TIMER` で OSC 52 クリップボードデータ（`pending_clipboard`）を Win32 `SetClipboardData` で書き出す。トースト通知は `paint_toasts()` で右下に描画（最大3件表示、スライドイン・フェードアウトアニメーション付き）。`ClientMode` 列挙型（`Normal` / `Pane`）で UI モードを管理し、`Ctrl+B` で Pane モードへ遷移。Pane モードでは `H/J/K/L`（フォーカス移動）、`E/O`（分割）、`W`（ペイン削除）、`F`（フローティング）、`X`（スクロールバックをエディタで開く）、`q`（Normal に戻る）が有効。`Ctrl+F` で `float_tx` 経由のフローティングペイン切り替え。`WM_LBUTTONDOWN` でクリック座標からペインを特定してフォーカス移動。`WM_MOUSEWHEEL` で `scroll_offset` を増減。
 - `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。
-- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>` と `pending_toasts: VecDeque<Toast>` を持つ。
+- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`（スクロールバックオフセット）、`floating: Option<PaneId>`、`floating_visible: bool` を持つ。
 - `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
 
@@ -118,7 +125,7 @@ Ctrl+Shift+E/O
 - `AdjustWindowRectEx` は windows-rs で `Result<()>` を返す（`BOOL` ではない）。`.map_err(|e| anyhow::anyhow!(...))` でハンドルする。
 - `WM_SIZE` では `ClientMessage::Resize` を `msg_tx` 経由で送信してサーバー側 ConPTY にも通知すること（クライアント側 Grid だけリサイズすると ConPTY とずれる）。
 - DWM ダークタイトルバーは `DWMWINDOWATTRIBUTE(20)` = `DWMWA_USE_IMMERSIVE_DARK_MODE`（Windows 10 1903 以降）。
-- フォント優先順位: HackGen Console NF → HackGen35 Console NF → Cascadia Mono → MS Gothic（最終フォールバック）。
+- フォント優先順位: HackGen Console NF → HackGen Console → HackGen35 Console NF → HackGen35 Console → HackGen NF → HackGen → Cascadia Mono → Cascadia Code → Consolas → MS Gothic（最終フォールバック）。
 
 ## 実装フロー
 
@@ -127,7 +134,7 @@ Ctrl+Shift+E/O
 ### 1. テストケースを Markdown に起票
 
 `docs/test-plan-<機能名>.md` を作成し、実装前にテストケースを列挙する。
-既存の例: `docs/test-plan-osc52.md`, `docs/test-plan-session.md`, `docs/test-plan-notifications.md`, `docs/test-plan-scrollback.md`
+既存の例: `docs/test-plan-osc52.md`, `docs/test-plan-session.md`, `docs/test-plan-notifications.md`, `docs/test-plan-scrollback.md`, `docs/test-plan-plugin-system.md`
 
 ```markdown
 ## テスト計画: <機能名>
