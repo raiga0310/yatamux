@@ -45,7 +45,9 @@ mod win32 {
     use yatamux_terminal::{Cell, Grid};
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
-    use crate::layout::{Direction, PaneRect, PaneStore, Toast};
+    use crate::layout::{
+        list_available_layouts, Direction, LauncherState, PaneRect, PaneStore, Toast,
+    };
     use crate::notification::NativeToastMsg;
 
     // ── 定数 ────────────────────────────────────────────────────────────────
@@ -142,6 +144,8 @@ mod win32 {
         pub skip_char: std::cell::Cell<bool>,
         /// フローティングペイン作成/トグル要求チャネル
         pub float_tx: mpsc::Sender<()>,
+        /// レイアウト切り替え要求チャネル（選択したレイアウト名を app.rs へ送る）
+        pub layout_tx: mpsc::Sender<String>,
     }
 
     impl ClientState {
@@ -156,6 +160,7 @@ mod win32 {
             app_focused: Arc<AtomicBool>,
             native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
             float_tx: mpsc::Sender<()>,
+            layout_tx: mpsc::Sender<String>,
         ) -> Self {
             Self {
                 panes,
@@ -178,6 +183,7 @@ mod win32 {
                 mode: std::cell::Cell::new(ClientMode::Normal),
                 skip_char: std::cell::Cell::new(false),
                 float_tx,
+                layout_tx,
             }
         }
 
@@ -456,6 +462,42 @@ mod win32 {
                     let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                     let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
 
+                    // ── レイアウトランチャーキー処理 ────────────────────
+                    let launcher_open = state.panes.lock().unwrap().launcher.is_some();
+                    if launcher_open {
+                        let vk = wparam.0 as u16;
+                        if vk == VK_RETURN.0 {
+                            let name = {
+                                let mut store = state.panes.lock().unwrap();
+                                let name = store
+                                    .launcher
+                                    .as_ref()
+                                    .filter(|l| !l.layouts.is_empty())
+                                    .and_then(|l| l.layouts.get(l.selected).cloned());
+                                store.launcher = None;
+                                name
+                            };
+                            if let Some(name) = name {
+                                let _ = state.layout_tx.try_send(name);
+                            }
+                        } else if vk == VK_ESCAPE.0 || vk == b'Q' as u16 {
+                            state.panes.lock().unwrap().launcher = None;
+                        } else {
+                            let mut store = state.panes.lock().unwrap();
+                            if let Some(launcher) = &mut store.launcher {
+                                if vk == VK_UP.0 {
+                                    launcher.selected = launcher.selected.saturating_sub(1);
+                                } else if vk == VK_DOWN.0 {
+                                    let max = launcher.layouts.len().saturating_sub(1);
+                                    launcher.selected = (launcher.selected + 1).min(max);
+                                }
+                            }
+                        }
+                        state.skip_char.set(true);
+                        let _ = InvalidateRect(hwnd, None, false);
+                        return LRESULT(0);
+                    }
+
                     // ── Pane モードのキー処理 ────────────────────────────
                     if state.mode.get() == ClientMode::Pane {
                         let vk = wparam.0 as u16;
@@ -527,6 +569,12 @@ mod win32 {
                             }
                             k if k == b'X' as u16 => {
                                 state.open_scrollback_in_editor();
+                            }
+                            k if k == b'L' as u16 => {
+                                // レイアウトランチャーを開く
+                                let layouts = list_available_layouts();
+                                state.panes.lock().unwrap().launcher =
+                                    Some(LauncherState::new(layouts));
                             }
                             _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
                         }
@@ -1232,6 +1280,9 @@ mod win32 {
         // ── トースト通知 ────────────────────────────────────────────
         paint_toasts(mem_dc, rect.right, rect.bottom, state);
 
+        // ── レイアウトランチャー ────────────────────────────────────
+        paint_launcher(mem_dc, rect.right, rect.bottom, state);
+
         // バックバッファを画面にコピー
         BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY).ok();
 
@@ -1285,7 +1336,7 @@ mod win32 {
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
-                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  </>: リサイズ  q: 戻る",
+                " H/J/K/L: 移動  E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  </>: リサイズ  L: レイアウト  q: 戻る",
             ),
         };
 
@@ -1443,6 +1494,166 @@ mod win32 {
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
         }
+    }
+
+    /// レイアウトランチャーポップアップを画面中央に描画する。
+    ///
+    /// `PaneStore::launcher` が `Some` のときのみ描画する。
+    /// 上下キーで選択行をハイライトし、Enter で適用、Esc/q でキャンセル。
+    unsafe fn paint_launcher(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
+        let launcher = {
+            let store = state.panes.lock().unwrap();
+            store.launcher.clone()
+        };
+        let Some(launcher) = launcher else {
+            return;
+        };
+
+        // Catppuccin Mocha カラー (BGR)
+        const COLOR_OVERLAY: COLORREF = COLORREF(0x00_22_1E_1E); // 暗いオーバーレイ
+        const COLOR_POPUP_BG: COLORREF = COLORREF(0x00_3D_31_31); // surface0
+        const COLOR_SEL_BG: COLORREF = COLORREF(0x00_87_AB_FA); // peach
+        const COLOR_SEL_FG: COLORREF = COLORREF(0x00_2E_1E_1E); // base
+        const COLOR_TEXT: COLORREF = COLORREF(0x00_F4_D6_CD); // text
+        const COLOR_TITLE: COLORREF = COLORREF(0x00_87_AB_FA); // peach
+        const COLOR_HINT_FG: COLORREF = COLORREF(0x00_A0_9D_8C); // subtext0
+
+        let cw = state.cell_width;
+        let ch = state.cell_height;
+        let n = launcher.layouts.len() as i32;
+
+        // ポップアップサイズ計算
+        let max_name_chars = launcher
+            .layouts
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(10) as i32;
+        let popup_w = ((max_name_chars + 8) * cw).max(cw * 36);
+        let item_rows = n.max(1);
+        let popup_h = ch + ch / 2 // タイトル行 + 余白
+            + 1               // セパレーター
+            + ch / 4          // 余白
+            + item_rows * ch  // アイテム行
+            + ch / 4          // 余白
+            + ch; // ヒント行
+        let popup_x = (win_w - popup_w) / 2;
+        let popup_y = (win_h - popup_h) / 2;
+
+        // 全画面オーバーレイ
+        let overlay_rect = RECT {
+            left: 0,
+            top: 0,
+            right: win_w,
+            bottom: win_h,
+        };
+        let overlay_brush = CreateSolidBrush(COLOR_OVERLAY);
+        FillRect(hdc, &overlay_rect, overlay_brush);
+        let _ = DeleteObject(overlay_brush);
+
+        // ポップアップ背景
+        let popup_rect = RECT {
+            left: popup_x,
+            top: popup_y,
+            right: popup_x + popup_w,
+            bottom: popup_y + popup_h,
+        };
+        let popup_brush = CreateSolidBrush(COLOR_POPUP_BG);
+        FillRect(hdc, &popup_rect, popup_brush);
+        let _ = DeleteObject(popup_brush);
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        // タイトル行
+        let title = "  レイアウト選択";
+        let title_w: Vec<u16> = title.encode_utf16().collect();
+        SetTextColor(hdc, COLOR_TITLE);
+        let _ = ExtTextOutW(
+            hdc,
+            popup_x + cw,
+            popup_y + ch / 4,
+            ETO_CLIPPED,
+            Some(&popup_rect),
+            PCWSTR(title_w.as_ptr()),
+            title_w.len() as u32,
+            None,
+        );
+
+        // セパレーター線
+        let sep_y = popup_y + ch + ch / 4;
+        let sep_brush = CreateSolidBrush(COLOR_SEPARATOR);
+        let sep_rect = RECT {
+            left: popup_x + cw,
+            top: sep_y,
+            right: popup_x + popup_w - cw,
+            bottom: sep_y + 1,
+        };
+        FillRect(hdc, &sep_rect, sep_brush);
+        let _ = DeleteObject(sep_brush);
+
+        let items_top = sep_y + 1 + ch / 4;
+
+        if launcher.layouts.is_empty() {
+            let msg = "  (レイアウトファイルが見つかりません)";
+            let msg_w: Vec<u16> = msg.encode_utf16().collect();
+            SetTextColor(hdc, COLOR_HINT_FG);
+            let _ = ExtTextOutW(
+                hdc,
+                popup_x + cw,
+                items_top,
+                ETO_CLIPPED,
+                Some(&popup_rect),
+                PCWSTR(msg_w.as_ptr()),
+                msg_w.len() as u32,
+                None,
+            );
+        } else {
+            for (i, name) in launcher.layouts.iter().enumerate() {
+                let item_y = items_top + i as i32 * ch;
+                if i == launcher.selected {
+                    let sel_rect = RECT {
+                        left: popup_x + cw / 2,
+                        top: item_y,
+                        right: popup_x + popup_w - cw / 2,
+                        bottom: item_y + ch,
+                    };
+                    let sel_brush = CreateSolidBrush(COLOR_SEL_BG);
+                    FillRect(hdc, &sel_rect, sel_brush);
+                    let _ = DeleteObject(sel_brush);
+                    SetTextColor(hdc, COLOR_SEL_FG);
+                } else {
+                    SetTextColor(hdc, COLOR_TEXT);
+                }
+                let text = format!("  {name}");
+                let text_w: Vec<u16> = text.encode_utf16().collect();
+                let _ = ExtTextOutW(
+                    hdc,
+                    popup_x + cw,
+                    item_y,
+                    ETO_CLIPPED,
+                    Some(&popup_rect),
+                    PCWSTR(text_w.as_ptr()),
+                    text_w.len() as u32,
+                    None,
+                );
+            }
+        }
+
+        // ヒント行
+        let hint_y = popup_y + popup_h - ch;
+        let hint = "  ↑↓: 選択  Enter: 適用  Esc/q: キャンセル";
+        let hint_w: Vec<u16> = hint.encode_utf16().collect();
+        SetTextColor(hdc, COLOR_HINT_FG);
+        let _ = ExtTextOutW(
+            hdc,
+            popup_x + cw / 2,
+            hint_y,
+            ETO_CLIPPED,
+            Some(&popup_rect),
+            PCWSTR(hint_w.as_ptr()),
+            hint_w.len() as u32,
+            None,
+        );
     }
 
     /// 罫線文字・ブロック要素を GDI プリミティブで描画する。
@@ -2061,6 +2272,7 @@ mod win32 {
     ///
     /// この関数はウィンドウが閉じられるまでブロックする。
     /// `tokio::task::spawn_blocking` でメインスレッドとは別に実行すること。
+    #[allow(clippy::too_many_arguments)]
     pub fn run_window(
         panes: Arc<Mutex<PaneStore>>,
         msg_tx: mpsc::Sender<ClientMessage>,
@@ -2069,6 +2281,7 @@ mod win32 {
         app_focused: Arc<AtomicBool>,
         native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
         float_tx: mpsc::Sender<()>,
+        layout_tx: mpsc::Sender<String>,
     ) -> anyhow::Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
@@ -2090,6 +2303,7 @@ mod win32 {
                 app_focused,
                 native_notif_queue,
                 float_tx,
+                layout_tx,
             ));
             let state_ptr = Box::into_raw(state);
 
@@ -2631,6 +2845,7 @@ pub fn run_window(
         std::sync::Mutex<std::collections::VecDeque<crate::notification::NativeToastMsg>>,
     >,
     _float_tx: tokio::sync::mpsc::Sender<()>,
+    _layout_tx: tokio::sync::mpsc::Sender<String>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }

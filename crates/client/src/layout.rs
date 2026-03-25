@@ -353,6 +353,48 @@ impl LayoutNode {
     }
 }
 
+/// レイアウトランチャーの表示状態
+#[derive(Clone, Debug)]
+pub struct LauncherState {
+    /// 選択可能なレイアウト名のリスト
+    pub layouts: Vec<String>,
+    /// 現在選択中のインデックス
+    pub selected: usize,
+}
+
+impl LauncherState {
+    pub fn new(layouts: Vec<String>) -> Self {
+        Self {
+            layouts,
+            selected: 0,
+        }
+    }
+}
+
+/// `%APPDATA%\yatamux\layouts\` 内の `.toml` ファイル名（拡張子なし）を返す（ソート済み）
+pub fn list_available_layouts() -> Vec<String> {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::PathBuf::from(base)
+        .join("yatamux")
+        .join("layouts");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension()?.to_str()? == "toml" {
+                path.file_stem()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// Win32 スレッドが表示するトースト通知
 #[derive(Clone, Debug)]
 pub struct Toast {
@@ -393,6 +435,8 @@ pub struct PaneStore {
     pub pre_float_active: Option<PaneId>,
     /// true のとき Win32 タイマーがウィンドウを破棄してアプリを終了する（C-9）
     pub should_quit: bool,
+    /// レイアウトランチャー UI の状態（Some = 表示中）
+    pub launcher: Option<LauncherState>,
 }
 
 impl PaneStore {
@@ -410,6 +454,7 @@ impl PaneStore {
             floating_visible: false,
             pre_float_active: None,
             should_quit: false,
+            launcher: None,
         }
     }
 
