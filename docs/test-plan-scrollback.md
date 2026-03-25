@@ -37,3 +37,23 @@
 - **前提**: scrollback_len() == 5
 - **操作**: `scroll_offset` を 10 にセット
 - **期待結果**: `scroll_offset.min(scrollback_len()) == 5` でクランプされる
+
+## C-7: 効率的なスクロールバックバッファ
+
+### TC-08: ScrollbackBuffer の上限が 50,000 行である（ユニットテスト）
+- **操作**: `Grid::SCROLLBACK_MAX`
+- **期待結果**: `50_000`
+
+### TC-09: ScrollbackBuffer::as_text が末尾の空白を除去して改行で連結する（ユニットテスト）
+- **前提**: "foo  ", "bar" を push した ScrollbackBuffer
+- **操作**: `buf.as_text()`
+- **期待結果**: `"foo\nbar"`
+
+### TC-10: full_content_text() がスクロールバック + 画面内容を含む（ユニットテスト）
+- **前提**: "A" を書いてスクロールアウト後、"B" を書き込んだ Grid（2 行）
+- **操作**: `grid.full_content_text()`
+- **期待結果**: "A" と "B" が両方含まれる
+
+### TC-11: Pane モード X でスクロールバックが一時ファイル + エディタ起動（手動テスト）
+- **操作**: ペインに履歴を蓄積後、`Ctrl+B` → `X`
+- **期待結果**: `$EDITOR <tmpfile>` がペインに入力されエディタが開く
