@@ -48,8 +48,11 @@ src/app.rs           起動オーケストレーション。
                         ＋フック発火＋通知ルーティング＋レイアウト切り替え）
                      ⑥ spawn_blocking で Win32 メッセージループを起動
 src/cli.rs           IPC 経由 CLI サブコマンド実装（list-panes / send-keys / capture-pane / split-pane）。
-src/config.rs        AppConfig / HooksConfig。%APPDATA%\yatamux\config.toml から読み込む。
+src/config.rs        AppConfig / HooksConfig / AppearanceConfig。%APPDATA%\yatamux\config.toml から読み込む。
                      on_pane_created / on_pane_closed フックを cmd.exe /C で非同期発火。
+                     `parse_hex_color(s)` で `"#rrggbb"` → `(u8,u8,u8)` 変換。
+                     `AppearanceConfig` は `[appearance]` セクション（font_family / font_size /
+                     background / foreground / cursor / selection_bg / status_bar_bg）。
 src/layout_config.rs 宣言的レイアウト設定。%APPDATA%\yatamux\layouts\<name>.toml から読み込む。
 ```
 
@@ -86,10 +89,10 @@ src/layout_config.rs 宣言的レイアウト設定。%APPDATA%\yatamux\layouts\
 
 **`yatamux-client`** — Win32 ウィンドウ・レンダリング
 - `window.rs`: `WndProc` 実装。`SetWindowLongPtrW(GWLP_USERDATA)` で `ClientState` ポインタを保持。`WM_TIMER` で OSC 52 クリップボードデータ（`pending_clipboard`）を Win32 `SetClipboardData` で書き出す。トースト通知は `paint_toasts()` で右下に描画（最大3件表示、スライドイン・フェードアウトアニメーション付き）。
-- `ClientMode` 列挙型（`Normal` / `Pane` / `Copy`）で UI モードを管理。`Ctrl+B` で Pane モードへ遷移。Pane モードでは `E/O`（分割）、`W`（ペイン削除）、`F`（フローティング）、`X`（スクロールバックをエディタで開く）、`<`/`>`（サイズ調整）、`L`（レイアウトランチャー）、`V`（コピーモード）、`q`（Normal に戻る）が有効。Copy モードでは `hjkl`/矢印（カーソル移動）、`v`（選択トグル）、`y`/Enter（ヤンク）、Esc/q（終了）。
+- `ClientMode` 列挙型（`Normal` / `Pane` / `Copy`）で UI モードを管理。`Ctrl+B` で Pane モードへ遷移。Pane モードでは `E/O`（分割）、`W`（ペイン削除）、`F`（フローティング）、`X`（スクロールバックをエディタで開く）、`<`/`>`（サイズ調整）、`L`（レイアウトランチャー）、`V`（コピーモード）、`q`（Normal に戻る）が有効。Copy モードでは `hjkl`/矢印（カーソル移動）、`v`（選択トグル）、`y`/Enter（ヤンク）、Esc/q（終了）。Normal モードでは `Ctrl+P` でテーマランチャーを開く。
 - `Ctrl+F` で `float_tx` 経由のフローティングペイン切り替え。`WM_LBUTTONDOWN` でクリック座標からペインを特定してフォーカス移動。`WM_MOUSEWHEEL` で `scroll_offset` を増減。
-- `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。
-- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`copy_mode: Option<CopyState>` を持つ。
+- `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。テーマは `theme: std::cell::Cell<WinTheme>`（`WinTheme` は `#[derive(Copy,Clone)]`）で保持し、ランタイムに `state.theme.set(new_theme)` で切り替える。フォント変更は再起動が必要。
+- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>` を持つ。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
 - `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
 
@@ -134,7 +137,8 @@ yatamux split-pane（IPC CLI起点）
 - `AdjustWindowRectEx` は windows-rs で `Result<()>` を返す（`BOOL` ではない）。`.map_err(|e| anyhow::anyhow!(...))` でハンドルする。
 - `WM_SIZE` では `ClientMessage::Resize` を `msg_tx` 経由で送信してサーバー側 ConPTY にも通知すること（クライアント側 Grid だけリサイズすると ConPTY とずれる）。
 - DWM ダークタイトルバーは `DWMWINDOWATTRIBUTE(20)` = `DWMWA_USE_IMMERSIVE_DARK_MODE`（Windows 10 1903 以降）。
-- フォント優先順位: HackGen Console NF → HackGen Console → HackGen35 Console NF → HackGen35 Console → HackGen NF → HackGen → Cascadia Mono → Cascadia Code → Consolas → MS Gothic（最終フォールバック）。
+- フォント優先順位: HackGen Console NF → HackGen Console → HackGen35 Console NF → HackGen35 Console → HackGen NF → HackGen → Cascadia Mono → Cascadia Code → Consolas → MS Gothic（最終フォールバック）。`config.toml` の `[appearance] font_family` で上書き可能。
+- テーマファイルは `%APPDATA%\yatamux\themes\<name>.toml`（`[appearance]` セクション）。`Ctrl+P` でランチャーを開き Enter 適用。フォント変更は再起動が必要（ランタイム変更不可）。
 - `windows` crate 0.62 以降、`SelectObject`/`DeleteObject` の引数は `HGDIOBJ` 型が必要（`HBRUSH`/`HPEN`/`HFONT`/`HBITMAP` は `.into()` で変換）。多くの Win32 関数で `HWND`/`HDC` 引数が `Option<HWND>`/`Option<HDC>` に変更された。
 
 ## 実装フロー
