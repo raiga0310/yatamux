@@ -83,6 +83,28 @@ mod win32 {
     const PADDING_X: i32 = 10;
     const PADDING_Y: i32 = 8;
 
+    /// Normal モードのマウス選択範囲に (col, row) が含まれるか判定する。
+    /// sel = (anchor_col, anchor_row, end_col, end_row)
+    fn is_in_normal_selection(sel: (usize, usize, usize, usize), col: usize, row: usize) -> bool {
+        let (ac, ar, ec, er) = sel;
+        let (r0, r1) = if ar <= er { (ar, er) } else { (er, ar) };
+        if row < r0 || row > r1 {
+            return false;
+        }
+        if r0 == r1 {
+            let (c0, c1) = if ac <= ec { (ac, ec) } else { (ec, ac) };
+            col >= c0 && col <= c1
+        } else if row == r0 {
+            let c0 = if ar <= er { ac } else { ec };
+            col >= c0
+        } else if row == r1 {
+            let c1 = if ar <= er { ec } else { ac };
+            col <= c1
+        } else {
+            true
+        }
+    }
+
     // ── GDI カラーヘルパー ───────────────────────────────────────────────────
 
     fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
@@ -145,6 +167,8 @@ mod win32 {
         pub mode: std::cell::Cell<ClientMode>,
         /// WM_KEYDOWN でモード切替済みの場合、次の WM_CHAR を抑制するフラグ
         pub skip_char: std::cell::Cell<bool>,
+        /// Normal モードでマウスドラッグ選択中かどうか
+        pub normal_dragging: std::cell::Cell<bool>,
         /// フローティングペイン作成/トグル要求チャネル
         pub float_tx: mpsc::Sender<()>,
         /// レイアウト切り替え要求チャネル（選択したレイアウト名を app.rs へ送る）
@@ -185,6 +209,7 @@ mod win32 {
                 notif_icon_timer: std::cell::Cell::new(0),
                 mode: std::cell::Cell::new(ClientMode::Normal),
                 skip_char: std::cell::Cell::new(false),
+                normal_dragging: std::cell::Cell::new(false),
                 float_tx,
                 layout_tx,
             }
@@ -748,6 +773,38 @@ mod win32 {
                         return LRESULT(0);
                     }
 
+                    // Normal モード + 選択範囲あり + Ctrl+C: クリップボードにコピー（PTY 送信なし）
+                    if state.mode.get() == ClientMode::Normal
+                        && ctrl
+                        && !shift
+                        && wparam.0 == b'C' as usize
+                    {
+                        let clip_data = {
+                            let store = state.panes.lock().unwrap();
+                            store.normal_selection.and_then(|(ac, ar, ec, er)| {
+                                // クリックのみ（anchor == end）は除外
+                                if (ac, ar) == (ec, er) {
+                                    return None;
+                                }
+                                let row_start = ar.min(er);
+                                let row_end = ar.max(er);
+                                store.grids.get(&store.active).map(|grid_arc| {
+                                    let grid = grid_arc.lock().unwrap();
+                                    grid.extract_text(row_start, row_end).into_bytes()
+                                })
+                            })
+                        };
+                        if let Some(data) = clip_data {
+                            let mut store = state.panes.lock().unwrap();
+                            store.pending_clipboard = Some(data);
+                            store.normal_selection = None;
+                            drop(store);
+                            state.skip_char.set(true);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                            return LRESULT(0);
+                        }
+                    }
+
                     let app_cursor = state
                         .active_grid()
                         .lock()
@@ -878,6 +935,10 @@ mod win32 {
                         let px = (lparam.0 & 0xFFFF) as i32;
                         let py = ((lparam.0 >> 16) & 0xFFFF) as i32;
 
+                        // Normal モード選択とドラッグ状態をリセット
+                        state.panes.lock().unwrap().normal_selection = None;
+                        state.normal_dragging.set(false);
+
                         // フローティングペイン表示中: 外側クリックで非表示に
                         let float_handled = {
                             let mut store = state.panes.lock().unwrap();
@@ -900,6 +961,76 @@ mod win32 {
                         if float_handled || state.focus_pane_at(px, py) {
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
+
+                        // Normal モード: アクティブペイン上のドラッグ選択開始
+                        if state.mode.get() == ClientMode::Normal {
+                            let content = state.content_rect.get();
+                            let sel_start = {
+                                let store = state.panes.lock().unwrap();
+                                let active = store.active;
+                                let rects = store.layout.compute_rects(content);
+                                rects
+                                    .iter()
+                                    .find(|(id, _)| *id == active)
+                                    .and_then(|(_, pr)| {
+                                        let cx = px - PADDING_X;
+                                        let cy = py - PADDING_Y;
+                                        if cx >= pr.x
+                                            && cx < pr.x + pr.w
+                                            && cy >= pr.y
+                                            && cy < pr.y + pr.h
+                                        {
+                                            let col =
+                                                ((cx - pr.x) / state.cell_width.max(1)) as usize;
+                                            let row =
+                                                ((cy - pr.y) / state.cell_height.max(1)) as usize;
+                                            Some((col, row))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                            };
+                            if let Some((col, row)) = sel_start {
+                                state.panes.lock().unwrap().normal_selection =
+                                    Some((col, row, col, row));
+                                state.normal_dragging.set(true);
+                            }
+                        }
+                    }
+
+                    // Normal モード: ドラッグ選択の終点を更新
+                    if msg == WM_MOUSEMOVE
+                        && state.normal_dragging.get()
+                        && state.mode.get() == ClientMode::Normal
+                    {
+                        let px = (lparam.0 & 0xFFFF) as i32;
+                        let py = ((lparam.0 >> 16) & 0xFFFF) as i32;
+                        let content = state.content_rect.get();
+                        let sel_end = {
+                            let store = state.panes.lock().unwrap();
+                            let active = store.active;
+                            let rects = store.layout.compute_rects(content);
+                            rects.iter().find(|(id, _)| *id == active).map(|(_, pr)| {
+                                let cx = (px - PADDING_X - pr.x).max(0);
+                                let cy = (py - PADDING_Y - pr.y).max(0);
+                                let col = (cx / state.cell_width.max(1)) as usize;
+                                let row = (cy / state.cell_height.max(1)) as usize;
+                                (col, row)
+                            })
+                        };
+                        if let Some((ec, er)) = sel_end {
+                            let mut store = state.panes.lock().unwrap();
+                            if let Some(sel) = &mut store.normal_selection {
+                                sel.2 = ec;
+                                sel.3 = er;
+                            }
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                    }
+
+                    // Normal モード: ドラッグ終了
+                    if msg == WM_LBUTTONUP && state.normal_dragging.get() {
+                        state.normal_dragging.set(false);
                     }
 
                     let (reporting, sgr) = {
@@ -1045,7 +1176,15 @@ mod win32 {
         };
 
         // PaneStore を短時間ロックして必要な情報を取得
-        let (active_pane, scroll_offset, pane_rects, sep_rects, grid_map, copy_mode_state) = {
+        let (
+            active_pane,
+            scroll_offset,
+            pane_rects,
+            sep_rects,
+            grid_map,
+            copy_mode_state,
+            normal_selection,
+        ) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
             let seps = store.layout.compute_separator_rects(total_rect);
@@ -1055,7 +1194,8 @@ mod win32 {
                 .map(|(&id, g)| (id, Arc::clone(g)))
                 .collect();
             let cm = store.copy_mode.clone();
-            (store.active, store.scroll_offset, rects, seps, map, cm)
+            let ns = store.normal_selection;
+            (store.active, store.scroll_offset, rects, seps, map, cm, ns)
         };
 
         // ── 各ペインを描画 ──────────────────────────────────────────────
@@ -1102,11 +1242,17 @@ mod win32 {
                             bottom: y + state.cell_height,
                         };
 
-                        // コピーモードで選択中セルかどうか判定
-                        let is_sel = is_active
+                        // コピーモードまたは Normal モードマウス選択中セルかどうか判定
+                        let is_copy_sel = is_active
                             && copy_mode_state.as_ref().is_some_and(|cm| {
                                 cm.anchor.is_some() && cm.is_selected(col_idx, row as usize)
                             });
+                        let is_normal_sel = is_active
+                            && copy_mode_state.is_none()
+                            && normal_selection.is_some_and(|sel| {
+                                is_in_normal_selection(sel, col_idx, row as usize)
+                            });
+                        let is_sel = is_copy_sel || is_normal_sel;
 
                         match &cell.content {
                             CellContent::Grapheme { text, width } => {
@@ -1392,7 +1538,7 @@ mod win32 {
                     let border_pen = CreatePen(PS_SOLID, 2, COLOR_FLOAT_BORDER);
                     let old_pen = SelectObject(mem_dc, border_pen.into());
                     let null_brush = GetStockObject(NULL_BRUSH);
-                    let old_brush = SelectObject(mem_dc, null_brush.into());
+                    let old_brush = SelectObject(mem_dc, null_brush);
                     let _ = Rectangle(
                         mem_dc,
                         off_x - 2,
@@ -1417,7 +1563,18 @@ mod win32 {
         paint_launcher(mem_dc, rect.right, rect.bottom, state);
 
         // バックバッファを画面にコピー
-        BitBlt(hdc, 0, 0, rect.right, rect.bottom, Some(mem_dc), 0, 0, SRCCOPY).ok();
+        BitBlt(
+            hdc,
+            0,
+            0,
+            rect.right,
+            rect.bottom,
+            Some(mem_dc),
+            0,
+            0,
+            SRCCOPY,
+        )
+        .ok();
 
         // リソース解放
         SelectObject(mem_dc, old_font);
@@ -1586,7 +1743,7 @@ mod win32 {
             let border_pen = CreatePen(PS_SOLID, 1, COLOR_TOAST_BORDER);
             let old_pen = SelectObject(hdc, border_pen.into());
             let null_brush = GetStockObject(NULL_BRUSH);
-            let old_brush = SelectObject(hdc, null_brush.into());
+            let old_brush = SelectObject(hdc, null_brush);
             let _ = Rectangle(
                 hdc,
                 toast_rect.left,
@@ -2861,7 +3018,7 @@ mod win32 {
                 .trim_end_matches('\0')
                 .to_string();
 
-            SelectObject(hdc, old.into());
+            SelectObject(hdc, old);
 
             let is_last = i == FONT_CANDIDATES.len() - 1;
             // GetTextFaceW が返す名前はスペースなしの場合があるため
@@ -3228,6 +3385,76 @@ mod win32 {
             skip.set(false);
             assert!(was);
             assert!(!skip.get());
+        }
+
+        // TC-08: is_in_normal_selection — 単一行選択
+        #[test]
+        fn test_normal_sel_single_row() {
+            // anchor=(2,1), end=(5,1)
+            let sel = (2usize, 1usize, 5usize, 1usize);
+            assert!(!is_in_normal_selection(sel, 1, 1)); // 左外
+            assert!(is_in_normal_selection(sel, 2, 1)); // 左端
+            assert!(is_in_normal_selection(sel, 3, 1)); // 内側
+            assert!(is_in_normal_selection(sel, 5, 1)); // 右端
+            assert!(!is_in_normal_selection(sel, 6, 1)); // 右外
+            assert!(!is_in_normal_selection(sel, 3, 0)); // 別行
+        }
+
+        // TC-08: is_in_normal_selection — 逆方向ドラッグ（end < anchor）
+        #[test]
+        fn test_normal_sel_reversed() {
+            // anchor=(5,1), end=(2,1) — 右から左へドラッグ
+            let sel = (5usize, 1usize, 2usize, 1usize);
+            assert!(!is_in_normal_selection(sel, 1, 1));
+            assert!(is_in_normal_selection(sel, 2, 1));
+            assert!(is_in_normal_selection(sel, 5, 1));
+            assert!(!is_in_normal_selection(sel, 6, 1));
+        }
+
+        // TC-09: is_in_normal_selection — 複数行選択
+        #[test]
+        fn test_normal_sel_multi_row() {
+            // anchor=(2,1), end=(4,3)
+            let sel = (2usize, 1usize, 4usize, 3usize);
+            // 開始行より前
+            assert!(!is_in_normal_selection(sel, 0, 0));
+            // 開始行: anchor 列以降が選択
+            assert!(!is_in_normal_selection(sel, 1, 1));
+            assert!(is_in_normal_selection(sel, 2, 1));
+            assert!(is_in_normal_selection(sel, 99, 1));
+            // 中間行: 全幅が選択
+            assert!(is_in_normal_selection(sel, 0, 2));
+            assert!(is_in_normal_selection(sel, 99, 2));
+            // 終了行: end 列以前が選択
+            assert!(is_in_normal_selection(sel, 0, 3));
+            assert!(is_in_normal_selection(sel, 4, 3));
+            assert!(!is_in_normal_selection(sel, 5, 3));
+            // 終了行より後
+            assert!(!is_in_normal_selection(sel, 0, 4));
+        }
+
+        // TC-09: is_in_normal_selection — 複数行・逆方向
+        #[test]
+        fn test_normal_sel_multi_row_reversed() {
+            // anchor=(4,3), end=(2,1) — 下から上へドラッグ
+            let sel = (4usize, 3usize, 2usize, 1usize);
+            assert!(!is_in_normal_selection(sel, 1, 1));
+            assert!(is_in_normal_selection(sel, 2, 1));
+            assert!(is_in_normal_selection(sel, 0, 2));
+            assert!(is_in_normal_selection(sel, 4, 3));
+            assert!(!is_in_normal_selection(sel, 5, 3));
+        }
+
+        // TC-04: 選択なし（クリックのみ = anchor == end）は Ctrl+C を PTY へ通す
+        #[test]
+        fn test_normal_sel_click_only_not_selected() {
+            // anchor と end が同じ = クリックのみ（選択なし）
+            let sel = (3usize, 2usize, 3usize, 2usize);
+            // anchor == end の場合は単一セルのみ選択される
+            // Ctrl+C インターセプトでは (ac, ar) == (ec, er) を除外するため
+            // ここではハイライトロジック自体を確認: 単一セルは is_sel = true になる
+            assert!(is_in_normal_selection(sel, 3, 2));
+            assert!(!is_in_normal_selection(sel, 2, 2));
         }
     }
 }
