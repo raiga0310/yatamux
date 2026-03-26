@@ -295,6 +295,48 @@ impl LayoutNode {
         }
     }
 
+    /// `target_dir` 方向の Split に限定して ratio を調整する。
+    ///
+    /// - `<`/`>` キーは `SplitDirection::Vertical`（縦線分割 = 横比）を対象にする
+    /// - `+`/`-` キーは `SplitDirection::Horizontal`（横線分割 = 縦比）を対象にする
+    pub fn adjust_ratio_for_dir(
+        &mut self,
+        id: PaneId,
+        delta: f32,
+        target_dir: SplitDirection,
+    ) -> bool {
+        match self {
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                // 子ノードを先に試す（最近傍を優先）
+                if first.adjust_ratio_for_dir(id, delta, target_dir)
+                    || second.adjust_ratio_for_dir(id, delta, target_dir)
+                {
+                    return true;
+                }
+                // 方向が一致し、このノードがペインを含む場合のみ調整
+                if *direction == target_dir {
+                    if first.pane_ids().contains(&id) {
+                        *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                        true
+                    } else if second.pane_ids().contains(&id) {
+                        *ratio = (*ratio - delta).clamp(0.1, 0.9);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// セパレーター矩形リスト（コンテンツ座標）
     pub fn compute_separator_rects(&self, r: PaneRect) -> Vec<PaneRect> {
         match self {
@@ -1156,6 +1198,134 @@ mod tests {
         assert!(layout.adjust_ratio(PaneId(1), 0.05));
         if let LayoutNode::Split { ratio, .. } = layout {
             assert!((ratio - 0.9).abs() < 1e-6);
+        }
+    }
+
+    // ── adjust_ratio_for_dir テスト (C-19 リグレッション防止) ────────────────
+
+    // TC-C19-R01: Vertical-only adjust は Horizontal Split に触れない
+    #[test]
+    fn test_adjust_ratio_for_dir_vertical_ignores_horizontal() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        // Vertical 方向の調整は Horizontal Split を変更しない
+        let changed = layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Vertical);
+        assert!(
+            !changed,
+            "Vertical adjust should not affect Horizontal split"
+        );
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.5).abs() < 1e-6, "ratio should be unchanged");
+        }
+    }
+
+    // TC-C19-R02: Horizontal-only adjust は Vertical Split に触れない
+    #[test]
+    fn test_adjust_ratio_for_dir_horizontal_ignores_vertical() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        // Horizontal 方向の調整は Vertical Split を変更しない
+        let changed = layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Horizontal);
+        assert!(
+            !changed,
+            "Horizontal adjust should not affect Vertical split"
+        );
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.5).abs() < 1e-6, "ratio should be unchanged");
+        }
+    }
+
+    // TC-C19-R03: ネスト構造 Vertical(1, Horizontal(2, 3)) で方向ごとに別の Split が動く
+    //
+    // `<`/`>` (Vertical) を Pane2 に適用 → 外側 Vertical ratio が変化、内側 Horizontal は不変
+    // `+`/`-` (Horizontal) を Pane2 に適用 → 内側 Horizontal ratio が変化、外側 Vertical は不変
+    #[test]
+    fn test_adjust_ratio_for_dir_vertical_changes_outer_not_inner() {
+        let make_layout = || LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(2))),
+                second: Box::new(LayoutNode::Leaf(PaneId(3))),
+            }),
+        };
+
+        // Vertical 調整 → 外側 Vertical ratio が変化（Pane2 は second 側なので減少）
+        // 内側 Horizontal ratio は不変
+        let mut layout = make_layout();
+        let changed = layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Vertical);
+        assert!(
+            changed,
+            "Vertical adjust should affect outer Vertical split"
+        );
+        if let LayoutNode::Split {
+            ratio: outer,
+            second,
+            ..
+        } = &layout
+        {
+            assert!(
+                (*outer - 0.45).abs() < 1e-6,
+                "outer Vertical ratio decreased: {outer}"
+            );
+            if let LayoutNode::Split { ratio: inner, .. } = second.as_ref() {
+                assert!(
+                    (*inner - 0.5).abs() < 1e-6,
+                    "inner Horizontal ratio unchanged: {inner}"
+                );
+            }
+        }
+
+        // Horizontal 調整 → 内側 Horizontal ratio が変化（Pane2 は first 側なので増加）
+        // 外側 Vertical ratio は不変
+        let mut layout = make_layout();
+        let changed = layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Horizontal);
+        assert!(
+            changed,
+            "Horizontal adjust should affect inner Horizontal split"
+        );
+        if let LayoutNode::Split {
+            ratio: outer,
+            second,
+            ..
+        } = &layout
+        {
+            assert!(
+                (*outer - 0.5).abs() < 1e-6,
+                "outer Vertical ratio unchanged: {outer}"
+            );
+            if let LayoutNode::Split { ratio: inner, .. } = second.as_ref() {
+                assert!(
+                    (*inner - 0.55).abs() < 1e-6,
+                    "inner Horizontal ratio increased: {inner}"
+                );
+            }
+        }
+    }
+
+    // TC-C19-R04: adjust_ratio_for_dir で ratio クランプが機能する
+    #[test]
+    fn test_adjust_ratio_for_dir_clamps_ratio() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.88,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.9).abs() < 1e-6, "ratio clamped at 0.9");
         }
     }
 

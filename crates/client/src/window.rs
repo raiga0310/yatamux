@@ -722,12 +722,11 @@ mod win32 {
                             } else {
                                 -0.05_f32
                             };
-                            state
-                                .panes
-                                .lock()
-                                .unwrap()
-                                .layout
-                                .adjust_ratio(active, delta);
+                            state.panes.lock().unwrap().layout.adjust_ratio_for_dir(
+                                active,
+                                delta,
+                                SplitDirection::Vertical,
+                            );
                             state.skip_char.set(true);
                             let _ = InvalidateRect(Some(hwnd), None, false);
                             return LRESULT(0);
@@ -742,12 +741,11 @@ mod win32 {
                         if is_plus || is_minus {
                             let active = state.panes.lock().unwrap().active;
                             let delta = if is_plus { 0.05_f32 } else { -0.05_f32 };
-                            state
-                                .panes
-                                .lock()
-                                .unwrap()
-                                .layout
-                                .adjust_ratio(active, delta);
+                            state.panes.lock().unwrap().layout.adjust_ratio_for_dir(
+                                active,
+                                delta,
+                                SplitDirection::Horizontal,
+                            );
                             state.skip_char.set(true);
                             let _ = InvalidateRect(Some(hwnd), None, false);
                             return LRESULT(0);
