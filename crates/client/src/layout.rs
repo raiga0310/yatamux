@@ -444,6 +444,28 @@ impl LauncherState {
     }
 }
 
+/// テーマランチャーの表示状態
+#[derive(Clone, Debug)]
+pub struct ThemeLauncherState {
+    /// テーマ名のリスト（ファイル名のステム）
+    pub entries: Vec<String>,
+    /// 現在選択中のインデックス
+    pub selected: usize,
+}
+
+impl ThemeLauncherState {
+    pub fn new(entries: Vec<String>) -> Self {
+        Self {
+            entries,
+            selected: 0,
+        }
+    }
+
+    pub fn selected_name(&self) -> Option<&str> {
+        self.entries.get(self.selected).map(String::as_str)
+    }
+}
+
 /// TOML 文字列からプレビュー用 `LayoutPreview` を構築する
 fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
     #[derive(Deserialize)]
@@ -491,6 +513,81 @@ fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
 
 /// `%APPDATA%\yatamux\layouts\` 内の `.toml` ファイルを読み込み、
 /// `(名前, プレビューデータ)` のリストをソートして返す
+/// `#rrggbb` or `rrggbb` を `0xRRGGBB` u32 に変換するローカルヘルパー
+fn parse_hex_u32(s: &str) -> Option<u32> {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r as u32) << 16 | (g as u32) << 8 | b as u32)
+}
+
+/// `%APPDATA%\yatamux\themes\` にある `.toml` ファイルのベース名一覧を返す（ソート済み）
+pub fn list_available_themes() -> Vec<String> {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::PathBuf::from(base)
+        .join("yatamux")
+        .join("themes");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension()?.to_str()? == "toml" {
+                path.file_stem()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// テーマ TOML ファイルを読み込んで `Theme` を返す
+///
+/// ランタイム切り替えではフォント変更をサポートしないため、
+/// `font_family` / `font_size` は常に `None` になる。
+pub fn load_theme_from_file(name: &str) -> Option<crate::window::Theme> {
+    #[derive(serde::Deserialize, Default)]
+    struct AppSec {
+        background: Option<String>,
+        foreground: Option<String>,
+        cursor: Option<String>,
+        selection_bg: Option<String>,
+        status_bar_bg: Option<String>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct ThemeFile {
+        #[serde(default)]
+        appearance: AppSec,
+    }
+
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let path = std::path::PathBuf::from(base)
+        .join("yatamux")
+        .join("themes")
+        .join(format!("{name}.toml"));
+    let content = std::fs::read_to_string(&path).ok()?;
+    let file: ThemeFile = toml::from_str(&content).ok()?;
+    let ap = file.appearance;
+    let parse = |s: &Option<String>| s.as_deref().and_then(parse_hex_u32);
+    Some(crate::window::Theme {
+        bg: parse(&ap.background),
+        fg: parse(&ap.foreground),
+        cursor: parse(&ap.cursor),
+        selection_bg: parse(&ap.selection_bg),
+        status_bar_bg: parse(&ap.status_bar_bg),
+        font_family: None,
+        font_size: None,
+    })
+}
+
 pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     let dir = std::path::PathBuf::from(base)
@@ -709,6 +806,8 @@ pub struct PaneStore {
     pub normal_selection: Option<(usize, usize, usize, usize)>,
     /// レイアウト保存プロンプトの入力バッファ（Some = プロンプト表示中）
     pub save_prompt: Option<String>,
+    /// テーマランチャー UI の状態（Some = 表示中）
+    pub theme_launcher: Option<ThemeLauncherState>,
 }
 
 impl PaneStore {
@@ -730,6 +829,7 @@ impl PaneStore {
             copy_mode: None,
             normal_selection: None,
             save_prompt: None,
+            theme_launcher: None,
         }
     }
 

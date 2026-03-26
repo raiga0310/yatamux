@@ -17,16 +17,34 @@ use tokio::sync::mpsc;
 
 use yatamux_client::{
     run_window, FocusAwareBackend, LayoutNode, LayoutNodeDef, LayoutSnapshot, NotificationBackend,
-    PaneStore,
+    PaneStore, Theme,
 };
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
 use yatamux_terminal::TerminalSink;
 
-use crate::config::AppConfig;
+use crate::config::{parse_hex_color, AppConfig, AppearanceConfig};
 use crate::layout_config::{LayoutConfig, SplitDir};
 use crate::DEFAULT_SESSION;
+
+/// `AppearanceConfig` から `Theme` を構築する
+fn build_theme(appearance: &AppearanceConfig) -> Theme {
+    let parse = |s: &Option<String>| -> Option<u32> {
+        s.as_deref()
+            .and_then(parse_hex_color)
+            .map(|(r, g, b)| (r as u32) << 16 | (g as u32) << 8 | b as u32)
+    };
+    Theme {
+        bg: parse(&appearance.background),
+        fg: parse(&appearance.foreground),
+        cursor: parse(&appearance.cursor),
+        selection_bg: parse(&appearance.selection_bg),
+        status_bar_bg: parse(&appearance.status_bar_bg),
+        font_family: appearance.font_family.clone(),
+        font_size: appearance.font_size,
+    }
+}
 
 /// デフォルトのターミナルサイズ
 ///
@@ -185,6 +203,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
     let pane_store2 = Arc::clone(&pane_store);
     let notif_backend2 = Arc::clone(&notif_backend);
     let hooks = app_config.hooks;
+    let theme = build_theme(&app_config.appearance);
     tokio::spawn(async move {
         let notif_backend = notif_backend2;
         // 分割リクエスト待ちキュー (parent_id, direction, new_size)
@@ -599,6 +618,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
             native_notif_queue,
             float_tx,
             layout_tx,
+            theme,
         )
     })
     .await??;

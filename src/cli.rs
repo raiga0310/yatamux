@@ -123,16 +123,12 @@ pub async fn split_pane(
         .find(|p| p.id == PaneId(pane_id))
         .or_else(|| panes.first());
 
-    let surface = target_pane
-        .map(|p| p.surface)
-        .unwrap_or(SurfaceId(1));
+    let surface = target_pane.map(|p| p.surface).unwrap_or(SurfaceId(1));
 
     // split_from には実際に存在するペイン ID を使う
     // デフォルトの --target 0 は存在しないため、フォールバック後の ID を使わないと
     // split_pane_tree がツリー内で対象 Leaf を見つけられず、新ペインがツリーに入らない
-    let split_from_id = target_pane
-        .map(|p| p.id)
-        .unwrap_or(PaneId(pane_id));
+    let split_from_id = target_pane.map(|p| p.id).unwrap_or(PaneId(pane_id));
 
     let size = target_pane
         .map(|p| yatamux_protocol::types::TermSize {
