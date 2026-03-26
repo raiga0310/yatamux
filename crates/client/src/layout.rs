@@ -1034,6 +1034,53 @@ mod tests {
         }
     }
 
+    // ── adjust_ratio テスト — Horizontal Split (C-18) ──────────────────────
+
+    // TC-C18-01: Horizontal Split の first ペインを拡大 → ratio 増加
+    #[test]
+    fn test_adjust_ratio_horizontal_first_expand() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(1), 0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.55).abs() < 1e-6);
+        }
+    }
+
+    // TC-C18-02: Horizontal Split の second ペインを拡大 → ratio 減少
+    #[test]
+    fn test_adjust_ratio_horizontal_second_expand() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(2), 0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.45).abs() < 1e-6);
+        }
+    }
+
+    // TC-C18-03: Horizontal Split — ratio は 0.9 でクランプ
+    #[test]
+    fn test_adjust_ratio_horizontal_clamp_max() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.88,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        assert!(layout.adjust_ratio(PaneId(1), 0.05));
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.9).abs() < 1e-6);
+        }
+    }
+
     // TC-F8-08: ネスト Split(1, Split(2, 3)) → remove 2 → Split(1, 3)
     #[test]
     fn test_remove_pane_nested() {
