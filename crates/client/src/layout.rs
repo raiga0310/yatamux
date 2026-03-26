@@ -54,18 +54,29 @@ impl LayoutNode {
 
     /// `parent` のリーフを `parent`/`child` の Split ノードに置き換える
     pub fn split_leaf(&mut self, parent: PaneId, child: PaneId, dir: SplitDirection) -> bool {
+        self.split_leaf_with_ratio(parent, child, dir, 0.5)
+    }
+
+    pub fn split_leaf_with_ratio(
+        &mut self,
+        parent: PaneId,
+        child: PaneId,
+        dir: SplitDirection,
+        ratio: f32,
+    ) -> bool {
         match self {
             LayoutNode::Leaf(id) if *id == parent => {
                 *self = LayoutNode::Split {
                     direction: dir,
-                    ratio: 0.5,
+                    ratio,
                     first: Box::new(LayoutNode::Leaf(parent)),
                     second: Box::new(LayoutNode::Leaf(child)),
                 };
                 true
             }
             LayoutNode::Split { first, second, .. } => {
-                first.split_leaf(parent, child, dir) || second.split_leaf(parent, child, dir)
+                first.split_leaf_with_ratio(parent, child, dir, ratio)
+                    || second.split_leaf_with_ratio(parent, child, dir, ratio)
             }
             _ => false,
         }
@@ -398,10 +409,15 @@ fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
         #[serde(default)]
         panes: Vec<PreviewPane>,
     }
+    fn default_ratio() -> f32 {
+        0.5
+    }
     #[derive(Deserialize)]
     struct PreviewPane {
         split: Option<PreviewSplitDir>,
         command: Option<String>,
+        #[serde(default = "default_ratio")]
+        ratio: f32,
     }
     #[derive(Deserialize, Clone, Copy)]
     #[serde(rename_all = "lowercase")]
@@ -422,7 +438,7 @@ fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
                 PreviewSplitDir::Vertical => SplitDirection::Vertical,
                 PreviewSplitDir::Horizontal => SplitDirection::Horizontal,
             };
-            root.split_leaf(PaneId((i - 1) as u32), PaneId(i as u32), dir);
+            root.split_leaf_with_ratio(PaneId((i - 1) as u32), PaneId(i as u32), dir, pane.ratio);
         }
     }
     Some(LayoutPreview {
@@ -463,40 +479,45 @@ pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
 /// 現在のレイアウトツリーを `[[panes]]` TOML 形式に変換する。
 ///
 /// DFS でノードを訪問し、各葉ペインを 1 エントリとして出力する。
+/// ratio が 0.5 と異なる場合のみ `ratio = X.XXX` を出力する。
 /// 制限: `first` が Split であるような左辺スプリット（左優先ツリー）を
 /// ロードし直すと構造が変わる（連鎖型ツリーとして再構成される）。
 pub fn layout_to_toml(node: &LayoutNode) -> String {
+    // (split_dir, ratio) — 最初のペインは None
     fn collect(
         node: &LayoutNode,
-        split: Option<&'static str>,
-        out: &mut Vec<Option<&'static str>>,
+        split: Option<(&'static str, f32)>,
+        out: &mut Vec<Option<(&'static str, f32)>>,
     ) {
         match node {
             LayoutNode::Leaf(_) => out.push(split),
             LayoutNode::Split {
                 direction,
+                ratio,
                 first,
                 second,
-                ..
             } => {
                 collect(first, split, out);
                 let dir = match direction {
                     SplitDirection::Vertical => "vertical",
                     SplitDirection::Horizontal => "horizontal",
                 };
-                collect(second, Some(dir), out);
+                collect(second, Some((dir, *ratio)), out);
             }
         }
     }
 
-    let mut panes: Vec<Option<&'static str>> = Vec::new();
+    let mut panes: Vec<Option<(&'static str, f32)>> = Vec::new();
     collect(node, None, &mut panes);
 
     let mut out = String::new();
     for split in panes {
         out.push_str("[[panes]]\n");
-        if let Some(dir) = split {
+        if let Some((dir, ratio)) = split {
             out.push_str(&format!("split = \"{dir}\"\n"));
+            if (ratio - 0.5).abs() >= 1e-4 {
+                out.push_str(&format!("ratio = {ratio:.4}\n"));
+            }
         }
         out.push('\n');
     }

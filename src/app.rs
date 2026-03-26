@@ -343,9 +343,9 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                         let new_layout = LayoutNode::Leaf(new_id);
                                         let new_grids = vec![(new_id, new_grid)];
 
-                                        // 残りペイン設定をキューに積む
+                                        // 残りペイン設定をキューに積む (direction, ratio, cmd)
                                         let queue: std::collections::VecDeque<
-                                            (SplitDirection, Option<String>),
+                                            (SplitDirection, f32, Option<String>),
                                         > = config
                                             .panes
                                             .iter()
@@ -357,7 +357,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                                     }
                                                     _ => SplitDirection::Vertical,
                                                 };
-                                                (dir, p.command.clone())
+                                                (dir, p.ratio, p.command.clone())
                                             })
                                             .collect();
 
@@ -371,7 +371,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                             );
                                         } else {
                                             // 次のペインを作成
-                                            let (next_dir, _) = queue[0].clone();
+                                            let (next_dir, _, _) = queue[0].clone();
                                             let _ = client_tx
                                                 .send(ClientMessage::CreatePane {
                                                     surface: surf_id,
@@ -398,14 +398,14 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                         ..
                                     } => {
                                         // queue[0] が今作成されたペインの設定
-                                        let (dir, cmd) = queue.pop_front().unwrap();
+                                        let (dir, ratio, cmd) = queue.pop_front().unwrap();
 
                                         let new_sink =
                                             TerminalSink::new(size.cols, size.rows);
                                         let new_grid = Arc::clone(&new_sink.grid);
                                         sinks.insert(new_id, new_sink);
                                         grids.push((new_id, new_grid));
-                                        layout.split_leaf(prev, new_id, dir);
+                                        layout.split_leaf_with_ratio(prev, new_id, dir, ratio);
 
                                         if let Some(cmd) = cmd {
                                             let mut input = cmd.into_bytes();
@@ -428,7 +428,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                             );
                                         } else {
                                             // 次のペインを作成
-                                            let (next_dir, _) = queue[0].clone();
+                                            let (next_dir, _, _) = queue[0].clone();
                                             let _ = client_tx
                                                 .send(ClientMessage::CreatePane {
                                                     surface: surf_id,
@@ -655,7 +655,7 @@ async fn apply_layout_config(
             .await?;
         let new_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
         sinks.push((new_id, TerminalSink::new(size.cols, size.rows)));
-        layout.split_leaf(active, new_id, direction);
+        layout.split_leaf_with_ratio(active, new_id, direction, pane_cfg.ratio);
         active = new_id;
 
         if let Some(cmd) = &pane_cfg.command {
@@ -748,7 +748,7 @@ enum LayoutPhase {
     /// 残りペインを順次作成中
     Applying {
         /// 未送信の (dir, cmd) キュー（front が直近に送った CreatePane の設定）
-        queue: std::collections::VecDeque<(SplitDirection, Option<String>)>,
+        queue: std::collections::VecDeque<(SplitDirection, f32, Option<String>)>,
         layout: LayoutNode,
         grids: Vec<(PaneId, Arc<Mutex<yatamux_terminal::Grid>>)>,
         /// 直前に作成されたペイン ID（次の split_from に使う）
