@@ -770,6 +770,8 @@ mod win32 {
                             }
                             state.send_input(data);
                         }
+                        // WM_CHAR(\x16) を抑制して PTY への二重送信を防ぐ
+                        state.skip_char.set(true);
                         return LRESULT(0);
                     }
 
@@ -811,6 +813,8 @@ mod win32 {
                         .unwrap()
                         .application_cursor_keys();
                     if let Some(vt) = keydown_to_vt(wparam, lparam, app_cursor) {
+                        // WM_CHAR を抑制して二重送信を防ぐ（Ctrl+letter 等）
+                        state.skip_char.set(true);
                         state.send_input(vt);
                         return LRESULT(0);
                     }
