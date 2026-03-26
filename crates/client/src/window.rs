@@ -17,6 +17,28 @@
 //! WndProc はスタティック関数である必要があるため、
 //! `SetWindowLongPtrW(GWLP_USERDATA)` でクライアント状態へのポインタを保持する。
 
+/// 外観テーマ設定（プラットフォーム非依存）
+///
+/// `AppConfig::appearance` から構築し、`run_window()` に渡す。
+/// 色値は `0xRRGGBB` 形式の `u32`。`None` はデフォルト値を意味する。
+#[derive(Debug, Clone, Default)]
+pub struct Theme {
+    /// 背景色（`0xRRGGBB`）
+    pub bg: Option<u32>,
+    /// 前景色
+    pub fg: Option<u32>,
+    /// カーソル色
+    pub cursor: Option<u32>,
+    /// テキスト選択背景色
+    pub selection_bg: Option<u32>,
+    /// ステータスバー背景色
+    pub status_bar_bg: Option<u32>,
+    /// フォントファミリー（`None` = 候補リストから自動選択）
+    pub font_family: Option<String>,
+    /// フォントサイズ（pt）
+    pub font_size: Option<u32>,
+}
+
 #[cfg(windows)]
 mod win32 {
     use std::sync::{Arc, Mutex};
@@ -111,12 +133,50 @@ mod win32 {
         COLORREF((b as u32) << 16 | (g as u32) << 8 | r as u32)
     }
 
-    // Catppuccin Mocha テーマ
+    // Catppuccin Mocha テーマ（デフォルト値）
     const COLOR_BG: COLORREF = COLORREF(0x00_2E_1E_1E); // base  #1e1e2e
     const COLOR_FG: COLORREF = COLORREF(0x00_F4_D6_CD); // text  #cdd6f4
     const COLOR_CURSOR: COLORREF = COLORREF(0x00_E7_C2_F5); // pink     #f5c2e7
     const COLOR_SEPARATOR: COLORREF = COLORREF(0x00_5A_47_45); // surface1 #45475a
     const COLOR_PREEDIT_BG: COLORREF = COLORREF(0x00_5A_47_45); // surface1 #45475a
+
+    /// `0xRRGGBB` を Win32 BGR 形式の `COLORREF` に変換する
+    fn rgb_hex(v: u32) -> COLORREF {
+        let r = ((v >> 16) & 0xFF) as u8;
+        let g = ((v >> 8) & 0xFF) as u8;
+        let b = (v & 0xFF) as u8;
+        rgb(r, g, b)
+    }
+
+    /// Win32 用に解決済みのテーマ色
+    ///
+    /// `Theme`（`0xRRGGBB` u32）から `COLORREF` (BGR) へ変換したもの。
+    /// `ClientState` に保持し、各描画関数から参照する。
+    struct WinTheme {
+        bg: COLORREF,
+        fg: COLORREF,
+        cursor: COLORREF,
+        selection_bg: COLORREF,
+        status_bar_bg: COLORREF,
+    }
+
+    impl WinTheme {
+        fn from_theme(theme: &crate::window::Theme) -> Self {
+            WinTheme {
+                bg: theme.bg.map(rgb_hex).unwrap_or(COLOR_BG),
+                fg: theme.fg.map(rgb_hex).unwrap_or(COLOR_FG),
+                cursor: theme.cursor.map(rgb_hex).unwrap_or(COLOR_CURSOR),
+                selection_bg: theme
+                    .selection_bg
+                    .map(rgb_hex)
+                    .unwrap_or(COLORREF(0x00_44_60_A0)),
+                status_bar_bg: theme
+                    .status_bar_bg
+                    .map(rgb_hex)
+                    .unwrap_or(COLORREF(0x00_25_18_18)),
+            }
+        }
+    }
 
     // ── モード定義 ───────────────────────────────────────────────────────────
 
@@ -173,6 +233,8 @@ mod win32 {
         pub float_tx: mpsc::Sender<()>,
         /// レイアウト切り替え要求チャネル（選択したレイアウト名を app.rs へ送る）
         pub layout_tx: mpsc::Sender<String>,
+        /// 解決済みテーマ色（win32 内部専用）
+        theme: WinTheme,
     }
 
     impl ClientState {
@@ -188,6 +250,7 @@ mod win32 {
             native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
             float_tx: mpsc::Sender<()>,
             layout_tx: mpsc::Sender<String>,
+            theme: WinTheme,
         ) -> Self {
             Self {
                 panes,
@@ -212,6 +275,7 @@ mod win32 {
                 normal_dragging: std::cell::Cell::new(false),
                 float_tx,
                 layout_tx,
+                theme,
             }
         }
 
@@ -1255,7 +1319,7 @@ mod win32 {
         let old_bmp = SelectObject(mem_dc, mem_bmp.into());
 
         // 背景塗りつぶし
-        let bg_brush = CreateSolidBrush(COLOR_BG);
+        let bg_brush = CreateSolidBrush(state.theme.bg);
         FillRect(mem_dc, &rect, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
@@ -1356,7 +1420,7 @@ mod win32 {
 
                         match &cell.content {
                             CellContent::Grapheme { text, width } => {
-                                let (raw_fg, raw_bg) = cell_colors(cell, &ime_state);
+                                let (raw_fg, raw_bg) = cell_colors(cell, &ime_state, &state.theme);
                                 // 選択中は前景・背景を反転して文字を可視状態に保つ
                                 let (fg, bg) = if is_sel {
                                     (raw_bg, raw_fg)
@@ -1422,9 +1486,9 @@ mod win32 {
                             CellContent::Blank => {
                                 // 選択中はセル背景を選択色で塗りつぶす
                                 let blank_bg = if is_sel {
-                                    COLORREF(0x00_44_60_A0)
+                                    state.theme.selection_bg
                                 } else {
-                                    COLOR_BG
+                                    state.theme.bg
                                 };
                                 SetBkColor(mem_dc, blank_bg);
                                 let _ = ExtTextOutW(
@@ -1452,7 +1516,7 @@ mod win32 {
                     for seg in &ime_state.preedit {
                         let seg_utf16: Vec<u16> = seg.text.encode_utf16().collect();
                         let seg_width = state.cell_width * seg.text.chars().count() as i32;
-                        let (fg, bg) = preedit_segment_colors(&seg.attr);
+                        let (fg, bg) = preedit_segment_colors(&seg.attr, &state.theme);
                         SetTextColor(mem_dc, fg);
                         SetBkColor(mem_dc, bg);
                         let seg_rect = RECT {
@@ -1477,6 +1541,7 @@ mod win32 {
                             px,
                             py + state.cell_height - 2,
                             seg_width,
+                            state.theme.fg,
                         );
                         px += seg_width;
                     }
@@ -1492,7 +1557,7 @@ mod win32 {
                             let cx = cc as i32 * state.cell_width + off_x;
                             let cy = cr as i32 * state.cell_height + off_y;
                             // ブロックカーソル（アウトライン）
-                            let cur_brush = CreateSolidBrush(COLOR_CURSOR);
+                            let cur_brush = CreateSolidBrush(state.theme.cursor);
                             let cur_rect = RECT {
                                 left: cx,
                                 top: cy,
@@ -1510,7 +1575,14 @@ mod win32 {
                     let cur = grid.cursor();
                     let cx = cur.col as i32 * state.cell_width + off_x;
                     let cy = cur.row as i32 * state.cell_height + off_y;
-                    fill_rect(mem_dc, COLOR_CURSOR, cx, cy, cx + 2, cy + state.cell_height);
+                    fill_rect(
+                        mem_dc,
+                        state.theme.cursor,
+                        cx,
+                        cy,
+                        cx + 2,
+                        cy + state.cell_height,
+                    );
                 }
             }
         }
@@ -1560,7 +1632,7 @@ mod win32 {
                             };
                             match &cell.content {
                                 CellContent::Grapheme { text, width } => {
-                                    let (fg, bg) = cell_colors(cell, &ime_state);
+                                    let (fg, bg) = cell_colors(cell, &ime_state, &state.theme);
                                     let width_px = state.cell_width * (*width as i32);
                                     let wide_rect = RECT {
                                         right: x + width_px,
@@ -1614,7 +1686,7 @@ mod win32 {
                                 }
                                 CellContent::Continuation => {}
                                 CellContent::Blank => {
-                                    SetBkColor(mem_dc, COLOR_BG);
+                                    SetBkColor(mem_dc, state.theme.bg);
                                     let _ = ExtTextOutW(
                                         mem_dc,
                                         x,
@@ -1697,8 +1769,8 @@ mod win32 {
     /// - 左: `[NORMAL]` / `[PANE]` + キーバインドヒント
     /// - 右: `pane X/N`（アクティブペイン番号 / 総ペイン数）
     unsafe fn paint_status_bar(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
-        // Catppuccin Mocha: mantle = #181825, subtext1 = #bac2de, blue = #89b4fa, peach = #fab387, green = #a6e3a1
-        const COLOR_STATUS_BG: COLORREF = COLORREF(0x00_25_18_18); // mantle
+        // Catppuccin Mocha: subtext1 = #bac2de, blue = #89b4fa, peach = #fab387, green = #a6e3a1
+        let color_status_bg = state.theme.status_bar_bg;
         const COLOR_STATUS_FG: COLORREF = COLORREF(0x00_DE_C2_BA); // subtext1
         const COLOR_MODE_NORMAL: COLORREF = COLORREF(0x00_FA_B4_89); // blue (#89b4fa → BGR)
         const COLOR_MODE_PANE: COLORREF = COLORREF(0x00_87_AB_FA); // peach (#fab387 → BGR)
@@ -1714,11 +1786,11 @@ mod win32 {
             right: win_w,
             bottom: win_h,
         };
-        let bg_brush = CreateSolidBrush(COLOR_STATUS_BG);
+        let bg_brush = CreateSolidBrush(color_status_bg);
         FillRect(hdc, &bar_rect, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
-        SetBkColor(hdc, COLOR_STATUS_BG);
+        SetBkColor(hdc, color_status_bg);
         SetBkMode(hdc, OPAQUE);
 
         let mode = state.mode.get();
@@ -1740,7 +1812,7 @@ mod win32 {
         };
 
         // モード名（色付き背景）
-        SetTextColor(hdc, COLOR_STATUS_BG);
+        SetTextColor(hdc, color_status_bg);
         SetBkColor(hdc, mode_color);
         let label_wide: Vec<u16> = mode_label.encode_utf16().collect();
         let _ = ExtTextOutW(
@@ -1761,7 +1833,7 @@ mod win32 {
 
         // ヒントテキスト
         SetTextColor(hdc, COLOR_STATUS_FG);
-        SetBkColor(hdc, COLOR_STATUS_BG);
+        SetBkColor(hdc, color_status_bg);
         let hint_wide: Vec<u16> = hint.encode_utf16().collect();
         let _ = ExtTextOutW(
             hdc,
@@ -1785,7 +1857,7 @@ mod win32 {
         let right_text = format!(" pane {}/{} ", active_idx, total);
         let right_wide: Vec<u16> = right_text.encode_utf16().collect();
         let mut right_size = SIZE::default();
-        SetBkColor(hdc, COLOR_STATUS_BG);
+        SetBkColor(hdc, color_status_bg);
         let _ = GetTextExtentPoint32W(hdc, &right_wide, &mut right_size);
         let right_x = (win_w - right_size.cx).max(hint_x + label_size.cx);
         SetTextColor(hdc, COLOR_STATUS_FG);
@@ -1885,7 +1957,7 @@ mod win32 {
                 right: toast_rect.right - TOAST_PADDING,
                 bottom: toast_rect.bottom - 8,
             };
-            SetTextColor(hdc, COLOR_FG);
+            SetTextColor(hdc, state.theme.fg);
             DrawTextW(
                 hdc,
                 &mut msg_w,
@@ -2931,7 +3003,14 @@ mod win32 {
     /// - `TargetConverted`: 太実線（現在の変換候補）
     /// - `Converted`: 実線
     /// - その他: 点線
-    unsafe fn draw_preedit_underline(hdc: HDC, attr: &PreeditAttr, x: i32, y: i32, width: i32) {
+    unsafe fn draw_preedit_underline(
+        hdc: HDC,
+        attr: &PreeditAttr,
+        x: i32,
+        y: i32,
+        width: i32,
+        fg: COLORREF,
+    ) {
         let (pen_style, thickness) = match attr {
             PreeditAttr::TargetConverted => (PS_SOLID, 2u32),
             PreeditAttr::Converted => (PS_SOLID, 1),
@@ -2939,7 +3018,7 @@ mod win32 {
             PreeditAttr::Input => (PS_DOT, 1),
         };
 
-        let pen = CreatePen(pen_style, thickness as i32, COLOR_FG);
+        let pen = CreatePen(pen_style, thickness as i32, fg);
         let old_pen = SelectObject(hdc, pen.into());
         let _ = MoveToEx(hdc, x, y, None);
         let _ = LineTo(hdc, x + width, y);
@@ -2961,17 +3040,17 @@ mod win32 {
         }
     }
 
-    fn cell_colors(cell: &Cell, _ime: &ImeState) -> (COLORREF, COLORREF) {
+    fn cell_colors(cell: &Cell, _ime: &ImeState, theme: &WinTheme) -> (COLORREF, COLORREF) {
         let fg = cell
             .style
             .fg
             .map(|c| rgb(c.r, c.g, c.b))
-            .unwrap_or(COLOR_FG);
+            .unwrap_or(theme.fg);
         let bg = cell
             .style
             .bg
             .map(|c| rgb(c.r, c.g, c.b))
-            .unwrap_or(COLOR_BG);
+            .unwrap_or(theme.bg);
         if cell.style.reverse {
             (bg, fg)
         } else {
@@ -2979,10 +3058,10 @@ mod win32 {
         }
     }
 
-    fn preedit_segment_colors(attr: &PreeditAttr) -> (COLORREF, COLORREF) {
+    fn preedit_segment_colors(attr: &PreeditAttr, theme: &WinTheme) -> (COLORREF, COLORREF) {
         match attr {
-            PreeditAttr::TargetConverted => (COLOR_BG, COLOR_FG), // 反転
-            _ => (COLOR_FG, COLOR_PREEDIT_BG),
+            PreeditAttr::TargetConverted => (theme.bg, theme.fg), // 反転
+            _ => (theme.fg, COLOR_PREEDIT_BG),
         }
     }
 
@@ -3181,15 +3260,26 @@ mod win32 {
         native_notif_queue: Arc<Mutex<VecDeque<NativeToastMsg>>>,
         float_tx: mpsc::Sender<()>,
         layout_tx: mpsc::Sender<String>,
+        theme: crate::window::Theme,
     ) -> anyhow::Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
 
-            // ── フォント作成（インストール済み候補から自動選択）─────────
-            let hfont = create_best_font(FONT_HEIGHT);
+            // ── フォント作成（テーマ設定または候補リストから自動選択）──
+            let font_height = theme
+                .font_size
+                .map(|pt| -((pt as i32) * 96 / 72))
+                .unwrap_or(FONT_HEIGHT);
+            let hfont = if let Some(ref family) = theme.font_family {
+                create_font_with_family(family, font_height)
+            } else {
+                create_best_font(font_height)
+            };
 
             // セルサイズをテキストメトリクスから取得
             let (cell_width, cell_height) = measure_cell_size(hfont)?;
+
+            let win_theme = WinTheme::from_theme(&theme);
 
             // ── ClientState をヒープに確保 ──────────────────────────────
             let state = Box::new(ClientState::new(
@@ -3203,6 +3293,7 @@ mod win32 {
                 native_notif_queue,
                 float_tx,
                 layout_tx,
+                win_theme,
             ));
             let state_ptr = Box::into_raw(state);
 
@@ -3314,6 +3405,50 @@ mod win32 {
             ..Default::default()
         };
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
+
+    /// 指定フォントファミリーで作成を試み、失敗した場合は候補リストにフォールバックする
+    unsafe fn create_font_with_family(family: &str, height: i32) -> HFONT {
+        let wide: Vec<u16> = format!("{}\0", family).encode_utf16().collect();
+        let hfont = CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            (FIXED_PITCH.0 | FF_MODERN.0) as u32,
+            PCWSTR(wide.as_ptr()),
+        );
+        let hdc = GetDC(None);
+        let old = SelectObject(hdc, hfont.into());
+        let mut buf = [0u16; 64];
+        let len = GetTextFaceW(hdc, Some(&mut buf)) as usize;
+        SelectObject(hdc, old);
+        ReleaseDC(None, hdc);
+        let actual = String::from_utf16_lossy(&buf[..len])
+            .trim_end_matches('\0')
+            .to_string();
+        let norm_actual = actual.replace(' ', "").to_lowercase();
+        let norm_want = family.replace(' ', "").to_lowercase();
+        if actual.eq_ignore_ascii_case(family) || norm_actual == norm_want {
+            tracing::info!(family, "font: user-specified font loaded");
+            hfont
+        } else {
+            tracing::warn!(
+                family,
+                actual,
+                "font: user-specified font not found, falling back"
+            );
+            let _ = DeleteObject(hfont.into());
+            create_best_font(height)
+        }
     }
 
     /// インストール済みの候補フォントから最適なものを選んで作成する
@@ -3815,6 +3950,7 @@ pub fn run_window(
     >,
     _float_tx: tokio::sync::mpsc::Sender<()>,
     _layout_tx: tokio::sync::mpsc::Sender<String>,
+    _theme: Theme,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }

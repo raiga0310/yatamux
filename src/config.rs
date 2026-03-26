@@ -12,6 +12,22 @@
 //!
 //! # ペイン終了時に実行するコマンド
 //! on_pane_closed = ""
+//!
+//! [appearance]
+//! # フォントファミリー（省略時: インストール済み候補から自動選択）
+//! font_family = "HackGen Console NF"
+//! # フォントサイズ（pt、省略時: 15pt 相当）
+//! font_size = 14
+//! # 背景色（省略時: Catppuccin Mocha base #1e1e2e）
+//! background = "#1e1e2e"
+//! # 前景色（省略時: Catppuccin Mocha text #cdd6f4）
+//! foreground = "#cdd6f4"
+//! # カーソル色（省略時: Catppuccin Mocha pink #f5c2e7）
+//! cursor = "#f5c2e7"
+//! # テキスト選択背景色
+//! selection_bg = "#585b70"
+//! # ステータスバー背景色（省略時: Catppuccin Mocha mantle #181825）
+//! status_bar_bg = "#181825"
 //! ```
 
 use serde::Deserialize;
@@ -22,6 +38,42 @@ pub struct AppConfig {
     /// イベントフック設定
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// 外観設定
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
+}
+
+/// 外観設定（フォント・カラーテーマ）
+#[derive(Debug, Default, Deserialize)]
+pub struct AppearanceConfig {
+    /// フォントファミリー（省略時: 候補リストから自動選択）
+    pub font_family: Option<String>,
+    /// フォントサイズ（pt、省略時: 15pt 相当）
+    pub font_size: Option<u32>,
+    /// 背景色（`"#rrggbb"` 形式）
+    pub background: Option<String>,
+    /// 前景色（`"#rrggbb"` 形式）
+    pub foreground: Option<String>,
+    /// カーソル色（`"#rrggbb"` 形式）
+    pub cursor: Option<String>,
+    /// テキスト選択背景色（`"#rrggbb"` 形式）
+    pub selection_bg: Option<String>,
+    /// ステータスバー背景色（`"#rrggbb"` 形式）
+    pub status_bar_bg: Option<String>,
+}
+
+/// `"#rrggbb"` 形式の文字列を `(r, g, b)` に変換する。
+/// `#` プレフィックスは省略可能。パース失敗時は `None` を返す。
+pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim_start_matches('#');
+    if s.len() == 6 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+        Some((r, g, b))
+    } else {
+        None
+    }
 }
 
 /// イベントフック設定
@@ -137,5 +189,57 @@ mod tests {
     #[test]
     fn test_is_enabled_nonempty_is_true() {
         assert!(HooksConfig::is_enabled(&Some("echo hi".to_string())));
+    }
+
+    // TC-C21-01: AppearanceConfig を含む config.toml を読み込める
+    #[test]
+    fn test_load_appearance_config() {
+        let dir = std::env::temp_dir().join("yatamux_appearance_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[appearance]\nfont_family = \"HackGen Console NF\"\nfont_size = 14\nbackground = \"#1e1e2e\"\n",
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            config.appearance.font_family.as_deref(),
+            Some("HackGen Console NF")
+        );
+        assert_eq!(config.appearance.font_size, Some(14));
+        assert_eq!(config.appearance.background.as_deref(), Some("#1e1e2e"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // TC-C21-02: parse_hex_color が # 付きで正しくパースする
+    #[test]
+    fn test_parse_hex_color_with_hash() {
+        assert_eq!(parse_hex_color("#1e1e2e"), Some((0x1e, 0x1e, 0x2e)));
+        assert_eq!(parse_hex_color("#cdd6f4"), Some((0xcd, 0xd6, 0xf4)));
+    }
+
+    // TC-C21-03: parse_hex_color が # なしでもパースする
+    #[test]
+    fn test_parse_hex_color_without_hash() {
+        assert_eq!(parse_hex_color("f5c2e7"), Some((0xf5, 0xc2, 0xe7)));
+    }
+
+    // TC-C21-04: parse_hex_color が不正な文字列で None を返す
+    #[test]
+    fn test_parse_hex_color_invalid() {
+        assert_eq!(parse_hex_color("gggggg"), None);
+        assert_eq!(parse_hex_color("#fff"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+
+    // TC-C21-05: [appearance] がない場合はデフォルト値を返す
+    #[test]
+    fn test_appearance_defaults_when_absent() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(config.appearance.font_family.is_none());
+        assert!(config.appearance.background.is_none());
     }
 }

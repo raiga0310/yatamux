@@ -62,4 +62,4 @@ pub use layout::{
 };
 pub use notification::{FocusAwareBackend, NotificationBackend};
 pub use session::{LayoutNodeDef, LayoutSnapshot};
-pub use window::run_window;
+pub use window::{run_window, Theme};
