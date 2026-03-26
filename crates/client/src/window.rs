@@ -659,6 +659,26 @@ mod win32 {
                             return LRESULT(0);
                         }
 
+                        // `+`/`-` はペインモードを維持して縦方向の比率を調整（C-18）
+                        // + = Shift+VK_OEM_PLUS(0xBB), - = VK_OEM_MINUS(0xBD)
+                        const VK_OEM_PLUS: u16 = 0xBB;
+                        const VK_OEM_MINUS: u16 = 0xBD;
+                        let is_plus = shift && vk == VK_OEM_PLUS;
+                        let is_minus = !shift && vk == VK_OEM_MINUS;
+                        if is_plus || is_minus {
+                            let active = state.panes.lock().unwrap().active;
+                            let delta = if is_plus { 0.05_f32 } else { -0.05_f32 };
+                            state
+                                .panes
+                                .lock()
+                                .unwrap()
+                                .layout
+                                .adjust_ratio(active, delta);
+                            state.skip_char.set(true);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                            return LRESULT(0);
+                        }
+
                         state.skip_char.set(true); // WM_CHAR を抑制
                         match vk {
                             k if k == b'V' as u16 => {
@@ -1631,7 +1651,7 @@ mod win32 {
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
-                " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  V: コピー  </>: リサイズ  L: レイアウト  q: 戻る",
+                " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  V: コピー  </>: 横比  +/-: 縦比  L: レイアウト  q: 戻る",
             ),
             ClientMode::Copy => (
                 " COPY ",
