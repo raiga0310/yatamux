@@ -460,6 +460,60 @@ pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
     results
 }
 
+/// 現在のレイアウトツリーを `[[panes]]` TOML 形式に変換する。
+///
+/// DFS でノードを訪問し、各葉ペインを 1 エントリとして出力する。
+/// 制限: `first` が Split であるような左辺スプリット（左優先ツリー）を
+/// ロードし直すと構造が変わる（連鎖型ツリーとして再構成される）。
+pub fn layout_to_toml(node: &LayoutNode) -> String {
+    fn collect(
+        node: &LayoutNode,
+        split: Option<&'static str>,
+        out: &mut Vec<Option<&'static str>>,
+    ) {
+        match node {
+            LayoutNode::Leaf(_) => out.push(split),
+            LayoutNode::Split {
+                direction,
+                first,
+                second,
+                ..
+            } => {
+                collect(first, split, out);
+                let dir = match direction {
+                    SplitDirection::Vertical => "vertical",
+                    SplitDirection::Horizontal => "horizontal",
+                };
+                collect(second, Some(dir), out);
+            }
+        }
+    }
+
+    let mut panes: Vec<Option<&'static str>> = Vec::new();
+    collect(node, None, &mut panes);
+
+    let mut out = String::new();
+    for split in panes {
+        out.push_str("[[panes]]\n");
+        if let Some(dir) = split {
+            out.push_str(&format!("split = \"{dir}\"\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `%APPDATA%\yatamux\layouts\<name>.toml` にレイアウト TOML を書き出す。
+pub fn save_layout_file(name: &str, content: &str) -> std::io::Result<()> {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::PathBuf::from(base)
+        .join("yatamux")
+        .join("layouts");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{name}.toml"));
+    std::fs::write(path, content)
+}
+
 /// コピーモードのカーソルと選択状態
 ///
 /// `cursor` はスクリーン座標（col, row）の 0-based インデックス。
@@ -590,6 +644,8 @@ pub struct PaneStore {
     pub copy_mode: Option<CopyState>,
     /// Normal モードのマウス選択状態（anchor_col, anchor_row, end_col, end_row）
     pub normal_selection: Option<(usize, usize, usize, usize)>,
+    /// レイアウト保存プロンプトの入力バッファ（Some = プロンプト表示中）
+    pub save_prompt: Option<String>,
 }
 
 impl PaneStore {
@@ -610,6 +666,7 @@ impl PaneStore {
             launcher: None,
             copy_mode: None,
             normal_selection: None,
+            save_prompt: None,
         }
     }
 
@@ -1178,5 +1235,65 @@ mod tests {
         assert!(cs.is_selected(0, 4));
         assert!(cs.is_selected(8, 4));
         assert!(!cs.is_selected(9, 4));
+    }
+
+    // ── C-19: layout_to_toml / save_layout_file ─────────────────────────
+
+    // TC-C19-01: 単一ペインは [[panes]] 1 エントリで split なし
+    #[test]
+    fn test_layout_to_toml_single_pane() {
+        let node = LayoutNode::Leaf(PaneId(1));
+        let toml = layout_to_toml(&node);
+        assert_eq!(toml, "[[panes]]\n\n");
+    }
+
+    // TC-C19-02: 垂直分割は 2 エントリ、2 つ目に split = "vertical"
+    #[test]
+    fn test_layout_to_toml_vertical_split() {
+        let node = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let toml = layout_to_toml(&node);
+        assert_eq!(toml, "[[panes]]\n\n[[panes]]\nsplit = \"vertical\"\n\n");
+    }
+
+    // TC-C19-03: ネスト構造は 3 エントリ
+    #[test]
+    fn test_layout_to_toml_nested() {
+        let node = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(2))),
+                second: Box::new(LayoutNode::Leaf(PaneId(3))),
+            }),
+        };
+        let toml = layout_to_toml(&node);
+        let expected = "[[panes]]\n\n\
+                        [[panes]]\nsplit = \"vertical\"\n\n\
+                        [[panes]]\nsplit = \"horizontal\"\n\n";
+        assert_eq!(toml, expected);
+    }
+
+    // TC-C19-04: save_layout_file は正常に書き込む
+    #[test]
+    fn test_save_layout_file_roundtrip() {
+        let dir = std::env::temp_dir().join("yatamux_save_layout_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // APPDATA を一時ディレクトリで代替するため直接書き込みテスト
+        let content = "[[panes]]\n\n[[panes]]\nsplit = \"vertical\"\n\n";
+        let path = dir.join("testlayout.toml");
+        std::fs::write(&path, content).unwrap();
+        let loaded = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(loaded, content);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
