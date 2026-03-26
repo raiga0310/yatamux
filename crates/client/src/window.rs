@@ -547,15 +547,19 @@ mod win32 {
                             } else {
                                 state.panes.lock().unwrap().save_prompt = None;
                             }
+                            // Enter/Esc/Backspace のみ WM_CHAR を抑制する
+                            state.skip_char.set(true);
                         } else if vk == VK_ESCAPE.0 {
                             state.panes.lock().unwrap().save_prompt = None;
+                            state.skip_char.set(true);
                         } else if vk == VK_BACK.0 {
                             let mut store = state.panes.lock().unwrap();
                             if let Some(s) = &mut store.save_prompt {
                                 s.pop();
                             }
+                            state.skip_char.set(true);
                         }
-                        state.skip_char.set(true);
+                        // 印字可能キーは skip_char を立てず WM_CHAR に委譲
                         let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
@@ -2141,11 +2145,13 @@ mod win32 {
     }
 
     /// `PaneStore::save_prompt` が `Some` のときのみ描画する。
-    /// テキスト入力フィールドと Enter/Esc ヒントを表示する。
+    /// 左ペイン: ファイル名入力フィールド。右ペイン: 現在のレイアウトプレビュー。
     unsafe fn paint_save_prompt(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
-        let prompt = {
+        let (prompt, layout_node) = {
             let store = state.panes.lock().unwrap();
-            store.save_prompt.clone()
+            let p = store.save_prompt.clone();
+            let n = store.layout.clone();
+            (p, n)
         };
         let Some(prompt) = prompt else {
             return;
@@ -2159,30 +2165,46 @@ mod win32 {
         const COLOR_INPUT_BG: COLORREF = COLORREF(0x00_55_44_44); // surface1
         const COLOR_HINT_FG: COLORREF = COLORREF(0x00_A0_9D_8C); // subtext0
         const COLOR_CURSOR: COLORREF = COLORREF(0x00_87_AB_FA); // peach
+        const COLOR_PREVIEW_PANE: COLORREF = COLORREF(0x00_5E_4D_4C);
+        const COLOR_PREVIEW_BORDER: COLORREF = COLORREF(0x00_87_AB_FA);
+        const COLOR_PREVIEW_SEP: COLORREF = COLORREF(0x00_C9_BA_B8);
+        const COLOR_PREVIEW_TEXT: COLORREF = COLORREF(0x00_F4_D6_CD);
 
         let cw = state.cell_width;
         let ch = state.cell_height;
 
-        // ポップアップサイズ
-        let popup_w = (cw * 50).min(win_w - cw * 4);
+        // 左パネル（入力エリア）の幅
+        let left_w = (cw * 30).max(cw * 22).min(win_w / 2);
+        // 右パネル（プレビューエリア）の幅
+        let preview_margin = cw;
+        let preview_w = (win_w / 2).max(cw * 30);
+
+        // ポップアップ全体サイズ
+        let content_h = ch * 10; // プレビューの高さを確保
+        let popup_w =
+            (left_w + 1 + preview_margin + preview_w + preview_margin).min(win_w - cw * 2);
         let popup_h = ch + ch / 2  // タイトル
             + 1                    // セパレーター
             + ch / 4               // 余白
-            + ch                   // 入力フィールド
+            + content_h            // コンテンツ（入力+プレビュー）
             + ch / 4               // 余白
-            + ch; // ヒント
+            + ch; // ヒント行
+        let popup_h = popup_h.min(win_h - ch * 2);
         let popup_x = (win_w - popup_w) / 2;
         let popup_y = (win_h - popup_h) / 2;
 
         // オーバーレイ
-        let overlay_rect = RECT {
-            left: 0,
-            top: 0,
-            right: win_w,
-            bottom: win_h,
-        };
         let overlay_brush = CreateSolidBrush(COLOR_OVERLAY);
-        FillRect(hdc, &overlay_rect, overlay_brush);
+        FillRect(
+            hdc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: win_w,
+                bottom: win_h,
+            },
+            overlay_brush,
+        );
         let _ = DeleteObject(overlay_brush.into());
 
         // ポップアップ背景
@@ -2214,7 +2236,7 @@ mod win32 {
             None,
         );
 
-        // セパレーター
+        // 水平セパレーター（タイトル下）
         let sep_y = popup_y + ch + ch / 4;
         let sep_pen = CreatePen(PS_SOLID, 1, COLORREF(0x00_5E_4D_4C));
         let old_pen = SelectObject(hdc, sep_pen.into());
@@ -2223,19 +2245,36 @@ mod win32 {
         SelectObject(hdc, old_pen);
         let _ = DeleteObject(sep_pen.into());
 
+        // ── 左パネル: 名前入力 ──────────────────────────────────────
+        let content_top = sep_y + ch / 4;
+        let input_label = "名前:";
+        let label_w: Vec<u16> = input_label.encode_utf16().collect();
+        SetTextColor(hdc, COLOR_HINT_FG);
+        SetBkColor(hdc, COLOR_POPUP_BG);
+        let _ = ExtTextOutW(
+            hdc,
+            popup_x + cw / 2,
+            content_top,
+            ETO_OPAQUE,
+            None,
+            PCWSTR(label_w.as_ptr()),
+            label_w.len() as u32,
+            None,
+        );
+
         // 入力フィールド背景
-        let input_y = sep_y + ch / 4;
+        let input_y = content_top + ch + ch / 4;
         let input_rect = RECT {
             left: popup_x + cw / 2,
             top: input_y,
-            right: popup_x + popup_w - cw / 2,
+            right: popup_x + left_w - cw / 2,
             bottom: input_y + ch,
         };
         let input_brush = CreateSolidBrush(COLOR_INPUT_BG);
         FillRect(hdc, &input_rect, input_brush);
         let _ = DeleteObject(input_brush.into());
 
-        // 入力テキスト
+        // 入力テキスト（先頭にスペース）
         SetBkColor(hdc, COLOR_INPUT_BG);
         SetTextColor(hdc, COLOR_TEXT);
         let display = format!(" {prompt}");
@@ -2254,16 +2293,70 @@ mod win32 {
         // カーソル（テキスト末尾にブロック）
         let mut text_size = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &display_w, &mut text_size);
-        let cursor_x = (input_rect.left + text_size.cx).min(input_rect.right - cw / 2);
+        let cursor_x = (input_rect.left + text_size.cx).min(input_rect.right - cw / 4);
         let cursor_rect = RECT {
             left: cursor_x,
             top: input_y,
-            right: cursor_x + cw / 2,
+            right: (cursor_x + cw / 2).min(input_rect.right),
             bottom: input_y + ch,
         };
         let cursor_brush = CreateSolidBrush(COLOR_CURSOR);
         FillRect(hdc, &cursor_rect, cursor_brush);
         let _ = DeleteObject(cursor_brush.into());
+
+        // 左右パネル区切り線
+        let vsep_x = popup_x + left_w;
+        let vsep_pen = CreatePen(PS_SOLID, 1, COLORREF(0x00_5E_4D_4C));
+        let old_pen2 = SelectObject(hdc, vsep_pen.into());
+        let _ = MoveToEx(hdc, vsep_x, sep_y + 1, None);
+        let _ = LineTo(hdc, vsep_x, popup_y + popup_h - ch - 1);
+        SelectObject(hdc, old_pen2);
+        let _ = DeleteObject(vsep_pen.into());
+
+        // ── 右パネル: 現在のレイアウトプレビュー ────────────────────
+        let preview_top = sep_y + ch / 4;
+        let preview_bottom = popup_y + popup_h - ch - ch / 4;
+        let preview_left = vsep_x + preview_margin;
+        let preview_right = (popup_x + popup_w - preview_margin).max(preview_left + cw);
+        if preview_right > preview_left && preview_bottom > preview_top {
+            let preview_label = "現在のレイアウト";
+            let plabel_w: Vec<u16> = preview_label.encode_utf16().collect();
+            SetBkColor(hdc, COLOR_POPUP_BG);
+            SetTextColor(hdc, COLOR_HINT_FG);
+            let _ = ExtTextOutW(
+                hdc,
+                preview_left,
+                preview_top,
+                ETO_OPAQUE,
+                None,
+                PCWSTR(plabel_w.as_ptr()),
+                plabel_w.len() as u32,
+                None,
+            );
+
+            let diagram_top = preview_top + ch + ch / 4;
+            if preview_bottom > diagram_top + 4 {
+                let preview_rect = RECT {
+                    left: preview_left,
+                    top: diagram_top,
+                    right: preview_right,
+                    bottom: preview_bottom,
+                };
+                SetBkMode(hdc, TRANSPARENT);
+                draw_preview_node(
+                    hdc,
+                    &layout_node,
+                    &preview_rect,
+                    &[],
+                    COLOR_PREVIEW_PANE,
+                    COLOR_PREVIEW_BORDER,
+                    COLOR_PREVIEW_SEP,
+                    COLOR_PREVIEW_TEXT,
+                    cw,
+                    ch,
+                );
+            }
+        }
 
         // ヒント行
         let hint_y = popup_y + popup_h - ch;
