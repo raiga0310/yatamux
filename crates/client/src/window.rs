@@ -68,8 +68,9 @@ mod win32 {
 
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
     use crate::layout::{
-        layout_to_toml, list_available_layouts, save_layout_file, CopyState, Direction,
-        LauncherState, LayoutPreview, PaneRect, PaneStore, Toast,
+        layout_to_toml, list_available_layouts, list_available_themes, load_theme_from_file,
+        save_layout_file, CopyState, Direction, LauncherState, LayoutPreview, PaneRect, PaneStore,
+        ThemeLauncherState, Toast,
     };
     use crate::notification::NativeToastMsg;
 
@@ -151,7 +152,8 @@ mod win32 {
     /// Win32 用に解決済みのテーマ色
     ///
     /// `Theme`（`0xRRGGBB` u32）から `COLORREF` (BGR) へ変換したもの。
-    /// `ClientState` に保持し、各描画関数から参照する。
+    /// `ClientState.theme`（`Cell<WinTheme>`）に保持し、各描画関数から参照する。
+    #[derive(Copy, Clone)]
     struct WinTheme {
         bg: COLORREF,
         fg: COLORREF,
@@ -233,8 +235,8 @@ mod win32 {
         pub float_tx: mpsc::Sender<()>,
         /// レイアウト切り替え要求チャネル（選択したレイアウト名を app.rs へ送る）
         pub layout_tx: mpsc::Sender<String>,
-        /// 解決済みテーマ色（win32 内部専用）
-        theme: WinTheme,
+        /// 解決済みテーマ色（Cell で内部可変 — ランタイムテーマ切り替えに使用）
+        theme: std::cell::Cell<WinTheme>,
     }
 
     impl ClientState {
@@ -275,7 +277,7 @@ mod win32 {
                 normal_dragging: std::cell::Cell::new(false),
                 float_tx,
                 layout_tx,
-                theme,
+                theme: std::cell::Cell::new(theme),
             }
         }
 
@@ -666,6 +668,45 @@ mod win32 {
                         return LRESULT(0);
                     }
 
+                    // ── テーマランチャーキー処理 ──────────────────────────
+                    let theme_launcher_open = state.panes.lock().unwrap().theme_launcher.is_some();
+                    if theme_launcher_open {
+                        let vk = wparam.0 as u16;
+                        if vk == VK_RETURN.0 {
+                            let name = {
+                                let mut store = state.panes.lock().unwrap();
+                                let name = store
+                                    .theme_launcher
+                                    .as_ref()
+                                    .filter(|t| !t.entries.is_empty())
+                                    .and_then(|t| t.selected_name().map(str::to_owned));
+                                store.theme_launcher = None;
+                                name
+                            };
+                            if let Some(name) = name {
+                                if let Some(theme) = load_theme_from_file(&name) {
+                                    let win_theme = WinTheme::from_theme(&theme);
+                                    state.theme.set(win_theme);
+                                }
+                            }
+                        } else if vk == VK_ESCAPE.0 || vk == b'Q' as u16 {
+                            state.panes.lock().unwrap().theme_launcher = None;
+                        } else {
+                            let mut store = state.panes.lock().unwrap();
+                            if let Some(tl) = &mut store.theme_launcher {
+                                if vk == VK_UP.0 {
+                                    tl.selected = tl.selected.saturating_sub(1);
+                                } else if vk == VK_DOWN.0 {
+                                    let max = tl.entries.len().saturating_sub(1);
+                                    tl.selected = (tl.selected + 1).min(max);
+                                }
+                            }
+                        }
+                        state.skip_char.set(true);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+
                     // ── Copy モードのキー処理 ────────────────────────────
                     if state.mode.get() == ClientMode::Copy {
                         let vk = wparam.0 as u16;
@@ -870,6 +911,16 @@ mod win32 {
                     if ctrl && !shift && wparam.0 == b'B' as usize {
                         state.mode.set(ClientMode::Pane);
                         state.skip_char.set(true); // \x02 を PTY に送らない
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+
+                    // ── Ctrl+P: テーマランチャーを開く ──────────────────
+                    if ctrl && !shift && wparam.0 == b'P' as usize {
+                        let entries = list_available_themes();
+                        state.panes.lock().unwrap().theme_launcher =
+                            Some(ThemeLauncherState::new(entries));
+                        state.skip_char.set(true);
                         let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
                     }
@@ -1318,8 +1369,11 @@ mod win32 {
         let mem_bmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
         let old_bmp = SelectObject(mem_dc, mem_bmp.into());
 
+        // 現在のテーマ色を取得（paint 関数内で共通使用）
+        let theme = state.theme.get();
+
         // 背景塗りつぶし
-        let bg_brush = CreateSolidBrush(state.theme.bg);
+        let bg_brush = CreateSolidBrush(theme.bg);
         FillRect(mem_dc, &rect, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
@@ -1420,7 +1474,7 @@ mod win32 {
 
                         match &cell.content {
                             CellContent::Grapheme { text, width } => {
-                                let (raw_fg, raw_bg) = cell_colors(cell, &ime_state, &state.theme);
+                                let (raw_fg, raw_bg) = cell_colors(cell, &ime_state, &theme);
                                 // 選択中は前景・背景を反転して文字を可視状態に保つ
                                 let (fg, bg) = if is_sel {
                                     (raw_bg, raw_fg)
@@ -1485,11 +1539,7 @@ mod win32 {
                             }
                             CellContent::Blank => {
                                 // 選択中はセル背景を選択色で塗りつぶす
-                                let blank_bg = if is_sel {
-                                    state.theme.selection_bg
-                                } else {
-                                    state.theme.bg
-                                };
+                                let blank_bg = if is_sel { theme.selection_bg } else { theme.bg };
                                 SetBkColor(mem_dc, blank_bg);
                                 let _ = ExtTextOutW(
                                     mem_dc,
@@ -1516,7 +1566,7 @@ mod win32 {
                     for seg in &ime_state.preedit {
                         let seg_utf16: Vec<u16> = seg.text.encode_utf16().collect();
                         let seg_width = state.cell_width * seg.text.chars().count() as i32;
-                        let (fg, bg) = preedit_segment_colors(&seg.attr, &state.theme);
+                        let (fg, bg) = preedit_segment_colors(&seg.attr, &theme);
                         SetTextColor(mem_dc, fg);
                         SetBkColor(mem_dc, bg);
                         let seg_rect = RECT {
@@ -1541,7 +1591,7 @@ mod win32 {
                             px,
                             py + state.cell_height - 2,
                             seg_width,
-                            state.theme.fg,
+                            theme.fg,
                         );
                         px += seg_width;
                     }
@@ -1557,7 +1607,7 @@ mod win32 {
                             let cx = cc as i32 * state.cell_width + off_x;
                             let cy = cr as i32 * state.cell_height + off_y;
                             // ブロックカーソル（アウトライン）
-                            let cur_brush = CreateSolidBrush(state.theme.cursor);
+                            let cur_brush = CreateSolidBrush(theme.cursor);
                             let cur_rect = RECT {
                                 left: cx,
                                 top: cy,
@@ -1575,14 +1625,7 @@ mod win32 {
                     let cur = grid.cursor();
                     let cx = cur.col as i32 * state.cell_width + off_x;
                     let cy = cur.row as i32 * state.cell_height + off_y;
-                    fill_rect(
-                        mem_dc,
-                        state.theme.cursor,
-                        cx,
-                        cy,
-                        cx + 2,
-                        cy + state.cell_height,
-                    );
+                    fill_rect(mem_dc, theme.cursor, cx, cy, cx + 2, cy + state.cell_height);
                 }
             }
         }
@@ -1632,7 +1675,7 @@ mod win32 {
                             };
                             match &cell.content {
                                 CellContent::Grapheme { text, width } => {
-                                    let (fg, bg) = cell_colors(cell, &ime_state, &state.theme);
+                                    let (fg, bg) = cell_colors(cell, &ime_state, &theme);
                                     let width_px = state.cell_width * (*width as i32);
                                     let wide_rect = RECT {
                                         right: x + width_px,
@@ -1686,7 +1729,7 @@ mod win32 {
                                 }
                                 CellContent::Continuation => {}
                                 CellContent::Blank => {
-                                    SetBkColor(mem_dc, state.theme.bg);
+                                    SetBkColor(mem_dc, theme.bg);
                                     let _ = ExtTextOutW(
                                         mem_dc,
                                         x,
@@ -1734,6 +1777,9 @@ mod win32 {
         // ── レイアウトランチャー ────────────────────────────────────
         paint_launcher(mem_dc, rect.right, rect.bottom, state);
 
+        // ── テーマランチャー ────────────────────────────────────────
+        paint_theme_launcher(mem_dc, rect.right, rect.bottom, state);
+
         // ── レイアウト保存プロンプト ─────────────────────────────────
         paint_save_prompt(mem_dc, rect.right, rect.bottom, state);
 
@@ -1770,7 +1816,7 @@ mod win32 {
     /// - 右: `pane X/N`（アクティブペイン番号 / 総ペイン数）
     unsafe fn paint_status_bar(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
         // Catppuccin Mocha: subtext1 = #bac2de, blue = #89b4fa, peach = #fab387, green = #a6e3a1
-        let color_status_bg = state.theme.status_bar_bg;
+        let color_status_bg = state.theme.get().status_bar_bg;
         const COLOR_STATUS_FG: COLORREF = COLORREF(0x00_DE_C2_BA); // subtext1
         const COLOR_MODE_NORMAL: COLORREF = COLORREF(0x00_FA_B4_89); // blue (#89b4fa → BGR)
         const COLOR_MODE_PANE: COLORREF = COLORREF(0x00_87_AB_FA); // peach (#fab387 → BGR)
@@ -1798,7 +1844,11 @@ mod win32 {
 
         // ── 左側: モード名 ──────────────────────────────────────────
         let (mode_label, mode_color, hint) = match mode {
-            ClientMode::Normal => (" NORMAL ", COLOR_MODE_NORMAL, " Ctrl+B: ペインモード"),
+            ClientMode::Normal => (
+                " NORMAL ",
+                COLOR_MODE_NORMAL,
+                " Ctrl+B: ペインモード  Ctrl+P: テーマ",
+            ),
             ClientMode::Pane => (
                 " PANE ",
                 COLOR_MODE_PANE,
@@ -1957,7 +2007,7 @@ mod win32 {
                 right: toast_rect.right - TOAST_PADDING,
                 bottom: toast_rect.bottom - 8,
             };
-            SetTextColor(hdc, state.theme.fg);
+            SetTextColor(hdc, state.theme.get().fg);
             DrawTextW(
                 hdc,
                 &mut msg_w,
@@ -2202,6 +2252,151 @@ mod win32 {
         let hint = "  ↑↓: 選択  Enter: 適用  Esc/q: キャンセル";
         let hint_w: Vec<u16> = hint.encode_utf16().collect();
         SetTextColor(hdc, COLOR_HINT_FG);
+        let _ = ExtTextOutW(
+            hdc,
+            popup_x + cw / 2,
+            hint_y,
+            ETO_CLIPPED,
+            Some(&popup_rect),
+            PCWSTR(hint_w.as_ptr()),
+            hint_w.len() as u32,
+            None,
+        );
+    }
+
+    /// `PaneStore::theme_launcher` が `Some` のときのみ描画する。
+    /// シンプルなリストポップアップ。↑↓ で選択、Enter で適用、Esc/q でキャンセル。
+    unsafe fn paint_theme_launcher(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
+        let theme_launcher = {
+            let store = state.panes.lock().unwrap();
+            store.theme_launcher.clone()
+        };
+        let Some(tl) = theme_launcher else {
+            return;
+        };
+
+        // Catppuccin Mocha カラー (BGR)
+        const COLOR_OVERLAY: COLORREF = COLORREF(0x00_22_1E_1E);
+        const COLOR_POPUP_BG: COLORREF = COLORREF(0x00_3D_31_31);
+        const COLOR_SEL_BG: COLORREF = COLORREF(0x00_87_AB_FA); // peach
+        const COLOR_SEL_FG: COLORREF = COLORREF(0x00_2E_1E_1E); // base
+        const COLOR_TEXT: COLORREF = COLORREF(0x00_F4_D6_CD); // text
+        const COLOR_TITLE: COLORREF = COLORREF(0x00_87_AB_FA); // peach
+        const COLOR_HINT_FG: COLORREF = COLORREF(0x00_A0_9D_8C); // subtext0
+
+        let cw = state.cell_width;
+        let ch = state.cell_height;
+        let n = tl.entries.len() as i32;
+
+        let max_chars = tl
+            .entries
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(10) as i32;
+        let popup_w = ((max_chars + 8) * cw).max(cw * 24).min(win_w - cw * 4);
+        let item_rows = n.max(1);
+        let popup_h = (ch + ch / 2  // タイトル行
+            + 1                      // セパレーター
+            + ch / 4                 // 余白
+            + item_rows * ch         // アイテム行
+            + ch / 4                 // 余白
+            + ch) // ヒント行
+            .min(win_h - ch * 2);
+        let popup_x = (win_w - popup_w) / 2;
+        let popup_y = (win_h - popup_h) / 2;
+
+        // 全画面オーバーレイ
+        let overlay_brush = CreateSolidBrush(COLOR_OVERLAY);
+        FillRect(
+            hdc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: win_w,
+                bottom: win_h,
+            },
+            overlay_brush,
+        );
+        let _ = DeleteObject(overlay_brush.into());
+
+        // ポップアップ背景
+        let popup_rect = RECT {
+            left: popup_x,
+            top: popup_y,
+            right: popup_x + popup_w,
+            bottom: popup_y + popup_h,
+        };
+        let popup_brush = CreateSolidBrush(COLOR_POPUP_BG);
+        FillRect(hdc, &popup_rect, popup_brush);
+        let _ = DeleteObject(popup_brush.into());
+
+        // タイトル行
+        let title = "  テーマを選択";
+        let title_w: Vec<u16> = title.encode_utf16().collect();
+        SetBkColor(hdc, COLOR_POPUP_BG);
+        SetTextColor(hdc, COLOR_TITLE);
+        let _ = ExtTextOutW(
+            hdc,
+            popup_x + cw / 2,
+            popup_y + ch / 4,
+            ETO_CLIPPED,
+            Some(&popup_rect),
+            PCWSTR(title_w.as_ptr()),
+            title_w.len() as u32,
+            None,
+        );
+
+        // 水平セパレーター
+        let sep_y = popup_y + ch + ch / 2;
+        let sep_pen = CreatePen(PS_SOLID, 1, COLOR_TITLE);
+        let old_pen = SelectObject(hdc, sep_pen.into());
+        let _ = MoveToEx(hdc, popup_x, sep_y, None);
+        let _ = LineTo(hdc, popup_x + popup_w, sep_y);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(sep_pen.into());
+
+        // アイテム一覧
+        let items_top = sep_y + 1 + ch / 4;
+        for (i, name) in tl.entries.iter().enumerate() {
+            let item_y = items_top + i as i32 * ch;
+            let is_sel = i == tl.selected;
+            let item_rect = RECT {
+                left: popup_x + 1,
+                top: item_y,
+                right: popup_x + popup_w - 1,
+                bottom: item_y + ch,
+            };
+            if is_sel {
+                let sel_brush = CreateSolidBrush(COLOR_SEL_BG);
+                FillRect(hdc, &item_rect, sel_brush);
+                let _ = DeleteObject(sel_brush.into());
+                SetTextColor(hdc, COLOR_SEL_FG);
+                SetBkColor(hdc, COLOR_SEL_BG);
+            } else {
+                SetTextColor(hdc, COLOR_TEXT);
+                SetBkColor(hdc, COLOR_POPUP_BG);
+            }
+            let label = format!("  {name}");
+            let label_w: Vec<u16> = label.encode_utf16().collect();
+            let _ = ExtTextOutW(
+                hdc,
+                popup_x + cw / 2,
+                item_y,
+                ETO_CLIPPED,
+                Some(&item_rect),
+                PCWSTR(label_w.as_ptr()),
+                label_w.len() as u32,
+                None,
+            );
+        }
+
+        // ヒント行
+        let hint_y = popup_y + popup_h - ch;
+        let hint = "  ↑↓: 選択  Enter: 適用  Esc/q: キャンセル";
+        let hint_w: Vec<u16> = hint.encode_utf16().collect();
+        SetTextColor(hdc, COLOR_HINT_FG);
+        SetBkColor(hdc, COLOR_POPUP_BG);
         let _ = ExtTextOutW(
             hdc,
             popup_x + cw / 2,
