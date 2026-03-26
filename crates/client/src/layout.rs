@@ -588,6 +588,8 @@ pub struct PaneStore {
     pub launcher: Option<LauncherState>,
     /// コピーモードの状態（Some = コピーモード中）
     pub copy_mode: Option<CopyState>,
+    /// Normal モードのマウス選択状態（anchor_col, anchor_row, end_col, end_row）
+    pub normal_selection: Option<(usize, usize, usize, usize)>,
 }
 
 impl PaneStore {
@@ -607,6 +609,7 @@ impl PaneStore {
             should_quit: false,
             launcher: None,
             copy_mode: None,
+            normal_selection: None,
         }
     }
 
