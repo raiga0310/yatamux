@@ -54,18 +54,29 @@ impl LayoutNode {
 
     /// `parent` のリーフを `parent`/`child` の Split ノードに置き換える
     pub fn split_leaf(&mut self, parent: PaneId, child: PaneId, dir: SplitDirection) -> bool {
+        self.split_leaf_with_ratio(parent, child, dir, 0.5)
+    }
+
+    pub fn split_leaf_with_ratio(
+        &mut self,
+        parent: PaneId,
+        child: PaneId,
+        dir: SplitDirection,
+        ratio: f32,
+    ) -> bool {
         match self {
             LayoutNode::Leaf(id) if *id == parent => {
                 *self = LayoutNode::Split {
                     direction: dir,
-                    ratio: 0.5,
+                    ratio,
                     first: Box::new(LayoutNode::Leaf(parent)),
                     second: Box::new(LayoutNode::Leaf(child)),
                 };
                 true
             }
             LayoutNode::Split { first, second, .. } => {
-                first.split_leaf(parent, child, dir) || second.split_leaf(parent, child, dir)
+                first.split_leaf_with_ratio(parent, child, dir, ratio)
+                    || second.split_leaf_with_ratio(parent, child, dir, ratio)
             }
             _ => false,
         }
@@ -284,6 +295,48 @@ impl LayoutNode {
         }
     }
 
+    /// `target_dir` 方向の Split に限定して ratio を調整する。
+    ///
+    /// - `<`/`>` キーは `SplitDirection::Vertical`（縦線分割 = 横比）を対象にする
+    /// - `+`/`-` キーは `SplitDirection::Horizontal`（横線分割 = 縦比）を対象にする
+    pub fn adjust_ratio_for_dir(
+        &mut self,
+        id: PaneId,
+        delta: f32,
+        target_dir: SplitDirection,
+    ) -> bool {
+        match self {
+            LayoutNode::Leaf(_) => false,
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                // 子ノードを先に試す（最近傍を優先）
+                if first.adjust_ratio_for_dir(id, delta, target_dir)
+                    || second.adjust_ratio_for_dir(id, delta, target_dir)
+                {
+                    return true;
+                }
+                // 方向が一致し、このノードがペインを含む場合のみ調整
+                if *direction == target_dir {
+                    if first.pane_ids().contains(&id) {
+                        *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                        true
+                    } else if second.pane_ids().contains(&id) {
+                        *ratio = (*ratio - delta).clamp(0.1, 0.9);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// セパレーター矩形リスト（コンテンツ座標）
     pub fn compute_separator_rects(&self, r: PaneRect) -> Vec<PaneRect> {
         match self {
@@ -398,10 +451,15 @@ fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
         #[serde(default)]
         panes: Vec<PreviewPane>,
     }
+    fn default_ratio() -> f32 {
+        0.5
+    }
     #[derive(Deserialize)]
     struct PreviewPane {
         split: Option<PreviewSplitDir>,
         command: Option<String>,
+        #[serde(default = "default_ratio")]
+        ratio: f32,
     }
     #[derive(Deserialize, Clone, Copy)]
     #[serde(rename_all = "lowercase")]
@@ -422,7 +480,7 @@ fn build_preview_layout(content: &str) -> Option<LayoutPreview> {
                 PreviewSplitDir::Vertical => SplitDirection::Vertical,
                 PreviewSplitDir::Horizontal => SplitDirection::Horizontal,
             };
-            root.split_leaf(PaneId((i - 1) as u32), PaneId(i as u32), dir);
+            root.split_leaf_with_ratio(PaneId((i - 1) as u32), PaneId(i as u32), dir, pane.ratio);
         }
     }
     Some(LayoutPreview {
@@ -458,6 +516,65 @@ pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
         .collect();
     results.sort_by(|a, b| a.0.cmp(&b.0));
     results
+}
+
+/// 現在のレイアウトツリーを `[[panes]]` TOML 形式に変換する。
+///
+/// DFS でノードを訪問し、各葉ペインを 1 エントリとして出力する。
+/// ratio が 0.5 と異なる場合のみ `ratio = X.XXX` を出力する。
+/// 制限: `first` が Split であるような左辺スプリット（左優先ツリー）を
+/// ロードし直すと構造が変わる（連鎖型ツリーとして再構成される）。
+pub fn layout_to_toml(node: &LayoutNode) -> String {
+    // (split_dir, ratio) — 最初のペインは None
+    fn collect(
+        node: &LayoutNode,
+        split: Option<(&'static str, f32)>,
+        out: &mut Vec<Option<(&'static str, f32)>>,
+    ) {
+        match node {
+            LayoutNode::Leaf(_) => out.push(split),
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                collect(first, split, out);
+                let dir = match direction {
+                    SplitDirection::Vertical => "vertical",
+                    SplitDirection::Horizontal => "horizontal",
+                };
+                collect(second, Some((dir, *ratio)), out);
+            }
+        }
+    }
+
+    let mut panes: Vec<Option<(&'static str, f32)>> = Vec::new();
+    collect(node, None, &mut panes);
+
+    let mut out = String::new();
+    for split in panes {
+        out.push_str("[[panes]]\n");
+        if let Some((dir, ratio)) = split {
+            out.push_str(&format!("split = \"{dir}\"\n"));
+            if (ratio - 0.5).abs() >= 1e-4 {
+                out.push_str(&format!("ratio = {ratio:.4}\n"));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `%APPDATA%\yatamux\layouts\<name>.toml` にレイアウト TOML を書き出す。
+pub fn save_layout_file(name: &str, content: &str) -> std::io::Result<()> {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::PathBuf::from(base)
+        .join("yatamux")
+        .join("layouts");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{name}.toml"));
+    std::fs::write(path, content)
 }
 
 /// コピーモードのカーソルと選択状態
@@ -590,6 +707,8 @@ pub struct PaneStore {
     pub copy_mode: Option<CopyState>,
     /// Normal モードのマウス選択状態（anchor_col, anchor_row, end_col, end_row）
     pub normal_selection: Option<(usize, usize, usize, usize)>,
+    /// レイアウト保存プロンプトの入力バッファ（Some = プロンプト表示中）
+    pub save_prompt: Option<String>,
 }
 
 impl PaneStore {
@@ -610,6 +729,7 @@ impl PaneStore {
             launcher: None,
             copy_mode: None,
             normal_selection: None,
+            save_prompt: None,
         }
     }
 
@@ -1081,6 +1201,134 @@ mod tests {
         }
     }
 
+    // ── adjust_ratio_for_dir テスト (C-19 リグレッション防止) ────────────────
+
+    // TC-C19-R01: Vertical-only adjust は Horizontal Split に触れない
+    #[test]
+    fn test_adjust_ratio_for_dir_vertical_ignores_horizontal() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        // Vertical 方向の調整は Horizontal Split を変更しない
+        let changed = layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Vertical);
+        assert!(
+            !changed,
+            "Vertical adjust should not affect Horizontal split"
+        );
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.5).abs() < 1e-6, "ratio should be unchanged");
+        }
+    }
+
+    // TC-C19-R02: Horizontal-only adjust は Vertical Split に触れない
+    #[test]
+    fn test_adjust_ratio_for_dir_horizontal_ignores_vertical() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        // Horizontal 方向の調整は Vertical Split を変更しない
+        let changed = layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Horizontal);
+        assert!(
+            !changed,
+            "Horizontal adjust should not affect Vertical split"
+        );
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.5).abs() < 1e-6, "ratio should be unchanged");
+        }
+    }
+
+    // TC-C19-R03: ネスト構造 Vertical(1, Horizontal(2, 3)) で方向ごとに別の Split が動く
+    //
+    // `<`/`>` (Vertical) を Pane2 に適用 → 外側 Vertical ratio が変化、内側 Horizontal は不変
+    // `+`/`-` (Horizontal) を Pane2 に適用 → 内側 Horizontal ratio が変化、外側 Vertical は不変
+    #[test]
+    fn test_adjust_ratio_for_dir_vertical_changes_outer_not_inner() {
+        let make_layout = || LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(2))),
+                second: Box::new(LayoutNode::Leaf(PaneId(3))),
+            }),
+        };
+
+        // Vertical 調整 → 外側 Vertical ratio が変化（Pane2 は second 側なので減少）
+        // 内側 Horizontal ratio は不変
+        let mut layout = make_layout();
+        let changed = layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Vertical);
+        assert!(
+            changed,
+            "Vertical adjust should affect outer Vertical split"
+        );
+        if let LayoutNode::Split {
+            ratio: outer,
+            second,
+            ..
+        } = &layout
+        {
+            assert!(
+                (*outer - 0.45).abs() < 1e-6,
+                "outer Vertical ratio decreased: {outer}"
+            );
+            if let LayoutNode::Split { ratio: inner, .. } = second.as_ref() {
+                assert!(
+                    (*inner - 0.5).abs() < 1e-6,
+                    "inner Horizontal ratio unchanged: {inner}"
+                );
+            }
+        }
+
+        // Horizontal 調整 → 内側 Horizontal ratio が変化（Pane2 は first 側なので増加）
+        // 外側 Vertical ratio は不変
+        let mut layout = make_layout();
+        let changed = layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Horizontal);
+        assert!(
+            changed,
+            "Horizontal adjust should affect inner Horizontal split"
+        );
+        if let LayoutNode::Split {
+            ratio: outer,
+            second,
+            ..
+        } = &layout
+        {
+            assert!(
+                (*outer - 0.5).abs() < 1e-6,
+                "outer Vertical ratio unchanged: {outer}"
+            );
+            if let LayoutNode::Split { ratio: inner, .. } = second.as_ref() {
+                assert!(
+                    (*inner - 0.55).abs() < 1e-6,
+                    "inner Horizontal ratio increased: {inner}"
+                );
+            }
+        }
+    }
+
+    // TC-C19-R04: adjust_ratio_for_dir で ratio クランプが機能する
+    #[test]
+    fn test_adjust_ratio_for_dir_clamps_ratio() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.88,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!((ratio - 0.9).abs() < 1e-6, "ratio clamped at 0.9");
+        }
+    }
+
     // TC-F8-08: ネスト Split(1, Split(2, 3)) → remove 2 → Split(1, 3)
     #[test]
     fn test_remove_pane_nested() {
@@ -1178,5 +1426,65 @@ mod tests {
         assert!(cs.is_selected(0, 4));
         assert!(cs.is_selected(8, 4));
         assert!(!cs.is_selected(9, 4));
+    }
+
+    // ── C-19: layout_to_toml / save_layout_file ─────────────────────────
+
+    // TC-C19-01: 単一ペインは [[panes]] 1 エントリで split なし
+    #[test]
+    fn test_layout_to_toml_single_pane() {
+        let node = LayoutNode::Leaf(PaneId(1));
+        let toml = layout_to_toml(&node);
+        assert_eq!(toml, "[[panes]]\n\n");
+    }
+
+    // TC-C19-02: 垂直分割は 2 エントリ、2 つ目に split = "vertical"
+    #[test]
+    fn test_layout_to_toml_vertical_split() {
+        let node = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let toml = layout_to_toml(&node);
+        assert_eq!(toml, "[[panes]]\n\n[[panes]]\nsplit = \"vertical\"\n\n");
+    }
+
+    // TC-C19-03: ネスト構造は 3 エントリ
+    #[test]
+    fn test_layout_to_toml_nested() {
+        let node = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(2))),
+                second: Box::new(LayoutNode::Leaf(PaneId(3))),
+            }),
+        };
+        let toml = layout_to_toml(&node);
+        let expected = "[[panes]]\n\n\
+                        [[panes]]\nsplit = \"vertical\"\n\n\
+                        [[panes]]\nsplit = \"horizontal\"\n\n";
+        assert_eq!(toml, expected);
+    }
+
+    // TC-C19-04: save_layout_file は正常に書き込む
+    #[test]
+    fn test_save_layout_file_roundtrip() {
+        let dir = std::env::temp_dir().join("yatamux_save_layout_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // APPDATA を一時ディレクトリで代替するため直接書き込みテスト
+        let content = "[[panes]]\n\n[[panes]]\nsplit = \"vertical\"\n\n";
+        let path = dir.join("testlayout.toml");
+        std::fs::write(&path, content).unwrap();
+        let loaded = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(loaded, content);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

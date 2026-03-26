@@ -20,7 +20,15 @@
 //! - 2つ目以降は `split` で前のペインから分割方向を指定する。
 //! - `command` はペイン作成後にシェルへ入力として送信される（`\r` 付き）。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+fn default_ratio() -> f32 {
+    0.5
+}
+
+fn is_default_ratio(r: &f32) -> bool {
+    (r - 0.5).abs() < 1e-4
+}
 
 /// レイアウト設定ファイル全体
 #[derive(Debug, Deserialize)]
@@ -31,16 +39,19 @@ pub struct LayoutConfig {
 }
 
 /// 1ペイン分の設定
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneConfig {
     /// ペイン作成後にシェルへ送信するコマンド文字列
     pub command: Option<String>,
     /// 直前のペインからの分割方向（最初のペインには不要）
     pub split: Option<SplitDir>,
+    /// 直前のペインを分割する際の比率（first の占有割合、デフォルト 0.5）
+    #[serde(default = "default_ratio", skip_serializing_if = "is_default_ratio")]
+    pub ratio: f32,
 }
 
 /// 分割方向
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SplitDir {
     Vertical,
