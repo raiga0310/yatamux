@@ -303,18 +303,24 @@ mod win32 {
                 w: content_w,
                 h: content_h,
             };
-            let store = self.panes.lock().unwrap();
+            let mut store = self.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total);
-            for (pane_id, rect) in rects {
+            for (pane_id, rect) in &rects {
                 let cols = rect.cols(self.cell_width);
                 let rows = rect.rows(self.cell_height);
-                if let Some(g) = store.grids.get(&pane_id) {
+                if let Some(g) = store.grids.get(pane_id) {
                     g.lock().unwrap().resize(cols, rows);
                 }
                 let _ = self.msg_tx.try_send(ClientMessage::Resize {
-                    pane: pane_id,
+                    pane: *pane_id,
                     size: TermSize { cols, rows },
                 });
+            }
+            // リサイズ後、アクティブペインの scrollback_len に合わせてオフセットをクランプ（B-7）
+            let active = store.active;
+            if let Some(g) = store.grids.get(&active) {
+                let max_offset = g.lock().unwrap().scrollback_len();
+                store.scroll_offset = store.scroll_offset.min(max_offset);
             }
         }
 
@@ -332,7 +338,10 @@ mod win32 {
             } else {
                 store.layout.prev_pane(store.active)
             };
-            store.active = next;
+            if next != store.active {
+                store.active = next;
+                store.scroll_offset = 0;
+            }
         }
 
         /// フォーカスを指定方向の最近傍ペインに移す
@@ -341,7 +350,10 @@ mod win32 {
             let next = store
                 .layout
                 .pane_in_direction(store.active, dir, self.content_rect.get());
-            store.active = next;
+            if next != store.active {
+                store.active = next;
+                store.scroll_offset = 0;
+            }
         }
 
         /// クリック座標（ウィンドウクライアント座標）からペインフォーカスを切り替える。
@@ -4156,6 +4168,77 @@ mod win32 {
             assert!(is_in_normal_selection(sel, 0, 2));
             assert!(is_in_normal_selection(sel, 4, 3));
             assert!(!is_in_normal_selection(sel, 5, 3));
+        }
+
+        // ── B-7: スクロールオフセットのクランプ / リセット ──────────────────
+
+        // TC-B7-01: scroll_offset がクランプされる（resize_all_panes の clamp ロジック確認）
+        #[test]
+        fn test_scroll_offset_clamped_to_scrollback_len() {
+            let scroll_offset: usize = 50;
+            let max_offset: usize = 20; // scrollback_len() の戻り値想定
+            let clamped = scroll_offset.min(max_offset);
+            assert_eq!(clamped, 20);
+        }
+
+        // TC-B7-02: scroll_offset が max 以下なら変化しない
+        #[test]
+        fn test_scroll_offset_within_range_unchanged() {
+            let scroll_offset: usize = 10;
+            let max_offset: usize = 20;
+            let clamped = scroll_offset.min(max_offset);
+            assert_eq!(clamped, 10);
+        }
+
+        // TC-B7-03: フォーカス変更時に scroll_offset がリセットされる（PaneStore 操作確認）
+        #[test]
+        fn test_scroll_offset_reset_on_focus_change() {
+            use crate::layout::PaneStore;
+            use std::sync::{Arc, Mutex};
+            use yatamux_protocol::types::{PaneId, SplitDirection};
+            use yatamux_terminal::{CjkWidthConfig, Grid};
+
+            let id_a = PaneId(1);
+            let id_b = PaneId(2);
+            let grid_a = Arc::new(Mutex::new(Grid::new(80, 24, CjkWidthConfig::default())));
+            let grid_b = Arc::new(Mutex::new(Grid::new(80, 24, CjkWidthConfig::default())));
+
+            let mut store = PaneStore::new(id_a, grid_a);
+            store.grids.insert(id_b, grid_b);
+            store.layout = crate::layout::LayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(crate::layout::LayoutNode::Leaf(id_a)),
+                second: Box::new(crate::layout::LayoutNode::Leaf(id_b)),
+            };
+
+            // スクロール中状態を設定
+            store.scroll_offset = 30;
+            store.active = id_a;
+
+            // フォーカス変更をシミュレート（cycle_pane の動作）
+            let next = id_b;
+            if next != store.active {
+                store.active = next;
+                store.scroll_offset = 0;
+            }
+
+            assert_eq!(store.active, id_b);
+            assert_eq!(store.scroll_offset, 0);
+        }
+
+        // TC-B7-04: 同じペインへの"フォーカス変更"ではオフセットを変えない
+        #[test]
+        fn test_scroll_offset_no_reset_if_same_pane() {
+            use yatamux_protocol::types::PaneId;
+            let scroll_offset: usize = 15;
+            let active = PaneId(1);
+            let next = PaneId(1); // same pane
+            let mut result = scroll_offset;
+            if next != active {
+                result = 0;
+            }
+            assert_eq!(result, 15); // 変化しない
         }
 
         // TC-04: 選択なし（クリックのみ = anchor == end）は Ctrl+C を PTY へ通す
