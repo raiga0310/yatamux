@@ -201,6 +201,35 @@ pub async fn send_keys(
     Ok(())
 }
 
+/// `yatamux layout list` — 保存済みレイアウトの一覧を標準出力に表示する（C-22）
+pub async fn layout_list() -> Result<()> {
+    let names = crate::layout_config::LayoutConfig::list_layouts();
+    if names.is_empty() {
+        println!("(no layouts)");
+    } else {
+        for name in &names {
+            println!("{name}");
+        }
+    }
+    Ok(())
+}
+
+/// `yatamux layout delete <name>` — レイアウトを削除する（C-22）
+pub async fn layout_delete(name: &str) -> Result<()> {
+    crate::layout_config::LayoutConfig::delete_layout(name)
+        .with_context(|| format!("failed to delete layout '{name}'"))?;
+    println!("Deleted layout '{name}'");
+    Ok(())
+}
+
+/// `yatamux layout export <name>` — レイアウトの内容を標準出力に出力する（C-22）
+pub async fn layout_export(name: &str) -> Result<()> {
+    let content = crate::layout_config::LayoutConfig::export_layout(name)
+        .with_context(|| format!("failed to export layout '{name}'"))?;
+    print!("{content}");
+    Ok(())
+}
+
 /// `\n` → LF、`\r` → CR、`\t` → TAB のエスケープ展開
 fn unescape(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
