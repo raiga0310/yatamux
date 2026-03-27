@@ -459,7 +459,7 @@ mod win32 {
                 let (name, layout_toml) = {
                     let store = state.panes.lock().unwrap();
                     let name = store.save_prompt.clone().unwrap_or_default();
-                    let toml = layout_to_toml(&store.layout);
+                    let toml = layout_to_toml(&store.layout, &store.pane_commands);
                     (name, toml)
                 };
                 let name = name.trim().to_string();

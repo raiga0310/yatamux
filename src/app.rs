@@ -345,10 +345,15 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                         let new_grid = Arc::clone(&new_sink.grid);
                                         sinks.insert(new_id, new_sink);
 
-                                        // 最初のペインのコマンドを送信
+                                        // 最初のペインのコマンドを送信・記録（C-23）
                                         if let Some(cmd) =
                                             config.panes.first().and_then(|p| p.command.as_ref())
                                         {
+                                            pane_store2
+                                                .lock()
+                                                .unwrap()
+                                                .pane_commands
+                                                .insert(new_id, cmd.clone());
                                             let mut input = cmd.clone().into_bytes();
                                             input.push(b'\r');
                                             let _ = client_tx
@@ -427,6 +432,12 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                         layout.split_leaf_with_ratio(prev, new_id, dir, ratio);
 
                                         if let Some(cmd) = cmd {
+                                            // コマンドを記録してから送信（C-23）
+                                            pane_store2
+                                                .lock()
+                                                .unwrap()
+                                                .pane_commands
+                                                .insert(new_id, cmd.clone());
                                             let mut input = cmd.into_bytes();
                                             input.push(b'\r');
                                             let _ = client_tx

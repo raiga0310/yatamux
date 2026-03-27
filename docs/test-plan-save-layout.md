@@ -78,3 +78,37 @@ layout_to_toml(&Split(Vertical, Leaf(1), Split(Horizontal, Leaf(2), Leaf(3))))
 save_layout_file("test_c19", "[[panes]]\n\n")
 → Ok(())、%APPDATA%\yatamux\layouts\test_c19.toml が作成される
 ```
+
+---
+
+## C-23: レイアウト保存時にペインのコマンドも含める
+
+### TC-C23-01: コマンドなしペインは command 行を出力しない
+
+```
+layout_to_toml(&Leaf(1), &{})
+→ "[[panes]]\n\n"
+```
+
+### TC-C23-02: コマンドありペインは command 行を出力する
+
+```
+layout_to_toml(&Leaf(1), &{PaneId(1) => "cargo watch"})
+→ '[[panes]]\ncommand = "cargo watch"\n\n'
+```
+
+### TC-C23-03: 垂直分割でコマンドを持つペインが TOML に含まれる
+
+```
+layout_to_toml(
+  &Split { direction: Vertical, ratio: 0.5, first: Leaf(1), second: Leaf(2) },
+  &{PaneId(2) => "cargo test"}
+)
+→ '[[panes]]\n\n[[panes]]\ncommand = "cargo test"\nsplit = "vertical"\n\n'
+```
+
+### TC-C23-04: レイアウト適用後に保存するとコマンドが引き継がれる（手動確認）
+
+- **前提**: `layouts/my-dev.toml` に `command = "cargo watch"` を含む2ペイン定義
+- **操作**: `Ctrl+B` → `L` でランチャー起動 → `my-dev` を選択・適用 → `Ctrl+B` → `S` → 名前入力 → Enter
+- **期待結果**: 保存された TOML に `command = "cargo watch"` が含まれる
