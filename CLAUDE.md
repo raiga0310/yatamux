@@ -2,9 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Note for contributors:** This file contains guidance for [Claude Code](https://claude.ai/code),
-> Anthropic's AI coding assistant. You can safely ignore it if you're not using Claude Code.
-
 ## コマンド
 
 ```powershell
@@ -92,9 +89,29 @@ src/layout_config.rs 宣言的レイアウト設定。%APPDATA%\yatamux\layouts\
 - `ClientMode` 列挙型（`Normal` / `Pane` / `Copy`）で UI モードを管理。`Ctrl+B` で Pane モードへ遷移。Pane モードでは `E/O`（分割）、`W`（ペイン削除）、`F`（フローティング）、`X`（スクロールバックをエディタで開く）、`<`/`>`（サイズ調整）、`L`（レイアウトランチャー）、`V`（コピーモード）、`q`（Normal に戻る）が有効。Copy モードでは `hjkl`/矢印（カーソル移動）、`v`（選択トグル）、`y`/Enter（ヤンク）、Esc/q（終了）。Normal モードでは `Ctrl+P` でテーマランチャーを開く。
 - `Ctrl+F` で `float_tx` 経由のフローティングペイン切り替え。`WM_LBUTTONDOWN` でクリック座標からペインを特定してフォーカス移動。`WM_MOUSEWHEEL` で `scroll_offset` を増減。
 - `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。テーマは `theme: std::cell::Cell<WinTheme>`（`WinTheme` は `#[derive(Copy,Clone)]`）で保持し、ランタイムに `state.theme.set(new_theme)` で切り替える。フォント変更は再起動が必要。
-- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>` を持つ。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
+- `close_active_pane()`: ペイン数に関わらず常に `ClosePane` を送信する（最後の1ペインも同様）。`app.rs` の `PaneClosed` ハンドラが `grids.is_empty()` を検出して `should_quit = true` → `WM_TIMER` → `DestroyWindow` でアプリを終了させる（C-9 経路）。
+- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>`、`save_prompt: Option<String>`、`normal_selection: Option<(usize,usize,usize,usize)>`、`normal_dragging: bool`、`should_quit: bool` を持つ。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
 - `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
+
+#### WM_KEYDOWN キー処理アーキテクチャ（A-1）
+
+`window.rs` の `WM_KEYDOWN` は **Chain of Responsibility パターン**で実装されている。
+
+```
+dispatch_wm_keydown(state, hwnd, &KeyInput { vk, ctrl, shift, wparam, lparam })
+  ├─ handle_save_prompt         (save_prompt.is_some() のときのみ有効)
+  ├─ handle_layout_launcher     (launcher.is_some() のときのみ有効)
+  ├─ handle_theme_launcher      (theme_launcher.is_some() のときのみ有効)
+  ├─ handle_copy_mode           (mode == Copy のときのみ有効)
+  ├─ handle_pane_mode           (mode == Pane のときのみ有効)
+  ├─ handle_global_shortcuts    (常時有効: Ctrl+B/F/P/Shift+E/O/W、Ctrl+Tab/Arrow、Ctrl+V/C)
+  └─ handle_vt_passthrough      (VK_ コード → VT シーケンス変換して PTY へ送信)
+```
+
+各ハンドラは `KeyConsumed::Yes`（消費・WM_CHAR 抑制）、`KeyConsumed::YesPassChar`（消費・WM_CHAR 通過）、`KeyConsumed::No`（未処理・次へ委譲）のいずれかを返す。`skip_char` フラグの設定はディスパッチャが一元管理する。
+
+新しいキーバインドや UI モードを追加する際は、既存ハンドラに手を入れず新しい `handle_*` 関数を追加して `dispatch_wm_keydown` の chain に挿入すること。
 
 **`yatamux-protocol`** — メッセージ型定義のみ。ロジックなし。
 - `ServerMessage::Output.data` は `Arc<[u8]>` 型（ファンアウト時のコピーレス配信のため）。
@@ -140,6 +157,7 @@ yatamux split-pane（IPC CLI起点）
 - フォント優先順位: HackGen Console NF → HackGen Console → HackGen35 Console NF → HackGen35 Console → HackGen NF → HackGen → Cascadia Mono → Cascadia Code → Consolas → MS Gothic（最終フォールバック）。`config.toml` の `[appearance] font_family` で上書き可能。
 - テーマファイルは `%APPDATA%\yatamux\themes\<name>.toml`（`[appearance]` セクション）。`Ctrl+P` でランチャーを開き Enter 適用。フォント変更は再起動が必要（ランタイム変更不可）。
 - `windows` crate 0.62 以降、`SelectObject`/`DeleteObject` の引数は `HGDIOBJ` 型が必要（`HBRUSH`/`HPEN`/`HFONT`/`HBITMAP` は `.into()` で変換）。多くの Win32 関数で `HWND`/`HDC` 引数が `Option<HWND>`/`Option<HDC>` に変更された。
+- `WM_KEYDOWN` で処理済みのキーは `state.skip_char.set(true)` を立てて `WM_CHAR` への二重送信を防ぐ。ただし新規ハンドラ追加時は `dispatch_wm_keydown` が自動で管理するため、各ハンドラ内では `skip_char` を設定しないこと。
 
 ## 実装フロー
 
