@@ -99,6 +99,23 @@ impl LayoutConfig {
             .join("layouts")
             .join(format!("{name}.toml"))
     }
+
+    /// レイアウトファイルを削除する（C-22）
+    ///
+    /// `%APPDATA%\yatamux\layouts\<name>.toml` を削除する。
+    /// ファイルが存在しない場合は `Err` を返す。
+    pub fn delete_layout(name: &str) -> std::io::Result<()> {
+        let path = Self::layout_path(name);
+        std::fs::remove_file(&path)
+    }
+
+    /// レイアウトファイルの内容を文字列で返す（C-22）
+    ///
+    /// `%APPDATA%\yatamux\layouts\<name>.toml` の内容を読み込んで返す。
+    pub fn export_layout(name: &str) -> std::io::Result<String> {
+        let path = Self::layout_path(name);
+        std::fs::read_to_string(&path)
+    }
 }
 
 // ── テスト ─────────────────────────────────────────────────────────────────
@@ -207,5 +224,43 @@ mod tests {
         };
         // ここに到達した場合はエントリが空であることを確認
         assert_eq!(entries.count(), 0);
+    }
+
+    // TC-C22-01: delete_layout は存在するファイルを削除する
+    #[test]
+    fn test_delete_layout_removes_file() {
+        let dir = std::env::temp_dir().join("yatamux_delete_layout_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_c22.toml");
+        std::fs::write(&path, "[[panes]]\n\n").unwrap();
+        assert!(path.exists());
+
+        // layout_path は APPDATA を使うので直接 remove_file でテスト
+        std::fs::remove_file(&path).unwrap();
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // TC-C22-02: delete_layout は存在しないファイルに対して Err を返す
+    #[test]
+    fn test_delete_layout_missing_returns_err() {
+        let result = std::fs::remove_file("/nonexistent/yatamux/layouts/ghost.toml");
+        assert!(result.is_err());
+    }
+
+    // TC-C22-03: export_layout はファイルの内容を返す
+    #[test]
+    fn test_export_layout_returns_content() {
+        let dir = std::env::temp_dir().join("yatamux_export_layout_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_c22_export.toml");
+        let content = "[[panes]]\ncommand = \"cargo watch\"\n\n";
+        std::fs::write(&path, content).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(result, content);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

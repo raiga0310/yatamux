@@ -190,6 +190,31 @@ enum Commands {
         #[arg(long)]
         target: Option<u32>,
     },
+    /// レイアウトファイルを管理する（C-22）
+    ///
+    /// 例:
+    ///   yatamux layout list
+    ///   yatamux layout delete my-project
+    ///   yatamux layout export my-project
+    #[command(verbatim_doc_comment, subcommand)]
+    Layout(LayoutCommands),
+}
+
+/// `yatamux layout` のサブコマンド
+#[derive(Subcommand)]
+enum LayoutCommands {
+    /// 保存済みレイアウトの一覧を表示
+    List,
+    /// レイアウトを削除
+    Delete {
+        /// 削除するレイアウト名
+        name: String,
+    },
+    /// レイアウトの内容を標準出力に出力
+    Export {
+        /// エクスポートするレイアウト名
+        name: String,
+    },
 }
 
 /// CLI 用の分割方向
@@ -253,6 +278,11 @@ async fn main() -> Result<()> {
             };
             cli::split_pane(DEFAULT_SESSION, target.unwrap_or(0), split_dir, dir).await
         }
+        Some(Commands::Layout(sub)) => match sub {
+            LayoutCommands::List => cli::layout_list().await,
+            LayoutCommands::Delete { name } => cli::layout_delete(&name).await,
+            LayoutCommands::Export { name } => cli::layout_export(&name).await,
+        },
         None => {
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
