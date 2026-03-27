@@ -361,14 +361,12 @@ mod win32 {
             false
         }
 
-        /// アクティブペインを削除する。最後の1ペインの場合は何もしない。
+        /// アクティブペインを削除する。
+        /// 最後の1ペインの場合も ClosePane を送信し、
+        /// `app.rs` の PaneClosed ハンドラが `grids.is_empty()` を検出して
+        /// `should_quit = true` → `WM_TIMER` → `DestroyWindow` でアプリを終了する（C-9 と同様の終了パス）。
         fn close_active_pane(&self) {
-            let store = self.panes.lock().unwrap();
-            if matches!(store.layout, crate::layout::LayoutNode::Leaf(_)) {
-                return;
-            }
-            let active = store.active;
-            drop(store);
+            let active = self.panes.lock().unwrap().active;
             let _ = self
                 .msg_tx
                 .try_send(yatamux_protocol::ClientMessage::ClosePane { pane: active });
@@ -408,6 +406,497 @@ mod win32 {
                     pane: active,
                     data: cmd.into_bytes(),
                 });
+        }
+    }
+
+    // ── キー入力ディスパッチャ ────────────────────────────────────────────────
+    //
+    // WM_KEYDOWN の処理を UI モード／機能ごとの独立ハンドラに分離する。
+    // 各ハンドラは「自分が担当する状態のときのみ動作し、それ以外は No を返す」という
+    // Chain of Responsibility パターンで実装する。
+    // これにより新機能追加時に既存ハンドラへの干渉を防ぐ（A-1 参照）。
+
+    /// WM_KEYDOWN イベントの入力情報
+    struct KeyInput {
+        vk: u16,
+        ctrl: bool,
+        shift: bool,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    }
+
+    /// キー処理結果
+    #[derive(PartialEq)]
+    enum KeyConsumed {
+        /// 消費済み。WM_CHAR も抑制する
+        Yes,
+        /// 消費済み。WM_CHAR は通す（保存プロンプトの印字可能文字入力用）
+        YesPassChar,
+        /// 未処理（次のハンドラへ委譲）
+        No,
+    }
+
+    impl ClientState {
+        // ── 保存プロンプトのキー処理 ────────────────────────────────────────────
+        unsafe fn handle_save_prompt(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            if state.panes.lock().unwrap().save_prompt.is_none() {
+                return KeyConsumed::No;
+            }
+            let vk = key.vk;
+            let result = if vk == VK_RETURN.0 {
+                let (name, layout_toml) = {
+                    let store = state.panes.lock().unwrap();
+                    let name = store.save_prompt.clone().unwrap_or_default();
+                    let toml = layout_to_toml(&store.layout);
+                    (name, toml)
+                };
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    match save_layout_file(&name, &layout_toml) {
+                        Ok(()) => {
+                            let mut store = state.panes.lock().unwrap();
+                            let active = store.active;
+                            store.save_prompt = None;
+                            store.pending_toasts.push_back(crate::layout::Toast {
+                                pane_id: active,
+                                message: format!("レイアウト「{name}」を保存しました"),
+                                elapsed_ms: 0,
+                            });
+                        }
+                        Err(e) => {
+                            let mut store = state.panes.lock().unwrap();
+                            let active = store.active;
+                            store.save_prompt = None;
+                            store.pending_toasts.push_back(crate::layout::Toast {
+                                pane_id: active,
+                                message: format!("保存エラー: {e}"),
+                                elapsed_ms: 0,
+                            });
+                        }
+                    }
+                } else {
+                    state.panes.lock().unwrap().save_prompt = None;
+                }
+                KeyConsumed::Yes
+            } else if vk == VK_ESCAPE.0 {
+                state.panes.lock().unwrap().save_prompt = None;
+                KeyConsumed::Yes
+            } else if vk == VK_BACK.0 {
+                let mut store = state.panes.lock().unwrap();
+                if let Some(s) = &mut store.save_prompt {
+                    s.pop();
+                }
+                KeyConsumed::Yes
+            } else {
+                // 印字可能キーは WM_CHAR に委譲してプロンプト文字列に追記する
+                KeyConsumed::YesPassChar
+            };
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            result
+        }
+
+        // ── レイアウトランチャーのキー処理 ──────────────────────────────────────
+        unsafe fn handle_layout_launcher(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            if state.panes.lock().unwrap().launcher.is_none() {
+                return KeyConsumed::No;
+            }
+            let vk = key.vk;
+            if vk == VK_RETURN.0 {
+                let name = {
+                    let mut store = state.panes.lock().unwrap();
+                    let name = store
+                        .launcher
+                        .as_ref()
+                        .filter(|l| !l.entries.is_empty())
+                        .and_then(|l| l.entries.get(l.selected).map(|(n, _)| n.clone()));
+                    store.launcher = None;
+                    name
+                };
+                if let Some(name) = name {
+                    let _ = state.layout_tx.try_send(name);
+                }
+            } else if vk == VK_ESCAPE.0 || vk == b'Q' as u16 {
+                state.panes.lock().unwrap().launcher = None;
+            } else {
+                let mut store = state.panes.lock().unwrap();
+                if let Some(launcher) = &mut store.launcher {
+                    if vk == VK_UP.0 {
+                        launcher.selected = launcher.selected.saturating_sub(1);
+                    } else if vk == VK_DOWN.0 {
+                        let max = launcher.entries.len().saturating_sub(1);
+                        launcher.selected = (launcher.selected + 1).min(max);
+                    }
+                }
+            }
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            KeyConsumed::Yes
+        }
+
+        // ── テーマランチャーのキー処理 ──────────────────────────────────────────
+        unsafe fn handle_theme_launcher(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            if state.panes.lock().unwrap().theme_launcher.is_none() {
+                return KeyConsumed::No;
+            }
+            let vk = key.vk;
+            if vk == VK_RETURN.0 {
+                let name = {
+                    let mut store = state.panes.lock().unwrap();
+                    let name = store
+                        .theme_launcher
+                        .as_ref()
+                        .filter(|t| !t.entries.is_empty())
+                        .and_then(|t| t.selected_name().map(str::to_owned));
+                    store.theme_launcher = None;
+                    name
+                };
+                if let Some(name) = name {
+                    if let Some(theme) = load_theme_from_file(&name) {
+                        let win_theme = WinTheme::from_theme(&theme);
+                        state.theme.set(win_theme);
+                    }
+                }
+            } else if vk == VK_ESCAPE.0 || vk == b'Q' as u16 {
+                state.panes.lock().unwrap().theme_launcher = None;
+            } else {
+                let mut store = state.panes.lock().unwrap();
+                if let Some(tl) = &mut store.theme_launcher {
+                    if vk == VK_UP.0 {
+                        tl.selected = tl.selected.saturating_sub(1);
+                    } else if vk == VK_DOWN.0 {
+                        let max = tl.entries.len().saturating_sub(1);
+                        tl.selected = (tl.selected + 1).min(max);
+                    }
+                }
+            }
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            KeyConsumed::Yes
+        }
+
+        // ── コピーモードのキー処理 ──────────────────────────────────────────────
+        unsafe fn handle_copy_mode(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            if state.mode.get() != ClientMode::Copy {
+                return KeyConsumed::No;
+            }
+            let vk = key.vk;
+            let (cols, rows) = {
+                let g = state.active_grid();
+                let g = g.lock().unwrap();
+                (g.cols() as usize, g.rows() as usize)
+            };
+            match vk {
+                k if k == VK_ESCAPE.0 || k == b'Q' as u16 => {
+                    state.mode.set(ClientMode::Normal);
+                    state.panes.lock().unwrap().copy_mode = None;
+                }
+                k if k == b'H' as u16 || k == VK_LEFT.0 => {
+                    if let Some(cm) = &mut state.panes.lock().unwrap().copy_mode {
+                        cm.move_cursor(-1, 0, cols, rows);
+                    }
+                }
+                k if k == b'L' as u16 || k == VK_RIGHT.0 => {
+                    if let Some(cm) = &mut state.panes.lock().unwrap().copy_mode {
+                        cm.move_cursor(1, 0, cols, rows);
+                    }
+                }
+                k if k == b'K' as u16 || k == VK_UP.0 => {
+                    if let Some(cm) = &mut state.panes.lock().unwrap().copy_mode {
+                        cm.move_cursor(0, -1, cols, rows);
+                    }
+                }
+                k if k == b'J' as u16 || k == VK_DOWN.0 => {
+                    if let Some(cm) = &mut state.panes.lock().unwrap().copy_mode {
+                        cm.move_cursor(0, 1, cols, rows);
+                    }
+                }
+                k if k == b'V' as u16 => {
+                    if let Some(cm) = &mut state.panes.lock().unwrap().copy_mode {
+                        cm.toggle_anchor();
+                    }
+                }
+                k if k == b'Y' as u16 || k == VK_RETURN.0 => {
+                    let clip_data = {
+                        let store = state.panes.lock().unwrap();
+                        if let Some(cm) = &store.copy_mode {
+                            if let Some((row_start, row_end)) = cm.selection_rows() {
+                                let active = store.active;
+                                store.grids.get(&active).map(|grid_arc| {
+                                    let grid = grid_arc.lock().unwrap();
+                                    grid.extract_text(row_start, row_end).into_bytes()
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    {
+                        let mut store = state.panes.lock().unwrap();
+                        if let Some(data) = clip_data {
+                            store.pending_clipboard = Some(data);
+                        }
+                        store.copy_mode = None;
+                    }
+                    state.mode.set(ClientMode::Normal);
+                }
+                _ => {}
+            }
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            KeyConsumed::Yes
+        }
+
+        // ── ペインモードのキー処理（Ctrl+B で遷移）────────────────────────────
+        unsafe fn handle_pane_mode(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            if state.mode.get() != ClientMode::Pane {
+                return KeyConsumed::No;
+            }
+            let vk = key.vk;
+            let shift = key.shift;
+
+            // モディファイアキー単体はペインモードを維持して無視
+            const MODIFIER_KEYS: &[u16] = &[
+                0x10, // VK_SHIFT
+                0x11, // VK_CONTROL
+                0x12, // VK_MENU (Alt)
+                0xA0, // VK_LSHIFT
+                0xA1, // VK_RSHIFT
+                0xA2, // VK_LCONTROL
+                0xA3, // VK_RCONTROL
+                0xA4, // VK_LMENU
+                0xA5, // VK_RMENU
+            ];
+            if MODIFIER_KEYS.contains(&vk) {
+                return KeyConsumed::Yes;
+            }
+
+            // `<`/`>` はペインモードを維持して水平比率を調整（繰り返し操作可能）
+            const VK_OEM_COMMA: u16 = 0xBC;
+            const VK_OEM_PERIOD: u16 = 0xBE;
+            if shift && (vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) {
+                let active = state.panes.lock().unwrap().active;
+                let delta = if vk == VK_OEM_PERIOD {
+                    0.05_f32
+                } else {
+                    -0.05_f32
+                };
+                state.panes.lock().unwrap().layout.adjust_ratio_for_dir(
+                    active,
+                    delta,
+                    SplitDirection::Vertical,
+                );
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return KeyConsumed::Yes;
+            }
+
+            // `+`/`-` はペインモードを維持して垂直比率を調整
+            const VK_OEM_PLUS: u16 = 0xBB;
+            const VK_OEM_MINUS: u16 = 0xBD;
+            let is_plus = shift && vk == VK_OEM_PLUS;
+            let is_minus = !shift && vk == VK_OEM_MINUS;
+            if is_plus || is_minus {
+                let active = state.panes.lock().unwrap().active;
+                let delta = if is_plus { 0.05_f32 } else { -0.05_f32 };
+                state.panes.lock().unwrap().layout.adjust_ratio_for_dir(
+                    active,
+                    delta,
+                    SplitDirection::Horizontal,
+                );
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return KeyConsumed::Yes;
+            }
+
+            // その他のキー: ペインモードを抜けて各アクションを実行
+            match vk {
+                k if k == b'V' as u16 => {
+                    // コピーモードに入る（Normal 遷移なし）
+                    state.mode.set(ClientMode::Copy);
+                    state.panes.lock().unwrap().copy_mode = Some(CopyState::new(0, 0));
+                }
+                k if k == b'S' as u16 => {
+                    // レイアウト保存プロンプトを開く（ペインモードを維持）
+                    state.panes.lock().unwrap().save_prompt = Some(String::new());
+                }
+                _ => {
+                    state.mode.set(ClientMode::Normal);
+                    match vk {
+                        k if k == b'E' as u16 => state.request_split(SplitDirection::Vertical),
+                        k if k == b'O' as u16 => state.request_split(SplitDirection::Horizontal),
+                        k if k == b'W' as u16 => state.close_active_pane(),
+                        k if k == b'F' as u16 => {
+                            let _ = state.float_tx.try_send(());
+                        }
+                        k if k == b'X' as u16 => state.open_scrollback_in_editor(),
+                        k if k == b'L' as u16 => {
+                            let entries = list_available_layouts();
+                            state.panes.lock().unwrap().launcher =
+                                Some(LauncherState::new(entries));
+                        }
+                        _ => {} // 未定義キーは無視
+                    }
+                }
+            }
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            KeyConsumed::Yes
+        }
+
+        // ── グローバルショートカット（モード非依存）────────────────────────────
+        unsafe fn handle_global_shortcuts(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            let ctrl = key.ctrl;
+            let shift = key.shift;
+            let vk = key.vk;
+
+            // Ctrl+F: フローティングペイン トグル
+            if ctrl && !shift && vk == b'F' as u16 {
+                let _ = state.float_tx.try_send(());
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+B: Normal → Pane モードへ切り替え
+            if ctrl && !shift && vk == b'B' as u16 {
+                state.mode.set(ClientMode::Pane);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+P: テーマランチャーを開く
+            if ctrl && !shift && vk == b'P' as u16 {
+                let entries = list_available_themes();
+                state.panes.lock().unwrap().theme_launcher = Some(ThemeLauncherState::new(entries));
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+Shift+E: 縦分割 (side by side)
+            if ctrl && shift && vk == b'E' as u16 {
+                state.request_split(SplitDirection::Vertical);
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+Shift+O: 横分割 (top / bottom)
+            if ctrl && shift && vk == b'O' as u16 {
+                state.request_split(SplitDirection::Horizontal);
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+Shift+W: アクティブペイン削除（最後の1枚はアプリ終了）(B-6)
+            if ctrl && shift && vk == b'W' as u16 {
+                state.close_active_pane();
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+Tab: 次のペイン / Ctrl+Shift+Tab: 前のペイン
+            if ctrl && vk == VK_TAB.0 {
+                state.cycle_pane(!shift);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                return KeyConsumed::Yes;
+            }
+
+            // Ctrl+Arrow: 方向指定ペインフォーカス移動
+            if ctrl && !shift {
+                let dir = match vk {
+                    k if k == VK_LEFT.0 => Some(Direction::Left),
+                    k if k == VK_RIGHT.0 => Some(Direction::Right),
+                    k if k == VK_UP.0 => Some(Direction::Up),
+                    k if k == VK_DOWN.0 => Some(Direction::Down),
+                    _ => None,
+                };
+                if let Some(d) = dir {
+                    state.focus_pane_dir(d);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return KeyConsumed::Yes;
+                }
+            }
+
+            // Ctrl+V: クリップボードからペースト
+            if ctrl && !shift && vk == b'V' as u16 {
+                let bracketed = state.active_grid().lock().unwrap().bracketed_paste();
+                if let Some(text) = read_clipboard_text(hwnd) {
+                    let mut data = Vec::new();
+                    if bracketed {
+                        data.extend_from_slice(b"\x1b[200~");
+                    }
+                    data.extend_from_slice(text.as_bytes());
+                    if bracketed {
+                        data.extend_from_slice(b"\x1b[201~");
+                    }
+                    state.send_input(data);
+                }
+                return KeyConsumed::Yes;
+            }
+
+            // Normal モード + 選択範囲あり + Ctrl+C: クリップボードにコピー（PTY 送信なし）
+            if state.mode.get() == ClientMode::Normal && ctrl && !shift && vk == b'C' as u16 {
+                let clip_data = {
+                    let store = state.panes.lock().unwrap();
+                    store.normal_selection.and_then(|(ac, ar, ec, er)| {
+                        if (ac, ar) == (ec, er) {
+                            return None;
+                        }
+                        let row_start = ar.min(er);
+                        let row_end = ar.max(er);
+                        store.grids.get(&store.active).map(|grid_arc| {
+                            let grid = grid_arc.lock().unwrap();
+                            grid.extract_text(row_start, row_end).into_bytes()
+                        })
+                    })
+                };
+                if let Some(data) = clip_data {
+                    let mut store = state.panes.lock().unwrap();
+                    store.pending_clipboard = Some(data);
+                    store.normal_selection = None;
+                    drop(store);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return KeyConsumed::Yes;
+                }
+                // 選択なし → PTY に \x03 を送る（次のハンドラへ委譲）
+            }
+
+            KeyConsumed::No
+        }
+
+        // ── VT キーマッピング（PTY パススルー）─────────────────────────────────
+        unsafe fn handle_vt_passthrough(state: &Self, _hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            let app_cursor = state
+                .active_grid()
+                .lock()
+                .unwrap()
+                .application_cursor_keys();
+            if let Some(vt) = keydown_to_vt(key.wparam, key.lparam, app_cursor) {
+                state.send_input(vt);
+                return KeyConsumed::Yes;
+            }
+            KeyConsumed::No
+        }
+
+        // ── WM_KEYDOWN ディスパッチャ ───────────────────────────────────────────
+        // 各ハンドラを優先順位順に呼び出す。最初に Yes/YesPassChar を返したハンドラで停止する。
+        unsafe fn dispatch_wm_keydown(state: &Self, hwnd: HWND, key: &KeyInput) -> KeyConsumed {
+            let r = Self::handle_save_prompt(state, hwnd, key);
+            if r != KeyConsumed::No {
+                return r;
+            }
+            let r = Self::handle_layout_launcher(state, hwnd, key);
+            if r != KeyConsumed::No {
+                return r;
+            }
+            let r = Self::handle_theme_launcher(state, hwnd, key);
+            if r != KeyConsumed::No {
+                return r;
+            }
+            let r = Self::handle_copy_mode(state, hwnd, key);
+            if r != KeyConsumed::No {
+                return r;
+            }
+            let r = Self::handle_pane_mode(state, hwnd, key);
+            if r != KeyConsumed::No {
+                return r;
+            }
+            let r = Self::handle_global_shortcuts(state, hwnd, key);
+            if r != KeyConsumed::No {
+                return r;
+            }
+            Self::handle_vt_passthrough(state, hwnd, key)
         }
     }
 
@@ -567,467 +1056,26 @@ mod win32 {
                 LRESULT(0)
             }
 
-            // ── 制御キー ────────────────────────────────────────────────
+            // ── 制御キー ────────────────────────────────────────────
             WM_KEYDOWN => {
                 if !state_ptr.is_null() {
                     let state = &*state_ptr;
                     let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                     let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
-
-                    // ── レイアウト保存プロンプトキー処理 ────────────────
-                    let save_prompt_open = state.panes.lock().unwrap().save_prompt.is_some();
-                    if save_prompt_open {
-                        let vk = wparam.0 as u16;
-                        if vk == VK_RETURN.0 {
-                            // Enter: 名前を確定して保存
-                            let (name, layout_toml) = {
-                                let store = state.panes.lock().unwrap();
-                                let name = store.save_prompt.clone().unwrap_or_default();
-                                let toml = layout_to_toml(&store.layout);
-                                (name, toml)
-                            };
-                            let name = name.trim().to_string();
-                            if !name.is_empty() {
-                                match save_layout_file(&name, &layout_toml) {
-                                    Ok(()) => {
-                                        let mut store = state.panes.lock().unwrap();
-                                        let active = store.active;
-                                        store.save_prompt = None;
-                                        store.pending_toasts.push_back(crate::layout::Toast {
-                                            pane_id: active,
-                                            message: format!("レイアウト「{name}」を保存しました"),
-                                            elapsed_ms: 0,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        let mut store = state.panes.lock().unwrap();
-                                        let active = store.active;
-                                        store.save_prompt = None;
-                                        store.pending_toasts.push_back(crate::layout::Toast {
-                                            pane_id: active,
-                                            message: format!("保存エラー: {e}"),
-                                            elapsed_ms: 0,
-                                        });
-                                    }
-                                }
-                            } else {
-                                state.panes.lock().unwrap().save_prompt = None;
-                            }
-                            // Enter/Esc/Backspace のみ WM_CHAR を抑制する
+                    let key = KeyInput {
+                        vk: wparam.0 as u16,
+                        ctrl,
+                        shift,
+                        wparam,
+                        lparam,
+                    };
+                    match ClientState::dispatch_wm_keydown(state, hwnd, &key) {
+                        KeyConsumed::Yes => {
                             state.skip_char.set(true);
-                        } else if vk == VK_ESCAPE.0 {
-                            state.panes.lock().unwrap().save_prompt = None;
-                            state.skip_char.set(true);
-                        } else if vk == VK_BACK.0 {
-                            let mut store = state.panes.lock().unwrap();
-                            if let Some(s) = &mut store.save_prompt {
-                                s.pop();
-                            }
-                            state.skip_char.set(true);
-                        }
-                        // 印字可能キーは skip_char を立てず WM_CHAR に委譲
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── レイアウトランチャーキー処理 ────────────────────
-                    let launcher_open = state.panes.lock().unwrap().launcher.is_some();
-                    if launcher_open {
-                        let vk = wparam.0 as u16;
-                        if vk == VK_RETURN.0 {
-                            let name = {
-                                let mut store = state.panes.lock().unwrap();
-                                let name = store
-                                    .launcher
-                                    .as_ref()
-                                    .filter(|l| !l.entries.is_empty())
-                                    .and_then(|l| {
-                                        l.entries.get(l.selected).map(|(n, _)| n.clone())
-                                    });
-                                store.launcher = None;
-                                name
-                            };
-                            if let Some(name) = name {
-                                let _ = state.layout_tx.try_send(name);
-                            }
-                        } else if vk == VK_ESCAPE.0 || vk == b'Q' as u16 {
-                            state.panes.lock().unwrap().launcher = None;
-                        } else {
-                            let mut store = state.panes.lock().unwrap();
-                            if let Some(launcher) = &mut store.launcher {
-                                if vk == VK_UP.0 {
-                                    launcher.selected = launcher.selected.saturating_sub(1);
-                                } else if vk == VK_DOWN.0 {
-                                    let max = launcher.entries.len().saturating_sub(1);
-                                    launcher.selected = (launcher.selected + 1).min(max);
-                                }
-                            }
-                        }
-                        state.skip_char.set(true);
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── テーマランチャーキー処理 ──────────────────────────
-                    let theme_launcher_open = state.panes.lock().unwrap().theme_launcher.is_some();
-                    if theme_launcher_open {
-                        let vk = wparam.0 as u16;
-                        if vk == VK_RETURN.0 {
-                            let name = {
-                                let mut store = state.panes.lock().unwrap();
-                                let name = store
-                                    .theme_launcher
-                                    .as_ref()
-                                    .filter(|t| !t.entries.is_empty())
-                                    .and_then(|t| t.selected_name().map(str::to_owned));
-                                store.theme_launcher = None;
-                                name
-                            };
-                            if let Some(name) = name {
-                                if let Some(theme) = load_theme_from_file(&name) {
-                                    let win_theme = WinTheme::from_theme(&theme);
-                                    state.theme.set(win_theme);
-                                }
-                            }
-                        } else if vk == VK_ESCAPE.0 || vk == b'Q' as u16 {
-                            state.panes.lock().unwrap().theme_launcher = None;
-                        } else {
-                            let mut store = state.panes.lock().unwrap();
-                            if let Some(tl) = &mut store.theme_launcher {
-                                if vk == VK_UP.0 {
-                                    tl.selected = tl.selected.saturating_sub(1);
-                                } else if vk == VK_DOWN.0 {
-                                    let max = tl.entries.len().saturating_sub(1);
-                                    tl.selected = (tl.selected + 1).min(max);
-                                }
-                            }
-                        }
-                        state.skip_char.set(true);
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── Copy モードのキー処理 ────────────────────────────
-                    if state.mode.get() == ClientMode::Copy {
-                        let vk = wparam.0 as u16;
-                        state.skip_char.set(true);
-
-                        // グリッドサイズを取得
-                        let (cols, rows) = {
-                            let g = state.active_grid();
-                            let g = g.lock().unwrap();
-                            (g.cols() as usize, g.rows() as usize)
-                        };
-
-                        match vk {
-                            // Esc / q: コピーモード終了
-                            k if k == VK_ESCAPE.0 || k == b'Q' as u16 => {
-                                state.mode.set(ClientMode::Normal);
-                                state.panes.lock().unwrap().copy_mode = None;
-                            }
-                            // h / 左矢印: 左移動
-                            k if k == b'H' as u16 || k == VK_LEFT.0 => {
-                                let mut store = state.panes.lock().unwrap();
-                                if let Some(cm) = &mut store.copy_mode {
-                                    cm.move_cursor(-1, 0, cols, rows);
-                                }
-                            }
-                            // l / 右矢印: 右移動
-                            k if k == b'L' as u16 || k == VK_RIGHT.0 => {
-                                let mut store = state.panes.lock().unwrap();
-                                if let Some(cm) = &mut store.copy_mode {
-                                    cm.move_cursor(1, 0, cols, rows);
-                                }
-                            }
-                            // k / 上矢印: 上移動
-                            k if k == b'K' as u16 || k == VK_UP.0 => {
-                                let mut store = state.panes.lock().unwrap();
-                                if let Some(cm) = &mut store.copy_mode {
-                                    cm.move_cursor(0, -1, cols, rows);
-                                }
-                            }
-                            // j / 下矢印: 下移動
-                            k if k == b'J' as u16 || k == VK_DOWN.0 => {
-                                let mut store = state.panes.lock().unwrap();
-                                if let Some(cm) = &mut store.copy_mode {
-                                    cm.move_cursor(0, 1, cols, rows);
-                                }
-                            }
-                            // v: ビジュアル選択トグル
-                            k if k == b'V' as u16 => {
-                                let mut store = state.panes.lock().unwrap();
-                                if let Some(cm) = &mut store.copy_mode {
-                                    cm.toggle_anchor();
-                                }
-                            }
-                            // y / Enter: 選択テキストをコピーしてノーマルモードへ
-                            k if k == b'Y' as u16 || k == VK_RETURN.0 => {
-                                let clip_data = {
-                                    let store = state.panes.lock().unwrap();
-                                    if let Some(cm) = &store.copy_mode {
-                                        if let Some((row_start, row_end)) = cm.selection_rows() {
-                                            let active = store.active;
-                                            if let Some(grid_arc) = store.grids.get(&active) {
-                                                let grid = grid_arc.lock().unwrap();
-                                                let text = grid.extract_text(row_start, row_end);
-                                                Some(text.into_bytes())
-                                            } else {
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                };
-                                {
-                                    let mut store = state.panes.lock().unwrap();
-                                    if let Some(data) = clip_data {
-                                        store.pending_clipboard = Some(data);
-                                    }
-                                    store.copy_mode = None;
-                                }
-                                state.mode.set(ClientMode::Normal);
-                            }
-                            _ => {}
-                        }
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── Pane モードのキー処理 ────────────────────────────
-                    if state.mode.get() == ClientMode::Pane {
-                        let vk = wparam.0 as u16;
-
-                        // モディファイアキー単体はペインモードを維持して無視
-                        // (Shift/Ctrl/Alt を押しただけで Normal に戻らないようにする)
-                        const MODIFIER_KEYS: &[u16] = &[
-                            0x10, // VK_SHIFT
-                            0x11, // VK_CONTROL
-                            0x12, // VK_MENU (Alt)
-                            0xA0, // VK_LSHIFT
-                            0xA1, // VK_RSHIFT
-                            0xA2, // VK_LCONTROL
-                            0xA3, // VK_RCONTROL
-                            0xA4, // VK_LMENU
-                            0xA5, // VK_RMENU
-                        ];
-                        if MODIFIER_KEYS.contains(&vk) {
                             return LRESULT(0);
                         }
-
-                        // `<`/`>` (Shift+,/.) はペインモードを維持して繰り返し操作可能にする
-                        const VK_OEM_COMMA: u16 = 0xBC;
-                        const VK_OEM_PERIOD: u16 = 0xBE;
-                        if shift && (vk == VK_OEM_COMMA || vk == VK_OEM_PERIOD) {
-                            let active = state.panes.lock().unwrap().active;
-                            let delta = if vk == VK_OEM_PERIOD {
-                                0.05_f32
-                            } else {
-                                -0.05_f32
-                            };
-                            state.panes.lock().unwrap().layout.adjust_ratio_for_dir(
-                                active,
-                                delta,
-                                SplitDirection::Vertical,
-                            );
-                            state.skip_char.set(true);
-                            let _ = InvalidateRect(Some(hwnd), None, false);
-                            return LRESULT(0);
-                        }
-
-                        // `+`/`-` はペインモードを維持して縦方向の比率を調整（C-18）
-                        // + = Shift+VK_OEM_PLUS(0xBB), - = VK_OEM_MINUS(0xBD)
-                        const VK_OEM_PLUS: u16 = 0xBB;
-                        const VK_OEM_MINUS: u16 = 0xBD;
-                        let is_plus = shift && vk == VK_OEM_PLUS;
-                        let is_minus = !shift && vk == VK_OEM_MINUS;
-                        if is_plus || is_minus {
-                            let active = state.panes.lock().unwrap().active;
-                            let delta = if is_plus { 0.05_f32 } else { -0.05_f32 };
-                            state.panes.lock().unwrap().layout.adjust_ratio_for_dir(
-                                active,
-                                delta,
-                                SplitDirection::Horizontal,
-                            );
-                            state.skip_char.set(true);
-                            let _ = InvalidateRect(Some(hwnd), None, false);
-                            return LRESULT(0);
-                        }
-
-                        state.skip_char.set(true); // WM_CHAR を抑制
-                        match vk {
-                            k if k == b'V' as u16 => {
-                                // コピーモードに入る（Normal への遷移は skip）
-                                state.mode.set(ClientMode::Copy);
-                                state.panes.lock().unwrap().copy_mode = Some(CopyState::new(0, 0));
-                            }
-                            k if k == b'S' as u16 => {
-                                // レイアウト保存プロンプトを開く（Pane モードを維持）
-                                state.panes.lock().unwrap().save_prompt = Some(String::new());
-                            }
-                            _ => {
-                                state.mode.set(ClientMode::Normal);
-                                match vk {
-                                    k if k == b'E' as u16 => {
-                                        state.request_split(SplitDirection::Vertical);
-                                    }
-                                    k if k == b'O' as u16 => {
-                                        state.request_split(SplitDirection::Horizontal);
-                                    }
-                                    k if k == b'W' as u16 => {
-                                        state.close_active_pane();
-                                    }
-                                    k if k == b'F' as u16 => {
-                                        let _ = state.float_tx.try_send(());
-                                    }
-                                    k if k == b'X' as u16 => {
-                                        state.open_scrollback_in_editor();
-                                    }
-                                    k if k == b'L' as u16 => {
-                                        // レイアウトランチャーを開く
-                                        let entries = list_available_layouts();
-                                        state.panes.lock().unwrap().launcher =
-                                            Some(LauncherState::new(entries));
-                                    }
-                                    _ => {} // 未定義キーは無視（skip_char で WM_CHAR も抑制済み）
-                                }
-                            }
-                        }
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── Ctrl+F: フローティングペイントグル ──────────────
-                    if ctrl && !shift && wparam.0 == b'F' as usize {
-                        let _ = state.float_tx.try_send(());
-                        state.skip_char.set(true);
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── Ctrl+B: Normal → Pane モードへ切り替え ──────────
-                    if ctrl && !shift && wparam.0 == b'B' as usize {
-                        state.mode.set(ClientMode::Pane);
-                        state.skip_char.set(true); // \x02 を PTY に送らない
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // ── Ctrl+P: テーマランチャーを開く ──────────────────
-                    if ctrl && !shift && wparam.0 == b'P' as usize {
-                        let entries = list_available_themes();
-                        state.panes.lock().unwrap().theme_launcher =
-                            Some(ThemeLauncherState::new(entries));
-                        state.skip_char.set(true);
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // Ctrl+Shift+E: 縦分割 (side by side)
-                    if ctrl && shift && wparam.0 == b'E' as usize {
-                        state.request_split(SplitDirection::Vertical);
-                        return LRESULT(0);
-                    }
-                    // Ctrl+Shift+O: 横分割 (top / bottom)
-                    if ctrl && shift && wparam.0 == b'O' as usize {
-                        state.request_split(SplitDirection::Horizontal);
-                        return LRESULT(0);
-                    }
-                    // Ctrl+Shift+W: アクティブペインを削除 (F-8)
-                    if ctrl && shift && wparam.0 == b'W' as usize {
-                        state.close_active_pane();
-                        return LRESULT(0);
-                    }
-                    // Ctrl+Tab: 次のペイン / Ctrl+Shift+Tab: 前のペイン
-                    if ctrl && wparam.0 == VK_TAB.0 as usize {
-                        state.cycle_pane(!shift);
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
-
-                    // Ctrl+Arrow: 方向指定ペインフォーカス移動
-                    if ctrl && !shift {
-                        let dir = match wparam.0 as u16 {
-                            k if k == VK_LEFT.0 => Some(Direction::Left),
-                            k if k == VK_RIGHT.0 => Some(Direction::Right),
-                            k if k == VK_UP.0 => Some(Direction::Up),
-                            k if k == VK_DOWN.0 => Some(Direction::Down),
-                            _ => None,
-                        };
-                        if let Some(d) = dir {
-                            state.focus_pane_dir(d);
-                            let _ = InvalidateRect(Some(hwnd), None, false);
-                            return LRESULT(0);
-                        }
-                    }
-
-                    // Ctrl+H/J/K/L によるペインフォーカス移動は廃止（F-6）
-                    // Ctrl+J は Claude Code 等の改行キーと衝突するため削除。
-                    // フォーカス移動は Ctrl+←↑↓→ を使うこと。
-
-                    // Ctrl+V: クリップボードからペースト
-                    if ctrl && !shift && wparam.0 == b'V' as usize {
-                        let bracketed = state.active_grid().lock().unwrap().bracketed_paste();
-                        if let Some(text) = read_clipboard_text(hwnd) {
-                            let mut data = Vec::new();
-                            if bracketed {
-                                data.extend_from_slice(b"\x1b[200~");
-                            }
-                            data.extend_from_slice(text.as_bytes());
-                            if bracketed {
-                                data.extend_from_slice(b"\x1b[201~");
-                            }
-                            state.send_input(data);
-                        }
-                        // WM_CHAR(\x16) を抑制して PTY への二重送信を防ぐ
-                        state.skip_char.set(true);
-                        return LRESULT(0);
-                    }
-
-                    // Normal モード + 選択範囲あり + Ctrl+C: クリップボードにコピー（PTY 送信なし）
-                    if state.mode.get() == ClientMode::Normal
-                        && ctrl
-                        && !shift
-                        && wparam.0 == b'C' as usize
-                    {
-                        let clip_data = {
-                            let store = state.panes.lock().unwrap();
-                            store.normal_selection.and_then(|(ac, ar, ec, er)| {
-                                // クリックのみ（anchor == end）は除外
-                                if (ac, ar) == (ec, er) {
-                                    return None;
-                                }
-                                let row_start = ar.min(er);
-                                let row_end = ar.max(er);
-                                store.grids.get(&store.active).map(|grid_arc| {
-                                    let grid = grid_arc.lock().unwrap();
-                                    grid.extract_text(row_start, row_end).into_bytes()
-                                })
-                            })
-                        };
-                        if let Some(data) = clip_data {
-                            let mut store = state.panes.lock().unwrap();
-                            store.pending_clipboard = Some(data);
-                            store.normal_selection = None;
-                            drop(store);
-                            state.skip_char.set(true);
-                            let _ = InvalidateRect(Some(hwnd), None, false);
-                            return LRESULT(0);
-                        }
-                    }
-
-                    let app_cursor = state
-                        .active_grid()
-                        .lock()
-                        .unwrap()
-                        .application_cursor_keys();
-                    if let Some(vt) = keydown_to_vt(wparam, lparam, app_cursor) {
-                        // WM_CHAR を抑制して二重送信を防ぐ（Ctrl+letter 等）
-                        state.skip_char.set(true);
-                        state.send_input(vt);
-                        return LRESULT(0);
+                        KeyConsumed::YesPassChar => return LRESULT(0),
+                        KeyConsumed::No => {}
                     }
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
