@@ -621,15 +621,15 @@ pub fn list_available_layouts() -> Vec<(String, Option<LayoutPreview>)> {
 /// ratio が 0.5 と異なる場合のみ `ratio = X.XXX` を出力する。
 /// 制限: `first` が Split であるような左辺スプリット（左優先ツリー）を
 /// ロードし直すと構造が変わる（連鎖型ツリーとして再構成される）。
-pub fn layout_to_toml(node: &LayoutNode) -> String {
-    // (split_dir, ratio) — 最初のペインは None
+pub fn layout_to_toml(node: &LayoutNode, commands: &HashMap<PaneId, String>) -> String {
+    // (pane_id, split_dir, ratio) — 最初のペインは split = None
     fn collect(
         node: &LayoutNode,
         split: Option<(&'static str, f32)>,
-        out: &mut Vec<Option<(&'static str, f32)>>,
+        out: &mut Vec<(PaneId, Option<(&'static str, f32)>)>,
     ) {
         match node {
-            LayoutNode::Leaf(_) => out.push(split),
+            LayoutNode::Leaf(id) => out.push((*id, split)),
             LayoutNode::Split {
                 direction,
                 ratio,
@@ -646,12 +646,16 @@ pub fn layout_to_toml(node: &LayoutNode) -> String {
         }
     }
 
-    let mut panes: Vec<Option<(&'static str, f32)>> = Vec::new();
+    let mut panes: Vec<(PaneId, Option<(&'static str, f32)>)> = Vec::new();
     collect(node, None, &mut panes);
 
     let mut out = String::new();
-    for split in panes {
+    for (pane_id, split) in panes {
         out.push_str("[[panes]]\n");
+        if let Some(cmd) = commands.get(&pane_id) {
+            // TOML の文字列リテラルとして適切にエスケープして出力
+            out.push_str(&format!("command = {cmd:?}\n"));
+        }
         if let Some((dir, ratio)) = split {
             out.push_str(&format!("split = \"{dir}\"\n"));
             if (ratio - 0.5).abs() >= 1e-4 {
@@ -808,6 +812,11 @@ pub struct PaneStore {
     pub save_prompt: Option<String>,
     /// テーマランチャー UI の状態（Some = 表示中）
     pub theme_launcher: Option<ThemeLauncherState>,
+    /// ペイン ID → 起動コマンド文字列（レイアウト適用時に記録、C-23）
+    ///
+    /// レイアウトファイルから適用されたコマンドのみ記録される。
+    /// 手動入力したコマンドは含まれない。
+    pub pane_commands: HashMap<PaneId, String>,
 }
 
 impl PaneStore {
@@ -830,6 +839,7 @@ impl PaneStore {
             normal_selection: None,
             save_prompt: None,
             theme_launcher: None,
+            pane_commands: HashMap::new(),
         }
     }
 
@@ -1534,7 +1544,7 @@ mod tests {
     #[test]
     fn test_layout_to_toml_single_pane() {
         let node = LayoutNode::Leaf(PaneId(1));
-        let toml = layout_to_toml(&node);
+        let toml = layout_to_toml(&node, &HashMap::new());
         assert_eq!(toml, "[[panes]]\n\n");
     }
 
@@ -1547,7 +1557,7 @@ mod tests {
             first: Box::new(LayoutNode::Leaf(PaneId(1))),
             second: Box::new(LayoutNode::Leaf(PaneId(2))),
         };
-        let toml = layout_to_toml(&node);
+        let toml = layout_to_toml(&node, &HashMap::new());
         assert_eq!(toml, "[[panes]]\n\n[[panes]]\nsplit = \"vertical\"\n\n");
     }
 
@@ -1565,11 +1575,64 @@ mod tests {
                 second: Box::new(LayoutNode::Leaf(PaneId(3))),
             }),
         };
-        let toml = layout_to_toml(&node);
+        let toml = layout_to_toml(&node, &HashMap::new());
         let expected = "[[panes]]\n\n\
                         [[panes]]\nsplit = \"vertical\"\n\n\
                         [[panes]]\nsplit = \"horizontal\"\n\n";
         assert_eq!(toml, expected);
+    }
+
+    // TC-C23-01: コマンドなしペインは command 行を出力しない
+    #[test]
+    fn test_layout_to_toml_no_command() {
+        let node = LayoutNode::Leaf(PaneId(1));
+        let toml = layout_to_toml(&node, &HashMap::new());
+        assert!(!toml.contains("command"));
+        assert_eq!(toml, "[[panes]]\n\n");
+    }
+
+    // TC-C23-02: コマンドありペインは command = "..." 行を出力する
+    #[test]
+    fn test_layout_to_toml_with_command() {
+        let node = LayoutNode::Leaf(PaneId(1));
+        let mut commands = HashMap::new();
+        commands.insert(PaneId(1), "cargo watch".to_string());
+        let toml = layout_to_toml(&node, &commands);
+        assert!(toml.contains("command = \"cargo watch\""), "got: {toml}");
+    }
+
+    // TC-C23-03: 垂直分割でコマンドを持つ 2 つ目のペインが TOML に含まれる
+    #[test]
+    fn test_layout_to_toml_split_with_command() {
+        let node = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        let mut commands = HashMap::new();
+        commands.insert(PaneId(2), "cargo test".to_string());
+        let toml = layout_to_toml(&node, &commands);
+        let expected = "[[panes]]\n\n\
+                        [[panes]]\n\
+                        command = \"cargo test\"\n\
+                        split = \"vertical\"\n\n";
+        assert_eq!(toml, expected);
+    }
+
+    // TC-C23-04: コマンドに特殊文字を含む場合も適切にエスケープされる
+    #[test]
+    fn test_layout_to_toml_command_with_special_chars() {
+        let node = LayoutNode::Leaf(PaneId(1));
+        let mut commands = HashMap::new();
+        commands.insert(PaneId(1), r#"echo "hello""#.to_string());
+        let toml = layout_to_toml(&node, &commands);
+        // Rust の Debug フォーマットで " がエスケープされる
+        assert!(toml.contains("command ="), "got: {toml}");
+        // TOML としてパース可能であることを確認
+        let parsed: toml::Value = toml::from_str(&toml).expect("should be valid TOML");
+        let arr = parsed["panes"].as_array().unwrap();
+        assert_eq!(arr[0]["command"].as_str().unwrap(), r#"echo "hello""#);
     }
 
     // TC-C19-04: save_layout_file は正常に書き込む
