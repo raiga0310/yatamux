@@ -53,7 +53,7 @@
 | accidental clone | `crates/server/src/session.rs` `name.clone()` | `Workspace` 保存と `WorkspaceCreated` 返信に同じ名前を使う | 限定的にあり | Low | `session.rs` | move と `Arc<str>` で減るが実利は薄い |
 | snapshot clone | `crates/server/src/session.rs` `title.lock().unwrap().clone()` | IPC 応答に owned title が必要 | 改善余地小 | Low | `session.rs` / `pane.rs` | lock 境界をまたぐので現状妥当。`Arc<str>` 化は可能だが優先度低い |
 | cheap handle clone | `crates/server/src/session.rs` `self.width_config.clone()` / Sender clone | `Pane::spawn` に必要な所有権配布 | 低い | Low | `session.rs` | 問題なし |
-| stringly typed event | `crates/server/src/pane.rs` `"Process exited"` / `"Bell"` / `"__cmd_finished__"` | 内部通知チャネルが `String` ベース | あり | High | `pane.rs` / `session.rs` / protocol | enum 化で clone と parse を減らせる。Rust 的改善として本命 |
+| stringly typed event | `crates/server/src/pane.rs` `"Process exited"` / `"Bell"` / `"__cmd_finished__"` | 内部通知チャネルが `String` ベース | 対応済み | High | `pane.rs` / `session.rs` / protocol | `PaneEvent` enum 化で内部文字列組み立て/解析を廃止 |
 | accidental state | `crates/server/src/pane.rs` `pub output_tx` | struct フィールドとして保持しているが実使用は spawn 内 clone のみ | あり | Low | `pane.rs` | 不要フィールドなら削除できる |
 
 ## 個別所見
@@ -103,7 +103,7 @@
 
 [crates/server/src/pane.rs](C:/Users/raiga/dev/cmux-win/crates/server/src/pane.rs) と
 [crates/server/src/session.rs](C:/Users/raiga/dev/cmux-win/crates/server/src/session.rs) の間は、
-`mpsc<(PaneId, String)>` で `"Process exited"` や `"__cmd_finished__:42"` をやり取りしている。
+以前は `mpsc<(PaneId, String)>` で `"Process exited"` や `"__cmd_finished__:42"` をやり取りしていた。
 
 これは clone 問題よりも大きく、以下を同時に招く。
 
@@ -111,7 +111,7 @@
 - typo や意味衝突の余地
 - 「内部イベント」と「ユーザー向け通知メッセージ」が分離されていない
 
-改善案:
+今回の改善:
 
 ```rust
 enum PaneEvent {
@@ -122,7 +122,8 @@ enum PaneEvent {
 }
 ```
 
-この変更は影響範囲が広いが、Rust 的な所有権・型安全性の改善としては最も価値が高い。
+この変更で、PTy タスクと server event loop の境界が型安全になり、
+内部の制御フローが文字列組み立て/解析に依存しなくなった。
 
 ### 5. 小さい clone は直せるが、優先度を上げすぎない
 
@@ -153,4 +154,4 @@ enum PaneEvent {
 - **改善できるが設計変更が必要なもの**
   fan-out の `ServerMessage` clone、layout command の多重所有、描画用 snapshot clone
 - **Rust 的に最も弱く、再設計価値が高いもの**
-  `String` ベースの内部通知チャネル
+  以前の `String` ベース内部通知チャネル。これは `PaneEvent` enum 化で改善済み

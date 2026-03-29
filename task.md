@@ -763,4 +763,7 @@ dispatch_wm_keydown
 - [ ] `window.rs` の UI state 取得を「必要部分のみ抽出する view struct」に寄せ、全体 snapshot clone を減らす
 - [x] `layout.rs` の部分木操作を `Clone` 前提ではなく `mem::replace` / `Option::take` ベースに置き換えられるか検証する
 - [ ] 文字列 payload を `String` clone でばら撒いている箇所を `Arc<str>` / 所有権移動で削減できるか検証する
+- [x] `pane.rs` ↔ `session.rs` 間の stringly typed な内部通知を `PaneEvent` enum に置き換える
+- [x] `docs/test-plan-typed-pane-events.md` を追加する
+- [x] `cargo clippy -p yatamux-server -- -D warnings` と `cargo test -p yatamux-server` を通す
 - [x] 変更後に `cargo clippy -- -D warnings` と主要テストを通し、回帰のない ownership 境界に整える
