@@ -37,14 +37,17 @@ yatamux addresses these on Windows by using native APIs directly: ConPTY for PTY
 | **Copy mode** | `V` in Pane mode → Copy mode. `hjkl`/arrows to move cursor, `v` to start selection, `y`/Enter to yank to clipboard |
 | **Mouse selection** | Left-drag to select text; releases to clipboard automatically |
 | **External IPC** | Named pipe `\\.\pipe\yatamux-<session>` for CLI / agent integration |
-| **CLI tools** | `list-panes`, `send-keys`, `capture-pane`, `split-pane` — scriptable from shell or AI agents |
+| **CLI tools** | `list-panes --json`, `send-keys --raw/--enter/--wait-for-prompt`, `capture-pane --plain-text/--json`, `split-pane`, `layout list/export/delete` |
 | **Scrollback buffer** | Up to 50,000 lines; mouse-wheel scroll; open in `$EDITOR` via Pane mode `X` |
 | **Floating pane** | Overlay pane on top of the tiled layout (`Ctrl+F` to toggle) |
 | **Pane mode** | `Ctrl+B` enters Pane mode — status bar shows context-sensitive keybind hints |
+| **Theme launcher** | `Ctrl+P` opens a theme picker; runtime color switching without restart |
 | **Session persistence** | Layout auto-saved to `%APPDATA%\yatamux\session.toml` on exit, restored on startup |
 | **Declarative layouts** | `--layout <name>` loads `%APPDATA%\yatamux\layouts\<name>.toml` for project startup |
+| **Layout save/manage** | `S` in Pane mode saves the current layout; `yatamux layout list/export/delete` manages saved layouts |
 | **Layout launcher** | `L` in Pane mode opens an in-app layout picker with a live split-diagram preview |
-| **Pane resize** | `<` / `>` in Pane mode adjusts the active pane's split ratio in 5 % steps |
+| **Pane resize** | `<` / `>` adjusts vertical splits, `+` / `-` adjusts horizontal splits in 5 % steps |
+| **Notifications** | Focused app uses in-window toasts; unfocused app falls back to native Windows balloon notifications |
 | **Plugin hooks** | `%APPDATA%\yatamux\config.toml` `[hooks]` — `on_pane_created` / `on_pane_closed` shell commands |
 | **Click to focus** | Left-click on any pane to focus it |
 | **ZWJ / emoji / BiDi** | ZWJ sequences (👨‍💻), VS-16 widening, Nerd Fonts wide-glyph option, BiDi control chars (zero-width) |
@@ -89,12 +92,13 @@ $env:RUST_LOG="info"; cargo run
 |-----|--------|
 | `Ctrl+Shift+E` | Split pane vertically (left/right) |
 | `Ctrl+Shift+O` | Split pane horizontally (top/bottom) |
-| `Ctrl+Shift+W` | Close active pane |
+| `Ctrl+Shift+W` | Close active pane, or exit the app if it is the last pane |
 | `Ctrl+→` / `Ctrl+↓` | Focus next pane |
 | `Ctrl+←` / `Ctrl+↑` | Focus previous pane |
 | `Ctrl+Tab` | Focus next pane |
 | `Ctrl+Shift+Tab` | Focus previous pane |
 | `Ctrl+F` | Toggle floating pane |
+| `Ctrl+P` | Open theme launcher |
 | `Ctrl+B` | Enter Pane mode |
 | Left click | Focus clicked pane |
 | Mouse wheel | Scroll scrollback buffer |
@@ -108,10 +112,12 @@ $env:RUST_LOG="info"; cargo run
 | `W` | Close active pane |
 | `F` | Toggle floating pane |
 | `X` | Open scrollback in `$EDITOR` |
-| `<` / `>` | Shrink / expand active pane (adjusts split ratio ±5 %) |
+| `S` | Open save-layout prompt |
+| `<` / `>` | Adjust vertical split ratio by ±5 % |
+| `+` / `-` | Adjust horizontal split ratio by ±5 % |
 | `L` | Open layout launcher (pick & apply a saved layout) |
 | `V` | Enter Copy mode |
-| `q` | Return to Normal mode |
+| `q` / `Esc` | Return to Normal mode |
 
 **Copy mode** (entered with `V` in Pane mode):
 
@@ -130,24 +136,35 @@ $env:RUST_LOG="info"; cargo run
 When yatamux is running, you can control it from any shell or AI agent via the named pipe IPC:
 
 ```powershell
-# List all panes
-yatamux list-panes
+# List all panes as JSON
+yatamux list-panes --json
 
-# Send keystrokes to a pane (supports \n \r \t escape sequences)
-yatamux send-keys --pane 1 "cargo test\n"
+# Send a command and wait for OSC 133;D command completion
+yatamux send-keys --pane 1 --enter --wait-for-prompt "cargo test"
 
-# Capture pane output (scrollback tail + current screen) — useful for AI agents
-yatamux capture-pane --target 1 --lines 200
+# Capture pane output as plain text
+yatamux capture-pane --target 1 --lines 200 --plain-text
+
+# Capture pane output with structured metadata
+yatamux capture-pane --target 1 --lines 200 --json
 
 # Split a pane, optionally in a different working directory
 yatamux split-pane --target 1 --direction vertical --dir C:\projects\other-repo
+
+# Manage saved layouts
+yatamux layout list
+yatamux layout export work
+yatamux layout delete work
 ```
 
 These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-default`.
 
 ### Toast Notifications
 
-yatamux shows Steam-style toast notifications in the bottom-right corner when a background pane has something to report.
+yatamux uses a focus-aware notification backend:
+
+- When the app is focused, notifications are rendered as in-window toast popups.
+- When the app is unfocused, notifications are forwarded to native Windows balloon notifications.
 
 **Triggers (background panes only):**
 
@@ -248,14 +265,17 @@ yatamux は ConPTY・Win32 GDI・IMM32 を直接使い、Windows ネイティブ
 | **コピーモード** | ペインモード `V` でコピーモードへ。`hjkl`/矢印でカーソル移動、`v` で選択開始、`y`/Enter でヤンク |
 | **マウス選択** | 左ドラッグでテキスト選択。離した瞬間にクリップボードへコピー |
 | **外部 IPC** | `\\.\pipe\yatamux-<session>` で CLI・エージェントからの操作を受け付け |
-| **CLI ツール** | `list-panes`、`send-keys`、`capture-pane`、`split-pane` — シェルや AI エージェントからスクリプト化可能 |
+| **CLI ツール** | `list-panes --json`、`send-keys --raw/--enter/--wait-for-prompt`、`capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete` |
 | **スクロールバック** | 最大 50,000 行。マウスホイールでスクロール。ペインモード `X` で `$EDITOR` 起動 |
 | **フローティングペイン** | タイルレイアウトの上に重なるオーバーレイペイン（`Ctrl+F` でトグル） |
 | **ペインモード** | `Ctrl+B` でペインモードへ。ステータスバーにキーバインドヒントを表示 |
+| **テーマランチャー** | `Ctrl+P` でテーマ選択 UI を開き、色テーマを即時切り替え |
 | **セッション永続化** | 終了時に `%APPDATA%\yatamux\session.toml` へ自動保存、起動時に復元 |
 | **宣言的レイアウト** | `--layout <name>` で `%APPDATA%\yatamux\layouts\<name>.toml` をプロジェクト起動に活用 |
+| **レイアウト保存/管理** | ペインモード `S` で現在構成を保存。`yatamux layout list/export/delete` で管理 |
 | **レイアウトランチャー** | ペインモード `L` でアプリ内レイアウト選択 UI を表示（分割図プレビュー付き） |
-| **ペインリサイズ** | ペインモード `<` / `>` で分割比率を 5 % 単位で増減 |
+| **ペインリサイズ** | ペインモード `<` / `>` で縦分割比、`+` / `-` で横分割比を 5 % 単位で増減 |
+| **通知バックエンド** | フォーカス中はアプリ内トースト、非フォーカス時は Windows ネイティブ通知へ切り替え |
 | **プラグインフック** | `config.toml` の `[hooks]` で `on_pane_created` / `on_pane_closed` シェルコマンドを設定 |
 | **クリックフォーカス** | ペイン領域を左クリックしてフォーカス移動 |
 | **ZWJ / 絵文字 / BiDi** | ZWJ シーケンス（👨‍💻）、VS-16 幅拡張、Nerd Fonts ワイドグリフ、BiDi 制御文字（幅0扱い） |
@@ -300,12 +320,13 @@ $env:RUST_LOG="info"; cargo run
 |------|------|
 | `Ctrl+Shift+E` | 縦分割（左右） |
 | `Ctrl+Shift+O` | 横分割（上下） |
-| `Ctrl+Shift+W` | アクティブペインを閉じる |
+| `Ctrl+Shift+W` | アクティブペインを閉じる。最後の1枚ならアプリ終了 |
 | `Ctrl+→` / `Ctrl+↓` | 次のペインにフォーカス |
 | `Ctrl+←` / `Ctrl+↑` | 前のペインにフォーカス |
 | `Ctrl+Tab` | 次のペインにフォーカス |
 | `Ctrl+Shift+Tab` | 前のペインにフォーカス |
 | `Ctrl+F` | フローティングペインのトグル |
+| `Ctrl+P` | テーマランチャーを開く |
 | `Ctrl+B` | ペインモードへ移行 |
 | 左クリック | クリックしたペインにフォーカス |
 | マウスホイール | スクロールバックをスクロール |
@@ -319,10 +340,12 @@ $env:RUST_LOG="info"; cargo run
 | `W` | アクティブペインを閉じる |
 | `F` | フローティングペインのトグル |
 | `X` | スクロールバックを `$EDITOR` で開く |
-| `<` / `>` | アクティブペインを縮小 / 拡大（分割比率 ±5 %） |
+| `S` | レイアウト保存プロンプトを開く |
+| `<` / `>` | 縦分割比を ±5 % 調整 |
+| `+` / `-` | 横分割比を ±5 % 調整 |
 | `L` | レイアウトランチャーを開く（保存済みレイアウトを選択・適用） |
 | `V` | コピーモードに入る |
-| `q` | ノーマルモードに戻る |
+| `q` / `Esc` | ノーマルモードに戻る |
 
 **コピーモード**（ペインモードで `V` を押して移行）:
 
@@ -341,24 +364,35 @@ $env:RUST_LOG="info"; cargo run
 yatamux 起動中は、任意のシェルや AI エージェントから名前付きパイプ IPC を通じて操作できます:
 
 ```powershell
-# ペイン一覧を表示
-yatamux list-panes
+# ペイン一覧を JSON で表示
+yatamux list-panes --json
 
-# 指定ペインにキー入力を送信（\n \r \t エスケープに対応）
-yatamux send-keys --pane 1 "cargo test\n"
+# 指定ペインにコマンドを送信し、OSC 133;D まで待機
+yatamux send-keys --pane 1 --enter --wait-for-prompt "cargo test"
 
-# ペインの内容をダンプ（スクロールバック末尾 + 現在画面）— AI エージェントの結果回収に最適
-yatamux capture-pane --target 1 --lines 200
+# ペインの内容をプレーンテキストで取得
+yatamux capture-pane --target 1 --lines 200 --plain-text
+
+# ペインの内容を構造化 JSON で取得
+yatamux capture-pane --target 1 --lines 200 --json
 
 # ペインを分割。--dir で別リポジトリの作業ディレクトリを指定可能
 yatamux split-pane --target 1 --direction vertical --dir C:\projects\other-repo
+
+# 保存済みレイアウトを管理
+yatamux layout list
+yatamux layout export work
+yatamux layout delete work
 ```
 
 接続先: `\\.\pipe\yatamux-default`
 
 ### トースト通知
 
-バックグラウンドペインで何か通知すべきことがあると、画面右下に Steam 風のトースト通知が表示されます。
+yatamux の通知はフォーカス状態でバックエンドが切り替わります。
+
+- アプリがフォーカス中なら、画面右下にアプリ内トーストを描画します。
+- アプリが非フォーカスなら、Windows ネイティブのバルーン通知へ転送します。
 
 **通知が出るトリガー（バックグラウンドペインのみ）:**
 

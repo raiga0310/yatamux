@@ -699,6 +699,38 @@ Agent 運用では `pane 3` のような数値 ID よりも、`tests` `server` `
 
 ---
 
+## ドキュメント
+
+### D-1: `docs/test-plan-*` と実装済み自動テストの同期 【優先度: 中】
+
+`docs/` 配下のテスト計画には、実装変更後も古い前提のまま残っているケースがある。
+README / CLAUDE は今回実装準拠に更新するが、個別のテスト計画書は別途同期しないと
+「何を自動テストで担保しているのか」を誤読しやすい。
+
+- **確認したズレ**
+  - `docs/test-plan-command-finished.md`
+    - 旧 `__cmd_finished__:` 文字列通知を前提にしているが、実装は `PaneEvent::CommandFinished` に移行済み
+  - `docs/test-plan-capture-pane.md`
+    - `target=0` でアクティブペインを取る前提、存在しない pane で空文字を返す前提が残っている
+    - 実装は存在しない pane に対して `Error` を返す
+  - `docs/test-plan-pane-close.md`
+    - 最後の 1 ペインで `Ctrl+Shift+W` が no-op という旧仕様のまま
+    - 実装は `ClosePane` を送り、最後の 1 ペインならアプリ終了経路に入る
+  - `docs/test-plan-status-bar.md`
+    - Pane モードで `H/J/K/L` フォーカス移動という旧仕様が残っている
+    - 現実の Pane モードは `S`, `L`, `V`, `<`/`>`, `+`/`-` など中心で、該当ユニットテスト前提も古い
+  - `docs/test-plan-layout-launcher.md`
+    - `list_layouts()` を直接呼ぶ想定で書かれているが、実テストは `LayoutConfig::list_layouts` 相当のロジックを別形で検証している
+
+#### サブタスク
+- [ ] `docs/test-plan-command-finished.md` を typed `PaneEvent` ベースのテスト計画に更新する
+- [ ] `docs/test-plan-capture-pane.md` を現行エラー挙動と `capture-pane --plain-text/--json` 前提に合わせて更新する
+- [ ] `docs/test-plan-pane-close.md` を「最後の 1 ペインで終了」に合わせて更新する
+- [ ] `docs/test-plan-status-bar.md` を現行 Pane モードのキー割り当てと実在ユニットテストに合わせて更新する
+- [ ] `docs/test-plan-layout-launcher.md` の自動テスト対象表現を現行実装に合わせて整理する
+
+---
+
 ## リファクタリング
 
 ### ~~A-1: WM_KEYDOWN キー処理アーキテクチャ刷新（ハンドラ分離）~~ ✅ 対応済み 【優先度: 高】
