@@ -240,24 +240,74 @@ impl LayoutNode {
     /// 削除後にフォーカスすべき候補ペインの ID を返す。
     /// ルート Leaf（最後の1ペイン）の場合は None を返す（削除不可）。
     pub fn remove_pane(&mut self, id: PaneId) -> Option<PaneId> {
-        match self {
-            LayoutNode::Leaf(_) => None,
-            LayoutNode::Split { first, second, .. } => {
-                // first が削除対象
-                if matches!(first.as_ref(), LayoutNode::Leaf(lid) if *lid == id) {
-                    let next = second.pane_ids().into_iter().next();
-                    *self = (**second).clone();
-                    return next;
-                }
-                // second が削除対象
-                if matches!(second.as_ref(), LayoutNode::Leaf(lid) if *lid == id) {
-                    let next = first.pane_ids().into_iter().next();
-                    *self = (**first).clone();
-                    return next;
-                }
-                // 再帰
-                first.remove_pane(id).or_else(|| second.remove_pane(id))
+        fn first_pane_id(node: &LayoutNode) -> Option<PaneId> {
+            match node {
+                LayoutNode::Leaf(id) => Some(*id),
+                LayoutNode::Split { first, .. } => first_pane_id(first),
             }
+        }
+
+        fn remove_owned(node: LayoutNode, id: PaneId) -> (LayoutNode, Option<PaneId>, bool) {
+            match node {
+                LayoutNode::Leaf(leaf_id) => (LayoutNode::Leaf(leaf_id), None, false),
+                LayoutNode::Split {
+                    direction,
+                    ratio,
+                    first,
+                    second,
+                } => {
+                    let first = *first;
+                    let second = *second;
+
+                    if matches!(first, LayoutNode::Leaf(leaf_id) if leaf_id == id) {
+                        let next = first_pane_id(&second);
+                        return (second, next, true);
+                    }
+                    if matches!(second, LayoutNode::Leaf(leaf_id) if leaf_id == id) {
+                        let next = first_pane_id(&first);
+                        return (first, next, true);
+                    }
+
+                    let (first, next, removed) = remove_owned(first, id);
+                    if removed {
+                        return (
+                            LayoutNode::Split {
+                                direction,
+                                ratio,
+                                first: Box::new(first),
+                                second: Box::new(second),
+                            },
+                            next,
+                            true,
+                        );
+                    }
+
+                    let (second, next, removed) = remove_owned(second, id);
+                    (
+                        LayoutNode::Split {
+                            direction,
+                            ratio,
+                            first: Box::new(first),
+                            second: Box::new(second),
+                        },
+                        next,
+                        removed,
+                    )
+                }
+            }
+        }
+
+        if matches!(self, LayoutNode::Leaf(_)) {
+            return None;
+        }
+
+        let current = std::mem::replace(self, LayoutNode::Leaf(PaneId(0)));
+        let (new_layout, next, removed) = remove_owned(current, id);
+        *self = new_layout;
+        if removed {
+            next
+        } else {
+            None
         }
     }
 

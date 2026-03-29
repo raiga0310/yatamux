@@ -9,7 +9,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use yatamux_protocol::types::{PaneId, PaneInfo, SplitDirection, SurfaceId, WorkspaceId};
+use yatamux_protocol::types::{
+    CursorInfo, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, WorkspaceId,
+};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::CjkWidthConfig;
 
@@ -110,12 +112,13 @@ impl Server {
                             exit_code,
                         }).await;
                     } else {
+                        let should_close = body == "Process exited";
                         let _ = self.client_tx.send(ServerMessage::Notification {
                             pane: pane_id,
-                            body: body.clone(),
+                            body,
                         }).await;
                         // C-9: PTY プロセス終了時にペインを自動削除
-                        if body == "Process exited" {
+                        if should_close {
                             self.panes.remove(&pane_id);
                             let _ = self.client_tx
                                 .send(ServerMessage::PaneClosed { pane: pane_id })
@@ -272,10 +275,40 @@ impl Server {
                         .context("Failed to send Error")?;
                     return Ok(());
                 }
-                let content = if let Some(p) = self.panes.get(&pane) {
+                let (content, capture) = if let Some(p) = self.panes.get(&pane) {
                     let grid = p.grid.lock().await;
+                    let visible_text: Vec<String> = (0..grid.rows())
+                        .filter_map(|r| grid.row(r))
+                        .map(yatamux_terminal::grid::row_cells_to_text)
+                        .collect();
+                    let scrollback_tail: Vec<String> = if lines == 0 {
+                        Vec::new()
+                    } else {
+                        let tail_rows = lines.saturating_sub(grid.rows() as usize);
+                        let start = grid.scrollback_len().saturating_sub(tail_rows);
+                        (start..grid.scrollback_len())
+                            .filter_map(|i| grid.scrollback_row(i))
+                            .map(|row| yatamux_terminal::grid::row_cells_to_text(row))
+                            .collect()
+                    };
                     if lines == 0 {
-                        String::new()
+                        (
+                            String::new(),
+                            Some(PaneCapture {
+                                title: p.title.lock().unwrap().clone(),
+                                cols: grid.cols(),
+                                rows: grid.rows(),
+                                lines_requested: lines,
+                                scrollback_len: grid.scrollback_len(),
+                                cursor: CursorInfo {
+                                    col: grid.cursor().col,
+                                    row: grid.cursor().row,
+                                    visible: grid.cursor_visible(),
+                                },
+                                visible_text: Vec::new(),
+                                scrollback_tail,
+                            }),
+                        )
                     } else {
                         // スクロールバック末尾 + 現在画面を取得
                         let sb_len = grid.scrollback_len();
@@ -298,13 +331,33 @@ impl Server {
                                 parts.push(yatamux_terminal::grid::row_cells_to_text(row));
                             }
                         }
-                        parts.join("\n")
+                        (
+                            parts.join("\n"),
+                            Some(PaneCapture {
+                                title: p.title.lock().unwrap().clone(),
+                                cols: grid.cols(),
+                                rows: grid.rows(),
+                                lines_requested: lines,
+                                scrollback_len: sb_len,
+                                cursor: CursorInfo {
+                                    col: grid.cursor().col,
+                                    row: grid.cursor().row,
+                                    visible: grid.cursor_visible(),
+                                },
+                                visible_text,
+                                scrollback_tail,
+                            }),
+                        )
                     }
                 } else {
-                    String::new()
+                    (String::new(), None)
                 };
                 self.client_tx
-                    .send(ServerMessage::PaneContent { pane, content })
+                    .send(ServerMessage::PaneContent {
+                        pane,
+                        content,
+                        capture,
+                    })
                     .await
                     .context("Failed to send PaneContent")?;
             }
@@ -1009,7 +1062,7 @@ mod tests {
         .await;
     }
 
-    // TC-C13-04: lines=0 に CapturePane → PaneContent { content: "" } が返る (Windows のみ)
+    // TC-C13-04 / TC-C35-04: lines=0 に CapturePane → 空 content と capture メタデータが返る (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_capture_pane_lines_zero_returns_empty() {
@@ -1049,21 +1102,30 @@ mod tests {
             })
             .await
             .unwrap();
-            let msg = tokio::time::timeout(Duration::from_secs(2), async {
+            let (msg, capture) = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::PaneContent { content, .. } = recv_one(&mut rx).await {
-                        return content;
+                    if let ServerMessage::PaneContent {
+                        content, capture, ..
+                    } = recv_one(&mut rx).await
+                    {
+                        return (content, capture);
                     }
                 }
             })
             .await
             .expect("timeout waiting for PaneContent");
             assert!(msg.is_empty(), "lines=0 should return empty content");
+            let capture = capture.expect("capture metadata should be present");
+            assert_eq!(capture.lines_requested, 0);
+            assert!(capture.visible_text.is_empty());
+            assert!(capture.scrollback_tail.is_empty());
+            assert!(capture.cols > 0);
+            assert!(capture.rows > 0);
         })
         .await;
     }
 
-    // TC-C13-05: 実在するペインに CapturePane → PaneContent が返る (Windows のみ)
+    // TC-C13-05 / TC-C35-05: 実在するペインに CapturePane → PaneContent と capture が返る (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
     async fn test_capture_pane_returns_pane_content() {
@@ -1115,11 +1177,16 @@ mod tests {
             })
             .await
             .unwrap();
-            let content = tokio::time::timeout(Duration::from_secs(2), async {
+            let (content, capture) = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::PaneContent { pane, content } = recv_one(&mut rx).await {
+                    if let ServerMessage::PaneContent {
+                        pane,
+                        content,
+                        capture,
+                    } = recv_one(&mut rx).await
+                    {
                         if pane == pane_id {
-                            return content;
+                            return (content, capture);
                         }
                     }
                 }
@@ -1132,6 +1199,11 @@ mod tests {
                 !content.is_empty(),
                 "existing pane should return non-empty content after PTY output"
             );
+            let capture = capture.expect("capture metadata should be present");
+            assert_eq!(capture.cols, 80);
+            assert_eq!(capture.rows, 24);
+            assert_eq!(capture.lines_requested, 100);
+            assert_eq!(capture.visible_text.len(), 24);
         })
         .await;
     }

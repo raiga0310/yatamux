@@ -85,13 +85,6 @@ pub struct HooksConfig {
     pub on_pane_closed: Option<String>,
 }
 
-impl HooksConfig {
-    /// コマンドが実行可能かどうかを返す（None または空文字列は無効）
-    pub fn is_enabled(cmd: &Option<String>) -> bool {
-        cmd.as_deref().is_some_and(|s| !s.is_empty())
-    }
-}
-
 impl AppConfig {
     /// TOML ファイルから設定を読み込む
     ///

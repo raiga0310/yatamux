@@ -35,3 +35,24 @@ pub struct PaneInfo {
     pub cols: u16,
     pub rows: u16,
 }
+
+/// capture-pane のカーソル情報
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorInfo {
+    pub col: u16,
+    pub row: u16,
+    pub visible: bool,
+}
+
+/// capture-pane の構造化メタデータ
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneCapture {
+    pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub lines_requested: usize,
+    pub scrollback_len: usize,
+    pub cursor: CursorInfo,
+    pub visible_text: Vec<String>,
+    pub scrollback_tail: Vec<String>,
+}

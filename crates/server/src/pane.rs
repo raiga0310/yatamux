@@ -28,8 +28,6 @@ enum PtyCmd {
 pub struct Pane {
     pub id: PaneId,
     pub grid: Arc<Mutex<Grid>>,
-    /// クライアントへの出力転送チャネル
-    pub output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
     /// PTY コマンドチャネル（入力 / リサイズ）
     cmd_tx: mpsc::Sender<PtyCmd>,
     /// タイトル文字列（std::sync::Mutex: ListPanes でブロッキングなし取得のため）
@@ -160,7 +158,6 @@ impl Pane {
         Ok(Self {
             id,
             grid,
-            output_tx: client_output_tx,
             cmd_tx,
             title,
             size: pane_size,

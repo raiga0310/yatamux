@@ -32,7 +32,9 @@ pub mod message;
 pub mod types;
 
 pub use message::{ClientMessage, ServerMessage};
-pub use types::{PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId};
+pub use types::{
+    CursorInfo, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId,
+};
 
 #[cfg(test)]
 mod tests {
@@ -108,16 +110,67 @@ mod tests {
         let msg = ServerMessage::PaneContent {
             pane: PaneId(2),
             content: "hello\nworld".to_string(),
+            capture: Some(PaneCapture {
+                title: "cmd".to_string(),
+                cols: 80,
+                rows: 24,
+                lines_requested: 20,
+                scrollback_len: 10,
+                cursor: CursorInfo {
+                    col: 3,
+                    row: 4,
+                    visible: true,
+                },
+                visible_text: vec!["hello".to_string(), "world".to_string()],
+                scrollback_tail: vec!["prompt".to_string()],
+            }),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ServerMessage::PaneContent { pane, content } => {
+            ServerMessage::PaneContent {
+                pane,
+                content,
+                capture,
+            } => {
                 assert_eq!(pane, PaneId(2));
                 assert_eq!(content, "hello\nworld");
+                let capture = capture.expect("capture metadata should be present");
+                assert_eq!(capture.title, "cmd");
+                assert_eq!(capture.cols, 80);
+                assert_eq!(capture.rows, 24);
+                assert_eq!(capture.cursor.col, 3);
+                assert_eq!(capture.visible_text, vec!["hello", "world"]);
             }
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    #[test]
+    fn pane_capture_roundtrip() {
+        let capture = PaneCapture {
+            title: "pwsh".to_string(),
+            cols: 100,
+            rows: 30,
+            lines_requested: 50,
+            scrollback_len: 12,
+            cursor: CursorInfo {
+                col: 8,
+                row: 3,
+                visible: false,
+            },
+            visible_text: vec!["line1".to_string(), "line2".to_string()],
+            scrollback_tail: vec!["prev".to_string()],
+        };
+
+        let json = serde_json::to_string(&capture).unwrap();
+        let decoded: PaneCapture = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.title, "pwsh");
+        assert_eq!(decoded.cols, 100);
+        assert_eq!(decoded.rows, 30);
+        assert_eq!(decoded.cursor.col, 8);
+        assert_eq!(decoded.visible_text, vec!["line1", "line2"]);
+        assert_eq!(decoded.scrollback_tail, vec!["prev"]);
     }
 
     // TC-C14-01: CreatePane { working_dir: Some(...) } がシリアライズ/デシリアライズされる
