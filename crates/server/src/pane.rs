@@ -24,6 +24,18 @@ enum PtyCmd {
     Resize(TermSize),
 }
 
+/// ペイン内部イベント。
+///
+/// `pane.rs` と `session.rs` の間だけで流れる内部表現で、文字列ベースの
+/// 制御メッセージ組み立て/解析を避ける。
+#[derive(Debug, Clone)]
+pub(crate) enum PaneEvent {
+    Notification(String),
+    Bell,
+    ProcessExited,
+    CommandFinished(Option<i32>),
+}
+
 /// ペインの状態
 pub struct Pane {
     pub id: PaneId,
@@ -49,12 +61,12 @@ impl Drop for Pane {
 
 impl Pane {
     /// 新しいペインを作成し PTY を起動する
-    pub fn spawn(
+    pub(crate) fn spawn(
         id: PaneId,
         size: TermSize,
         width_config: CjkWidthConfig,
         client_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
-        client_notification_tx: mpsc::Sender<(PaneId, String)>,
+        client_event_tx: mpsc::Sender<(PaneId, PaneEvent)>,
         working_dir: Option<String>,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
@@ -76,10 +88,10 @@ impl Pane {
         // EOF を返さないため、出力読み取りタスクのループ終了には頼れない。
         // child.wait()（WaitForSingleObject）で直接プロセス終了を検知する。
         if let Some(mut child) = pty.take_child() {
-            let exit_tx = client_notification_tx.clone();
+            let exit_tx = client_event_tx.clone();
             tokio::task::spawn_blocking(move || {
                 let _ = child.wait();
-                let _ = exit_tx.blocking_send((id, "Process exited".to_string()));
+                let _ = exit_tx.blocking_send((id, PaneEvent::ProcessExited));
             });
         }
 
@@ -130,19 +142,19 @@ impl Pane {
 
                 // OSC 9/99/777 通知を転送
                 if let Some(body) = notif {
-                    let _ = client_notification_tx.send((id, body)).await;
+                    let _ = client_event_tx
+                        .send((id, PaneEvent::Notification(body)))
+                        .await;
                 }
-                // OSC 133;D コマンド終了通知を転送（exit_code を付加して session.rs で CommandFinished に変換）
+                // OSC 133;D コマンド終了通知を転送
                 if let Some(exit_code) = cmd_finished {
-                    let body = match exit_code {
-                        Some(code) => format!("__cmd_finished__:{}", code),
-                        None => "__cmd_finished__:".to_string(),
-                    };
-                    let _ = client_notification_tx.send((id, body)).await;
+                    let _ = client_event_tx
+                        .send((id, PaneEvent::CommandFinished(exit_code)))
+                        .await;
                 }
                 // BEL（\x07）通知を転送
                 if bell {
-                    let _ = client_notification_tx.send((id, "Bell".to_string())).await;
+                    let _ = client_event_tx.send((id, PaneEvent::Bell)).await;
                 }
 
                 // クライアントに生データを転送（Arc でラップしてファンアウト時のコピーを回避）

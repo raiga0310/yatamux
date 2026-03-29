@@ -15,7 +15,7 @@ use yatamux_protocol::types::{
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::CjkWidthConfig;
 
-use crate::pane::Pane;
+use crate::pane::{Pane, PaneEvent};
 
 /// ペインの分割ツリーノード（二分木）
 pub enum PaneTree {
@@ -58,15 +58,15 @@ pub struct Server {
     /// ペインからの出力を受け取るチャネル
     pane_output_rx: mpsc::Receiver<(PaneId, Arc<[u8]>)>,
     pane_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
-    /// ペインからの通知（OSC 9/133 等）を受け取るチャネル
-    pane_notification_rx: mpsc::Receiver<(PaneId, String)>,
-    pane_notification_tx: mpsc::Sender<(PaneId, String)>,
+    /// ペインからの内部イベントを受け取るチャネル
+    pane_event_rx: mpsc::Receiver<(PaneId, PaneEvent)>,
+    pane_event_tx: mpsc::Sender<(PaneId, PaneEvent)>,
 }
 
 impl Server {
     pub fn new(client_tx: mpsc::Sender<ServerMessage>) -> Self {
         let (pane_output_tx, pane_output_rx) = mpsc::channel(1024);
-        let (pane_notification_tx, pane_notification_rx) = mpsc::channel(256);
+        let (pane_event_tx, pane_event_rx) = mpsc::channel(256);
         Self {
             workspaces: HashMap::new(),
             surfaces: HashMap::new(),
@@ -78,8 +78,8 @@ impl Server {
             client_tx,
             pane_output_rx,
             pane_output_tx,
-            pane_notification_rx,
-            pane_notification_tx,
+            pane_event_rx,
+            pane_event_tx,
         }
     }
 
@@ -102,27 +102,36 @@ impl Server {
                         data,
                     }).await;
                 }
-                // ペインからの通知転送（OSC 9/133 等）
-                Some((pane_id, body)) = self.pane_notification_rx.recv() => {
-                    if let Some(code_str) = body.strip_prefix("__cmd_finished__:") {
-                        // OSC 133;D — CommandFinished として送信（C-27）
-                        let exit_code = code_str.parse::<i32>().ok();
-                        let _ = self.client_tx.send(ServerMessage::CommandFinished {
-                            pane: pane_id,
-                            exit_code,
-                        }).await;
-                    } else {
-                        let should_close = body == "Process exited";
-                        let _ = self.client_tx.send(ServerMessage::Notification {
-                            pane: pane_id,
-                            body,
-                        }).await;
-                        // C-9: PTY プロセス終了時にペインを自動削除
-                        if should_close {
+                // ペインからの内部イベント転送
+                Some((pane_id, event)) = self.pane_event_rx.recv() => {
+                    match event {
+                        PaneEvent::Notification(body) => {
+                            let _ = self.client_tx.send(ServerMessage::Notification {
+                                pane: pane_id,
+                                body,
+                            }).await;
+                        }
+                        PaneEvent::Bell => {
+                            let _ = self.client_tx.send(ServerMessage::Notification {
+                                pane: pane_id,
+                                body: "Bell".to_string(),
+                            }).await;
+                        }
+                        PaneEvent::ProcessExited => {
+                            let _ = self.client_tx.send(ServerMessage::Notification {
+                                pane: pane_id,
+                                body: "Process exited".to_string(),
+                            }).await;
                             self.panes.remove(&pane_id);
                             let _ = self.client_tx
                                 .send(ServerMessage::PaneClosed { pane: pane_id })
                                 .await;
+                        }
+                        PaneEvent::CommandFinished(exit_code) => {
+                            let _ = self.client_tx.send(ServerMessage::CommandFinished {
+                                pane: pane_id,
+                                exit_code,
+                            }).await;
                         }
                     }
                 }
@@ -193,7 +202,7 @@ impl Server {
                     size,
                     self.width_config.clone(),
                     self.pane_output_tx.clone(),
-                    self.pane_notification_tx.clone(),
+                    self.pane_event_tx.clone(),
                     working_dir,
                 )?;
                 self.panes.insert(id, pane);
@@ -455,12 +464,12 @@ mod tests {
     fn start_server_with_notifier() -> (
         mpsc::Sender<ClientMessage>,
         mpsc::Receiver<ServerMessage>,
-        mpsc::Sender<(PaneId, String)>,
+        mpsc::Sender<(PaneId, PaneEvent)>,
     ) {
         let (server_msg_tx, server_msg_rx) = mpsc::channel::<ServerMessage>(64);
         let (client_msg_tx, client_msg_rx) = mpsc::channel::<ClientMessage>(64);
         let server = Server::new(server_msg_tx);
-        let notifier = server.pane_notification_tx.clone();
+        let notifier = server.pane_event_tx.clone();
         tokio::spawn(server.run(client_msg_rx));
         (client_msg_tx, server_msg_rx, notifier)
     }
@@ -838,7 +847,7 @@ mod tests {
         with_timeout(async {
             let (_tx, mut rx, notifier) = start_server_with_notifier();
             notifier
-                .send((PaneId(7), "__cmd_finished__:42".to_string()))
+                .send((PaneId(7), PaneEvent::CommandFinished(Some(42))))
                 .await
                 .unwrap();
 
@@ -858,7 +867,7 @@ mod tests {
         with_timeout(async {
             let (_tx, mut rx, notifier) = start_server_with_notifier();
             notifier
-                .send((PaneId(9), "__cmd_finished__:".to_string()))
+                .send((PaneId(9), PaneEvent::CommandFinished(None)))
                 .await
                 .unwrap();
 
@@ -868,6 +877,70 @@ mod tests {
                     assert_eq!(exit_code, None);
                 }
                 other => panic!("unexpected: {:?}", other),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_notification_event_forwarded() {
+        with_timeout(async {
+            let (_tx, mut rx, notifier) = start_server_with_notifier();
+            notifier
+                .send((PaneId(3), PaneEvent::Notification("hello".to_string())))
+                .await
+                .unwrap();
+
+            match recv_one(&mut rx).await {
+                ServerMessage::Notification { pane, body } => {
+                    assert_eq!(pane, PaneId(3));
+                    assert_eq!(body, "hello");
+                }
+                other => panic!("unexpected: {:?}", other),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_bell_event_forwarded_as_notification() {
+        with_timeout(async {
+            let (_tx, mut rx, notifier) = start_server_with_notifier();
+            notifier.send((PaneId(5), PaneEvent::Bell)).await.unwrap();
+
+            match recv_one(&mut rx).await {
+                ServerMessage::Notification { pane, body } => {
+                    assert_eq!(pane, PaneId(5));
+                    assert_eq!(body, "Bell");
+                }
+                other => panic!("unexpected: {:?}", other),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_exited_event_closes_pane() {
+        with_timeout(async {
+            let (_tx, mut rx, notifier) = start_server_with_notifier();
+            notifier
+                .send((PaneId(11), PaneEvent::ProcessExited))
+                .await
+                .unwrap();
+
+            match recv_one(&mut rx).await {
+                ServerMessage::Notification { pane, body } => {
+                    assert_eq!(pane, PaneId(11));
+                    assert_eq!(body, "Process exited");
+                }
+                other => panic!("unexpected first event: {:?}", other),
+            }
+
+            match recv_one(&mut rx).await {
+                ServerMessage::PaneClosed { pane } => {
+                    assert_eq!(pane, PaneId(11));
+                }
+                other => panic!("unexpected second event: {:?}", other),
             }
         })
         .await;
