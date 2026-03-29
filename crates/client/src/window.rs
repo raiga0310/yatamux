@@ -69,7 +69,7 @@ mod win32 {
     use crate::ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr};
     use crate::layout::{
         layout_to_toml, list_available_layouts, list_available_themes, load_theme_from_file,
-        save_layout_file, CopyState, Direction, LauncherState, LayoutPreview, PaneRect, PaneStore,
+        save_layout_file, CopyState, Direction, LauncherState, PaneRect, PaneStore,
         ThemeLauncherState, Toast,
     };
     use crate::notification::NativeToastMsg;
@@ -193,6 +193,134 @@ mod win32 {
         Normal,
         Pane,
         Copy,
+    }
+
+    enum PreviewRenderNode {
+        Leaf {
+            label: Option<String>,
+        },
+        Split {
+            direction: SplitDirection,
+            ratio: f32,
+            first: Box<PreviewRenderNode>,
+            second: Box<PreviewRenderNode>,
+        },
+    }
+
+    impl PreviewRenderNode {
+        fn from_layout_preview(
+            node: &crate::layout::LayoutNode,
+            commands: &[Option<String>],
+        ) -> Self {
+            use crate::layout::LayoutNode;
+
+            match node {
+                LayoutNode::Leaf(id) => Self::Leaf {
+                    label: commands.get(id.0 as usize).cloned().flatten(),
+                },
+                LayoutNode::Split {
+                    direction,
+                    ratio,
+                    first,
+                    second,
+                } => Self::Split {
+                    direction: *direction,
+                    ratio: *ratio,
+                    first: Box::new(Self::from_layout_preview(first, commands)),
+                    second: Box::new(Self::from_layout_preview(second, commands)),
+                },
+            }
+        }
+
+        fn from_live_layout(
+            node: &crate::layout::LayoutNode,
+            pane_commands: &HashMap<PaneId, String>,
+        ) -> Self {
+            use crate::layout::LayoutNode;
+
+            match node {
+                LayoutNode::Leaf(id) => Self::Leaf {
+                    label: pane_commands.get(id).cloned(),
+                },
+                LayoutNode::Split {
+                    direction,
+                    ratio,
+                    first,
+                    second,
+                } => Self::Split {
+                    direction: *direction,
+                    ratio: *ratio,
+                    first: Box::new(Self::from_live_layout(first, pane_commands)),
+                    second: Box::new(Self::from_live_layout(second, pane_commands)),
+                },
+            }
+        }
+    }
+
+    struct LauncherRenderState {
+        entries: Vec<String>,
+        selected: usize,
+        selected_preview: Option<PreviewRenderNode>,
+    }
+
+    impl LauncherRenderState {
+        fn from_launcher(launcher: &LauncherState) -> Self {
+            let selected = if launcher.entries.is_empty() {
+                0
+            } else {
+                launcher.selected.min(launcher.entries.len() - 1)
+            };
+            let selected_preview = launcher
+                .entries
+                .get(selected)
+                .and_then(|(_, preview)| preview.as_ref())
+                .map(|preview| {
+                    PreviewRenderNode::from_layout_preview(&preview.node, &preview.commands)
+                });
+            let entries = launcher
+                .entries
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            Self {
+                entries,
+                selected,
+                selected_preview,
+            }
+        }
+    }
+
+    struct ThemeLauncherRenderState {
+        entries: Vec<String>,
+        selected: usize,
+    }
+
+    impl ThemeLauncherRenderState {
+        fn from_theme_launcher(launcher: &ThemeLauncherState) -> Self {
+            let selected = if launcher.entries.is_empty() {
+                0
+            } else {
+                launcher.selected.min(launcher.entries.len() - 1)
+            };
+            Self {
+                entries: launcher.entries.clone(),
+                selected,
+            }
+        }
+    }
+
+    struct SavePromptRenderState {
+        prompt: String,
+        preview: PreviewRenderNode,
+    }
+
+    impl SavePromptRenderState {
+        fn from_store(store: &PaneStore) -> Option<Self> {
+            Some(Self {
+                prompt: store.save_prompt.clone()?,
+                preview: PreviewRenderNode::from_live_layout(&store.layout, &store.pane_commands),
+            })
+        }
     }
 
     /// ステータスバーの高さは `cell_height` × 1 行分
@@ -457,8 +585,8 @@ mod win32 {
             let vk = key.vk;
             let result = if vk == VK_RETURN.0 {
                 let (name, layout_toml) = {
-                    let store = state.panes.lock().unwrap();
-                    let name = store.save_prompt.clone().unwrap_or_default();
+                    let mut store = state.panes.lock().unwrap();
+                    let name = store.save_prompt.take().unwrap_or_default();
                     let toml = layout_to_toml(&store.layout, &store.pane_commands);
                     (name, toml)
                 };
@@ -468,7 +596,6 @@ mod win32 {
                         Ok(()) => {
                             let mut store = state.panes.lock().unwrap();
                             let active = store.active;
-                            store.save_prompt = None;
                             store.pending_toasts.push_back(crate::layout::Toast {
                                 pane_id: active,
                                 message: format!("レイアウト「{name}」を保存しました"),
@@ -478,7 +605,6 @@ mod win32 {
                         Err(e) => {
                             let mut store = state.panes.lock().unwrap();
                             let active = store.active;
-                            store.save_prompt = None;
                             store.pending_toasts.push_back(crate::layout::Toast {
                                 pane_id: active,
                                 message: format!("保存エラー: {e}"),
@@ -486,8 +612,6 @@ mod win32 {
                             });
                         }
                     }
-                } else {
-                    state.panes.lock().unwrap().save_prompt = None;
                 }
                 KeyConsumed::Yes
             } else if vk == VK_ESCAPE.0 {
@@ -516,13 +640,17 @@ mod win32 {
             if vk == VK_RETURN.0 {
                 let name = {
                     let mut store = state.panes.lock().unwrap();
-                    let name = store
-                        .launcher
-                        .as_ref()
-                        .filter(|l| !l.entries.is_empty())
-                        .and_then(|l| l.entries.get(l.selected).map(|(n, _)| n.clone()));
-                    store.launcher = None;
-                    name
+                    store.launcher.take().and_then(|launcher| {
+                        if launcher.entries.is_empty() {
+                            None
+                        } else {
+                            launcher
+                                .entries
+                                .into_iter()
+                                .nth(launcher.selected)
+                                .map(|(name, _)| name)
+                        }
+                    })
                 };
                 if let Some(name) = name {
                     let _ = state.layout_tx.try_send(name);
@@ -553,13 +681,13 @@ mod win32 {
             if vk == VK_RETURN.0 {
                 let name = {
                     let mut store = state.panes.lock().unwrap();
-                    let name = store
-                        .theme_launcher
-                        .as_ref()
-                        .filter(|t| !t.entries.is_empty())
-                        .and_then(|t| t.selected_name().map(str::to_owned));
-                    store.theme_launcher = None;
-                    name
+                    store.theme_launcher.take().and_then(|launcher| {
+                        if launcher.entries.is_empty() {
+                            None
+                        } else {
+                            launcher.entries.into_iter().nth(launcher.selected)
+                        }
+                    })
                 };
                 if let Some(name) = name {
                     if let Some(theme) = load_theme_from_file(&name) {
@@ -2085,7 +2213,10 @@ mod win32 {
     unsafe fn paint_launcher(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
         let launcher = {
             let store = state.panes.lock().unwrap();
-            store.launcher.clone()
+            store
+                .launcher
+                .as_ref()
+                .map(LauncherRenderState::from_launcher)
         };
         let Some(launcher) = launcher else {
             return;
@@ -2113,7 +2244,7 @@ mod win32 {
         let max_name_chars = launcher
             .entries
             .iter()
-            .map(|(s, _)| s.chars().count())
+            .map(|s| s.chars().count())
             .max()
             .unwrap_or(10) as i32;
         let list_w = ((max_name_chars + 8) * cw).max(cw * 22);
@@ -2227,7 +2358,7 @@ mod win32 {
                 None,
             );
         } else {
-            for (i, (name, _)) in launcher.entries.iter().enumerate() {
+            for (i, name) in launcher.entries.iter().enumerate() {
                 let item_y = items_top + i as i32 * ch;
                 if i == launcher.selected {
                     let sel_rect = RECT {
@@ -2267,7 +2398,7 @@ mod win32 {
         let preview_top = sep_y + 1 + ch / 4;
         let actual_preview_w = popup_x + popup_w - preview_margin - preview_x;
 
-        if let Some(preview) = launcher.selected_preview() {
+        if let Some(preview) = launcher.selected_preview.as_ref() {
             let preview_rect = RECT {
                 left: preview_x,
                 top: preview_top,
@@ -2329,7 +2460,10 @@ mod win32 {
     unsafe fn paint_theme_launcher(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
         let theme_launcher = {
             let store = state.panes.lock().unwrap();
-            store.theme_launcher.clone()
+            store
+                .theme_launcher
+                .as_ref()
+                .map(ThemeLauncherRenderState::from_theme_launcher)
         };
         let Some(tl) = theme_launcher else {
             return;
@@ -2472,13 +2606,11 @@ mod win32 {
     /// `PaneStore::save_prompt` が `Some` のときのみ描画する。
     /// 左ペイン: ファイル名入力フィールド。右ペイン: 現在のレイアウトプレビュー。
     unsafe fn paint_save_prompt(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
-        let (prompt, layout_node) = {
+        let render_state = {
             let store = state.panes.lock().unwrap();
-            let p = store.save_prompt.clone();
-            let n = store.layout.clone();
-            (p, n)
+            SavePromptRenderState::from_store(&store)
         };
-        let Some(prompt) = prompt else {
+        let Some(render_state) = render_state else {
             return;
         };
 
@@ -2602,7 +2734,7 @@ mod win32 {
         // 入力テキスト（先頭にスペース）
         SetBkColor(hdc, COLOR_INPUT_BG);
         SetTextColor(hdc, COLOR_TEXT);
-        let display = format!(" {prompt}");
+        let display = format!(" {}", render_state.prompt);
         let display_w: Vec<u16> = display.encode_utf16().collect();
         let _ = ExtTextOutW(
             hdc,
@@ -2670,9 +2802,8 @@ mod win32 {
                 SetBkMode(hdc, TRANSPARENT);
                 draw_preview_node(
                     hdc,
-                    &layout_node,
+                    &render_state.preview,
                     &preview_rect,
-                    &[],
                     COLOR_PREVIEW_PANE,
                     COLOR_PREVIEW_BORDER,
                     COLOR_PREVIEW_SEP,
@@ -2701,13 +2832,13 @@ mod win32 {
         );
     }
 
-    /// `LayoutPreview` をプレビューエリアに再帰描画する。
+    /// 描画用プレビュー木をプレビューエリアに再帰描画する。
     ///
     /// 各ペインは明るいボーダー → 暗い内部 → コマンドテキストの順で描く。
     #[allow(clippy::too_many_arguments)]
     unsafe fn draw_layout_preview(
         hdc: HDC,
-        preview: &LayoutPreview,
+        preview: &PreviewRenderNode,
         rect: &RECT,
         color_pane: COLORREF,
         color_border: COLORREF,
@@ -2718,9 +2849,8 @@ mod win32 {
     ) {
         draw_preview_node(
             hdc,
-            &preview.node,
+            preview,
             rect,
-            &preview.commands,
             color_pane,
             color_border,
             color_sep,
@@ -2730,13 +2860,12 @@ mod win32 {
         );
     }
 
-    /// LayoutNode を再帰描画する内部ヘルパー。
+    /// プレビュー木を再帰描画する内部ヘルパー。
     #[allow(clippy::too_many_arguments)]
     unsafe fn draw_preview_node(
         hdc: HDC,
-        node: &crate::layout::LayoutNode,
+        node: &PreviewRenderNode,
         rect: &RECT,
-        commands: &[Option<String>],
         color_pane: COLORREF,
         color_border: COLORREF,
         color_sep: COLORREF,
@@ -2744,9 +2873,6 @@ mod win32 {
         cell_w: i32,
         cell_h: i32,
     ) {
-        use crate::layout::LayoutNode;
-        use yatamux_protocol::types::SplitDirection;
-
         let w = rect.right - rect.left;
         let h = rect.bottom - rect.top;
         if w <= 2 || h <= 2 {
@@ -2754,7 +2880,7 @@ mod win32 {
         }
 
         match node {
-            LayoutNode::Leaf(id) => {
+            PreviewRenderNode::Leaf { label } => {
                 // 外枠を border 色で塗る → 内側を pane 色で上塗り（1px ボーダー効果）
                 let border_brush = CreateSolidBrush(color_border);
                 FillRect(hdc, rect, border_brush);
@@ -2771,7 +2897,7 @@ mod win32 {
                 let _ = DeleteObject(pane_brush.into());
 
                 // コマンドテキストを左上に描画（内側に収まるようクリップ）
-                if let Some(Some(cmd)) = commands.get(id.0 as usize) {
+                if let Some(cmd) = label {
                     let pad = (cell_w / 4).max(2);
                     let text_x = inner.left + pad;
                     let text_y = (inner.top + inner.bottom - cell_h) / 2; // 垂直中央
@@ -2790,7 +2916,7 @@ mod win32 {
                     );
                 }
             }
-            LayoutNode::Split {
+            PreviewRenderNode::Split {
                 direction,
                 ratio,
                 first,
@@ -2858,7 +2984,6 @@ mod win32 {
                     hdc,
                     first,
                     &r1,
-                    commands,
                     color_pane,
                     color_border,
                     color_sep,
@@ -2870,7 +2995,6 @@ mod win32 {
                     hdc,
                     second,
                     &r2,
-                    commands,
                     color_pane,
                     color_border,
                     color_sep,

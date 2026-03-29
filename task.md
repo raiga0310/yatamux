@@ -760,7 +760,8 @@ dispatch_wm_keydown
 - [x] `rg "\\.clone\\("` ベースで clone 監査を行い、cheap clone と削減対象 clone をリストアップする
 - [x] Low リスクの clone 整理（hook 判定、queue 先頭参照、notification body move、未使用 sender フィールド削除）を実装する
 - [ ] `src/app.rs` の fan-out / layout-switch 経路を、move 中心で書けるよう再設計する
-- [ ] `window.rs` の UI state 取得を「必要部分のみ抽出する view struct」に寄せ、全体 snapshot clone を減らす
+- [x] `window.rs` の Enter 確定系で `take()` を使い、`save_prompt` / `launcher` / `theme_launcher` の不要 clone を除去する
+- [x] `window.rs` の UI state 取得を「必要部分のみ抽出する render snapshot」に寄せ、`launcher` / `theme_launcher` / `save_prompt` 描画時の全体 snapshot clone を減らす
 - [x] `layout.rs` の部分木操作を `Clone` 前提ではなく `mem::replace` / `Option::take` ベースに置き換えられるか検証する
 - [ ] 文字列 payload を `String` clone でばら撒いている箇所を `Arc<str>` / 所有権移動で削減できるか検証する
 - [x] `pane.rs` ↔ `session.rs` 間の stringly typed な内部通知を `PaneEvent` enum に置き換える
