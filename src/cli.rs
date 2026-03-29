@@ -8,8 +8,10 @@ use yatamux_client::connection::ServerConnection;
 use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 
-/// `yatamux list-panes` — 実行中のペイン一覧を標準出力に表示する
-pub async fn list_panes(session: &str) -> Result<()> {
+/// `yatamux list-panes [--json]` — 実行中のペイン一覧を標準出力に表示する
+///
+/// `--json` を付けると JSON 配列形式で出力する（C-24）。
+pub async fn list_panes(session: &str, json: bool) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
@@ -20,6 +22,9 @@ pub async fn list_panes(session: &str) -> Result<()> {
         loop {
             match conn.rx.recv().await {
                 Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message))
+                }
                 Some(_) => continue,
                 None => {
                     return Err(anyhow::anyhow!(
@@ -32,7 +37,9 @@ pub async fn list_panes(session: &str) -> Result<()> {
     .await
     .context("timeout waiting for pane list")??;
 
-    if panes.is_empty() {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&panes)?);
+    } else if panes.is_empty() {
         println!("(no panes)");
     } else {
         println!(
@@ -50,10 +57,16 @@ pub async fn list_panes(session: &str) -> Result<()> {
     Ok(())
 }
 
-/// `yatamux capture-pane --target <id> --lines <n>` — ペインの内容を表示する
+/// `yatamux capture-pane --target <id> --lines <n> [--plain-text]` — ペインの内容を表示する
 ///
 /// スクロールバック末尾 N 行 + 現在画面の内容を標準出力に表示する。
-pub async fn capture_pane(session: &str, pane_id: u32, lines: usize) -> Result<()> {
+/// `--plain-text` を付けると ANSI エスケープを除去したプレーンテキストで出力する（C-26）。
+pub async fn capture_pane(
+    session: &str,
+    pane_id: u32,
+    lines: usize,
+    plain_text: bool,
+) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
@@ -62,6 +75,7 @@ pub async fn capture_pane(session: &str, pane_id: u32, lines: usize) -> Result<(
         .send(ClientMessage::CapturePane {
             pane: PaneId(pane_id),
             lines,
+            plain_text,
         })
         .await?;
 
@@ -69,6 +83,9 @@ pub async fn capture_pane(session: &str, pane_id: u32, lines: usize) -> Result<(
         loop {
             match conn.rx.recv().await {
                 Some(ServerMessage::PaneContent { content, .. }) => return Ok(content),
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message))
+                }
                 Some(_) => continue,
                 None => {
                     return Err(anyhow::anyhow!(
@@ -117,11 +134,16 @@ pub async fn split_pane(
     .await
     .context("timeout waiting for pane list")??;
 
-    // 対象ペインを探す。見つからない場合は最初のペインにフォールバック
-    let target_pane = panes
-        .iter()
-        .find(|p| p.id == PaneId(pane_id))
-        .or_else(|| panes.first());
+    // 対象ペインを探す（C-25: 見つからない場合はエラー終了）
+    let target_pane = if pane_id == 0 {
+        panes.first()
+    } else {
+        panes.iter().find(|p| p.id == PaneId(pane_id))
+    };
+    if pane_id != 0 && target_pane.is_none() {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
 
     let surface = target_pane.map(|p| p.surface).unwrap_or(SurfaceId(1));
 
@@ -151,6 +173,9 @@ pub async fn split_pane(
         loop {
             match conn.rx.recv().await {
                 Some(ServerMessage::PaneCreated { id, .. }) => return Ok(id),
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message))
+                }
                 Some(_) => continue,
                 None => {
                     return Err(anyhow::anyhow!(
@@ -179,9 +204,35 @@ pub async fn send_keys(
     enter: bool,
     raw: bool,
 ) -> Result<()> {
-    let conn = ServerConnection::connect(session)
+    let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
+
+    // ペイン存在チェック（C-25: 存在しないペインへの操作でエラー終了）
+    conn.tx.send(ClientMessage::ListPanes).await?;
+    let panes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message))
+                }
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PanesListed"
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for pane list")??;
+
+    if !panes.iter().any(|p| p.id == PaneId(pane_id)) {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
 
     let mut data = if raw {
         text.as_bytes().to_vec()

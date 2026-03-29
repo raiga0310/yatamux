@@ -1020,6 +1020,7 @@ dependencies = [
  "anyhow",
  "clap",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
