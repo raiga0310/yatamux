@@ -18,8 +18,9 @@ pub struct VtProcessor<'a> {
     pub notification: Option<String>,
     /// OSC 52 クリップボードデータ（base64 デコード済みバイト列）
     pub clipboard_data: Option<Vec<u8>>,
-    /// OSC 133;D — シェルコマンド終了通知
-    pub command_finished: bool,
+    /// OSC 133;D — シェルコマンド終了通知（Some: 終了した、None: 未検出）
+    /// exit_code は D;{code} から抽出（省略時は None）
+    pub command_finished: Option<Option<i32>>,
     /// BEL（0x07）受信フラグ
     pub bell: bool,
 }
@@ -32,7 +33,7 @@ impl<'a> VtProcessor<'a> {
             title: None,
             notification: None,
             clipboard_data: None,
-            command_finished: false,
+            command_finished: None,
             bell: false,
         }
     }
@@ -359,8 +360,15 @@ impl<'a> Perform for VtProcessor<'a> {
                     .get(1)
                     .and_then(|b| std::str::from_utf8(b).ok())
                     .unwrap_or("");
-                if subcode == "D" || subcode.starts_with("D;") {
-                    self.command_finished = true;
+                if subcode == "D" {
+                    let exit_code = params
+                        .get(2)
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .and_then(|s| s.parse::<i32>().ok());
+                    self.command_finished = Some(exit_code);
+                } else if let Some(code_str) = subcode.strip_prefix("D;") {
+                    let exit_code = code_str.parse::<i32>().ok();
+                    self.command_finished = Some(exit_code);
                 }
             }
             // OSC 52: クリップボード書き込み
@@ -527,7 +535,6 @@ mod tests {
     use crate::grid::Grid;
     use crate::width::CjkWidthConfig;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use base64::Engine as _;
 
     fn make_grid(cols: u16, rows: u16) -> Grid {
         Grid::new(cols, rows, CjkWidthConfig::default())
@@ -770,6 +777,24 @@ mod tests {
         let mut proc = VtProcessor::new(&mut g);
         feed_bytes(&mut parser, &mut proc, b"\x1b]9;Build complete\x07");
         assert_eq!(proc.notification.as_deref(), Some("Build complete"));
+    }
+
+    #[test]
+    fn test_vt_osc_133_command_finished_without_exit_code() {
+        let mut g = make_grid(80, 24);
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(&mut g);
+        feed_bytes(&mut parser, &mut proc, b"\x1b]133;D\x07");
+        assert_eq!(proc.command_finished, Some(None));
+    }
+
+    #[test]
+    fn test_vt_osc_133_command_finished_with_exit_code() {
+        let mut g = make_grid(80, 24);
+        let mut parser = Parser::new();
+        let mut proc = VtProcessor::new(&mut g);
+        feed_bytes(&mut parser, &mut proc, b"\x1b]133;D;7\x07");
+        assert_eq!(proc.command_finished, Some(Some(7)));
     }
 
     // D-2: \x1b[?7l で DECAWM オフ → 折り返しなし
@@ -1205,7 +1230,6 @@ mod tests {
     #[test]
     fn test_osc52_utf8_japanese() {
         // "こんにちは" の base64
-        use std::io::Write;
         let text = "こんにちは".as_bytes();
         let b64 = BASE64_STANDARD.encode(text);
         let seq = format!("\x1b]52;c;{}\x07", b64);

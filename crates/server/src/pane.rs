@@ -123,18 +123,24 @@ impl Pane {
                     if let Some(t) = proc.title.take() {
                         *title_clone.lock().unwrap() = t;
                     }
-                    (proc.notification.take(), proc.command_finished, proc.bell)
+                    (
+                        proc.notification.take(),
+                        proc.command_finished.take(),
+                        proc.bell,
+                    )
                 };
 
                 // OSC 9/99/777 通知を転送
                 if let Some(body) = notif {
                     let _ = client_notification_tx.send((id, body)).await;
                 }
-                // OSC 133;D コマンド終了通知を転送
-                if cmd_finished {
-                    let _ = client_notification_tx
-                        .send((id, "Command finished".to_string()))
-                        .await;
+                // OSC 133;D コマンド終了通知を転送（exit_code を付加して session.rs で CommandFinished に変換）
+                if let Some(exit_code) = cmd_finished {
+                    let body = match exit_code {
+                        Some(code) => format!("__cmd_finished__:{}", code),
+                        None => "__cmd_finished__:".to_string(),
+                    };
+                    let _ = client_notification_tx.send((id, body)).await;
                 }
                 // BEL（\x07）通知を転送
                 if bell {

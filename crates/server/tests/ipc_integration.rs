@@ -286,9 +286,9 @@ async fn test_ipc_send_keys_routes_to_pane() {
     );
 }
 
-// F-8: 存在しない PaneId に Input を送っても Error は返らない（silently ignore）
+// C-25: 存在しない PaneId に Input を送ると Error が返る
 #[tokio::test]
-async fn test_ipc_send_keys_to_unknown_pane_is_ignored() {
+async fn test_ipc_send_keys_to_unknown_pane_returns_error() {
     let session = unique_session();
     let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
     let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
@@ -311,21 +311,18 @@ async fn test_ipc_send_keys_to_unknown_pane_is_ignored() {
         .await
         .unwrap();
 
-    // Error または無応答（サーバーが存在しないペインを無視）を許容
-    // 現実装では存在しないペインへの Input は silently ignore するため
-    // 500ms 以内に Error が来ないことを確認（silently ignore の仕様）
-    let got_error = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+    let err = tokio::time::timeout(std::time::Duration::from_millis(500), async {
         loop {
-            if let ServerMessage::Error { .. } = conn.rx.recv().await.unwrap() {
-                return true;
+            if let ServerMessage::Error { message } = conn.rx.recv().await.unwrap() {
+                return message;
             }
         }
     })
-    .await;
-    // 現実装は silently ignore: エラーは来ない
+    .await
+    .expect("expected Error for unknown pane");
     assert!(
-        got_error.is_err(),
-        "Input to unknown pane should be silently ignored (no Error)"
+        err.contains("pane 9999 not found"),
+        "unknown pane should return not found error"
     );
 }
 

@@ -102,16 +102,25 @@ impl Server {
                 }
                 // ペインからの通知転送（OSC 9/133 等）
                 Some((pane_id, body)) = self.pane_notification_rx.recv() => {
-                    let _ = self.client_tx.send(ServerMessage::Notification {
-                        pane: pane_id,
-                        body: body.clone(),
-                    }).await;
-                    // C-9: PTY プロセス終了時にペインを自動削除
-                    if body == "Process exited" {
-                        self.panes.remove(&pane_id);
-                        let _ = self.client_tx
-                            .send(ServerMessage::PaneClosed { pane: pane_id })
-                            .await;
+                    if let Some(code_str) = body.strip_prefix("__cmd_finished__:") {
+                        // OSC 133;D — CommandFinished として送信（C-27）
+                        let exit_code = code_str.parse::<i32>().ok();
+                        let _ = self.client_tx.send(ServerMessage::CommandFinished {
+                            pane: pane_id,
+                            exit_code,
+                        }).await;
+                    } else {
+                        let _ = self.client_tx.send(ServerMessage::Notification {
+                            pane: pane_id,
+                            body: body.clone(),
+                        }).await;
+                        // C-9: PTY プロセス終了時にペインを自動削除
+                        if body == "Process exited" {
+                            self.panes.remove(&pane_id);
+                            let _ = self.client_tx
+                                .send(ServerMessage::PaneClosed { pane: pane_id })
+                                .await;
+                        }
                     }
                 }
             }
@@ -389,6 +398,20 @@ mod tests {
         (client_msg_tx, server_msg_rx)
     }
 
+    /// テスト用サーバーを起動し、内部通知チャネルも返す。
+    fn start_server_with_notifier() -> (
+        mpsc::Sender<ClientMessage>,
+        mpsc::Receiver<ServerMessage>,
+        mpsc::Sender<(PaneId, String)>,
+    ) {
+        let (server_msg_tx, server_msg_rx) = mpsc::channel::<ServerMessage>(64);
+        let (client_msg_tx, client_msg_rx) = mpsc::channel::<ClientMessage>(64);
+        let server = Server::new(server_msg_tx);
+        let notifier = server.pane_notification_tx.clone();
+        tokio::spawn(server.run(client_msg_rx));
+        (client_msg_tx, server_msg_rx, notifier)
+    }
+
     /// 1 秒タイムアウト付きで次のメッセージを受信する
     async fn recv_one(rx: &mut mpsc::Receiver<ServerMessage>) -> ServerMessage {
         tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -409,6 +432,7 @@ mod tests {
                 match recv_one(rx).await {
                     ServerMessage::Output { .. }
                     | ServerMessage::Notification { .. }
+                    | ServerMessage::CommandFinished { .. }
                     | ServerMessage::PaneClosed { .. } => continue,
                     other => return other,
                 }
@@ -756,6 +780,46 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_command_finished_notification_forwarded_with_exit_code() {
+        with_timeout(async {
+            let (_tx, mut rx, notifier) = start_server_with_notifier();
+            notifier
+                .send((PaneId(7), "__cmd_finished__:42".to_string()))
+                .await
+                .unwrap();
+
+            match recv_one(&mut rx).await {
+                ServerMessage::CommandFinished { pane, exit_code } => {
+                    assert_eq!(pane, PaneId(7));
+                    assert_eq!(exit_code, Some(42));
+                }
+                other => panic!("unexpected: {:?}", other),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_command_finished_notification_forwarded_without_exit_code() {
+        with_timeout(async {
+            let (_tx, mut rx, notifier) = start_server_with_notifier();
+            notifier
+                .send((PaneId(9), "__cmd_finished__:".to_string()))
+                .await
+                .unwrap();
+
+            match recv_one(&mut rx).await {
+                ServerMessage::CommandFinished { pane, exit_code } => {
+                    assert_eq!(pane, PaneId(9));
+                    assert_eq!(exit_code, None);
+                }
+                other => panic!("unexpected: {:?}", other),
+            }
+        })
+        .await;
+    }
+
     // G-8: ListPanes → PanesListed に全ペインが含まれる (Windows のみ)
     #[cfg(windows)]
     #[tokio::test]
@@ -916,42 +980,72 @@ mod tests {
         .await;
     }
 
-    // TC-C13-03: 存在しないペインに CapturePane → PaneContent { content: "" } が返る
+    // TC-C13-03: 存在しないペインに CapturePane → Error が返る
     #[tokio::test]
-    async fn test_capture_pane_nonexistent_pane_returns_empty() {
+    async fn test_capture_pane_nonexistent_pane_returns_error() {
         with_timeout(async {
             let (tx, mut rx) = start_server();
             tx.send(ClientMessage::CapturePane {
                 pane: PaneId(9999),
                 lines: 100,
+                plain_text: true,
             })
             .await
             .unwrap();
             let msg = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::PaneContent { content, .. } = recv_one(&mut rx).await {
-                        return content;
+                    if let ServerMessage::Error { message } = recv_one(&mut rx).await {
+                        return message;
                     }
                 }
             })
             .await
-            .expect("timeout waiting for PaneContent");
+            .expect("timeout waiting for Error");
             assert!(
-                msg.is_empty(),
-                "non-existent pane should return empty content"
+                msg.contains("pane 9999 not found"),
+                "non-existent pane should return not found error"
             );
         })
         .await;
     }
 
-    // TC-C13-04: lines=0 に CapturePane → PaneContent { content: "" } が返る
+    // TC-C13-04: lines=0 に CapturePane → PaneContent { content: "" } が返る (Windows のみ)
+    #[cfg(windows)]
     #[tokio::test]
     async fn test_capture_pane_lines_zero_returns_empty() {
         with_timeout(async {
             let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
+            .await
+            .unwrap();
+            let pane_id = match recv_one(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                _ => panic!(),
+            };
             tx.send(ClientMessage::CapturePane {
-                pane: PaneId(1),
+                pane: pane_id,
                 lines: 0,
+                plain_text: true,
             })
             .await
             .unwrap();
@@ -1017,6 +1111,7 @@ mod tests {
             tx.send(ClientMessage::CapturePane {
                 pane: pane_id,
                 lines: 100,
+                plain_text: true,
             })
             .await
             .unwrap();

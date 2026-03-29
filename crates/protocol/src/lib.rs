@@ -84,13 +84,19 @@ mod tests {
         let msg = ClientMessage::CapturePane {
             pane: PaneId(1),
             lines: 50,
+            plain_text: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
-            ClientMessage::CapturePane { pane, lines } => {
+            ClientMessage::CapturePane {
+                pane,
+                lines,
+                plain_text,
+            } => {
                 assert_eq!(pane, PaneId(1));
                 assert_eq!(lines, 50);
+                assert!(plain_text);
             }
             other => panic!("unexpected: {:?}", other),
         }

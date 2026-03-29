@@ -172,6 +172,9 @@ enum Commands {
         /// エスケープ変換を無効化してテキストをそのまま送信（Windows パスなどに使用）
         #[arg(long)]
         raw: bool,
+        /// コマンド完了（OSC 133;D）を受信するまで待機してから終了する
+        #[arg(long)]
+        wait_for_prompt: bool,
     },
     /// 指定ペインの内容を表示（スクロールバック末尾 N 行 + 現在画面）
     CapturePane {
@@ -268,7 +271,8 @@ async fn main() -> Result<()> {
             text,
             enter,
             raw,
-        }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw).await,
+            wait_for_prompt,
+        }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw, wait_for_prompt).await,
         Some(Commands::CapturePane {
             target,
             lines,
@@ -296,6 +300,38 @@ async fn main() -> Result<()> {
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
             app::run(cli.layout, app_config).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_send_keys_wait_for_prompt() {
+        let cli = Cli::try_parse_from([
+            "yatamux",
+            "send-keys",
+            "--pane",
+            "1",
+            "--wait-for-prompt",
+            "echo hi",
+        ])
+        .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::SendKeys {
+                pane,
+                text,
+                wait_for_prompt,
+                ..
+            }) => {
+                assert_eq!(pane, 1);
+                assert_eq!(text, "echo hi");
+                assert!(wait_for_prompt);
+            }
+            _ => panic!("unexpected command"),
         }
     }
 }

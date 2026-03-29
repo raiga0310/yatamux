@@ -192,10 +192,11 @@ pub async fn split_pane(
     Ok(())
 }
 
-/// `yatamux send-keys --pane <id> [--enter] [--raw] <text>` — 指定ペインにテキストを送信する
+/// `yatamux send-keys --pane <id> [--enter] [--raw] [--wait-for-prompt] <text>` — 指定ペインにテキストを送信する
 ///
 /// - `--enter`: 末尾に CR (0x0D) を自動付加する。コマンド実行に使用。
 /// - `--raw`: エスケープ変換を無効化してテキストをそのまま送信する。Windows パスに使用。
+/// - `--wait-for-prompt`: コマンド完了（OSC 133;D）を受信するまで待機してから終了する（C-27）。
 /// - デフォルト（オプションなし）: `\n`=LF、`\r`=CR、`\t`=TAB、`\\`=バックスラッシュ に変換。
 pub async fn send_keys(
     session: &str,
@@ -203,6 +204,7 @@ pub async fn send_keys(
     text: &str,
     enter: bool,
     raw: bool,
+    wait_for_prompt: bool,
 ) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
@@ -248,6 +250,35 @@ pub async fn send_keys(
             data,
         })
         .await?;
+
+    // --wait-for-prompt: 対象ペインの CommandFinished を受信するまで待機（C-27）
+    if wait_for_prompt {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                match conn.rx.recv().await {
+                    Some(ServerMessage::CommandFinished { pane, exit_code })
+                        if pane == PaneId(pane_id) =>
+                    {
+                        if let Some(code) = exit_code {
+                            if code != 0 {
+                                eprintln!("Command exited with status {}", code);
+                                std::process::exit(code);
+                            }
+                        }
+                        return;
+                    }
+                    Some(ServerMessage::Error { message }) => {
+                        eprintln!("Error: {}", message);
+                        std::process::exit(1);
+                    }
+                    Some(_) => continue,
+                    None => return,
+                }
+            }
+        })
+        .await
+        .context("timeout waiting for command to finish (60s)")?;
+    }
 
     Ok(())
 }

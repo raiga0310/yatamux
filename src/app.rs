@@ -611,6 +611,16 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                 notif_backend.notify(pane, body);
                             }
                         }
+                        ServerMessage::CommandFinished { pane, exit_code } => {
+                            let active = pane_store2.lock().unwrap().active;
+                            if pane != active {
+                                let body = match exit_code {
+                                    Some(code) => format!("Command finished (exit {})", code),
+                                    None => "Command finished".to_string(),
+                                };
+                                notif_backend.notify(pane, body);
+                            }
+                        }
                         _ => {}
                     }
                 }

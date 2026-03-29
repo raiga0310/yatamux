@@ -110,6 +110,14 @@ pub enum ServerMessage {
     /// ペインが終了
     PaneClosed { pane: PaneId },
 
+    /// OSC 133;D — シェルコマンド終了通知（`send-keys --wait-for-prompt` で利用）
+    CommandFinished {
+        pane: PaneId,
+        /// シェルが報告した終了コード（D;{code} 形式の場合のみ Some）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+
     /// エラー
     Error { message: String },
 
