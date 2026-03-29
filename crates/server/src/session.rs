@@ -218,6 +218,13 @@ impl Server {
             ClientMessage::Input { pane, data } => {
                 if let Some(p) = self.panes.get(&pane) {
                     p.send_input(data).await?;
+                } else {
+                    self.client_tx
+                        .send(ServerMessage::Error {
+                            message: format!("pane {} not found", pane.0),
+                        })
+                        .await
+                        .context("Failed to send Error")?;
                 }
             }
 
@@ -242,7 +249,20 @@ impl Server {
                 // TODO: グリッドの現在状態を送信
             }
 
-            ClientMessage::CapturePane { pane, lines } => {
+            ClientMessage::CapturePane {
+                pane,
+                lines,
+                plain_text: _,
+            } => {
+                if !self.panes.contains_key(&pane) {
+                    self.client_tx
+                        .send(ServerMessage::Error {
+                            message: format!("pane {} not found", pane.0),
+                        })
+                        .await
+                        .context("Failed to send Error")?;
+                    return Ok(());
+                }
                 let content = if let Some(p) = self.panes.get(&pane) {
                     let grid = p.grid.lock().await;
                     if lines == 0 {

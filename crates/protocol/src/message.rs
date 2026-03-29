@@ -57,7 +57,13 @@ pub enum ClientMessage {
     ListPanes,
 
     /// ペインの内容（スクロールバック末尾 N 行 + 現在画面）を要求
-    CapturePane { pane: PaneId, lines: usize },
+    CapturePane {
+        pane: PaneId,
+        lines: usize,
+        /// true のとき ANSI エスケープを除去してプレーンテキストで返す（デフォルト: false）
+        #[serde(default)]
+        plain_text: bool,
+    },
 }
 
 /// サーバー → クライアント メッセージ

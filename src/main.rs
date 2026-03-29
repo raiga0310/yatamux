@@ -143,7 +143,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// アクティブなペイン一覧を表示
-    ListPanes,
+    ListPanes {
+        /// JSON 配列形式で出力する（エージェント向け）
+        #[arg(long)]
+        json: bool,
+    },
     /// 指定ペインにキー入力を送信
     ///
     /// エスケープシーケンス: \n=LF, \r=CR, \t=TAB, \\=バックスラッシュ
@@ -177,6 +181,9 @@ enum Commands {
         /// 取得する行数
         #[arg(long, default_value = "100")]
         lines: usize,
+        /// ANSI エスケープを除去してプレーンテキストで出力する（エージェント向け）
+        #[arg(long)]
+        plain_text: bool,
     },
     /// ペインを分割して新しいペインを作成
     SplitPane {
@@ -255,16 +262,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::ListPanes) => cli::list_panes(DEFAULT_SESSION).await,
+        Some(Commands::ListPanes { json }) => cli::list_panes(DEFAULT_SESSION, json).await,
         Some(Commands::SendKeys {
             pane,
             text,
             enter,
             raw,
         }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw).await,
-        Some(Commands::CapturePane { target, lines }) => {
-            cli::capture_pane(DEFAULT_SESSION, target, lines).await
-        }
+        Some(Commands::CapturePane {
+            target,
+            lines,
+            plain_text,
+        }) => cli::capture_pane(DEFAULT_SESSION, target, lines, plain_text).await,
         Some(Commands::SplitPane {
             dir,
             direction,
