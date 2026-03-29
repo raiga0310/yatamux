@@ -4,9 +4,18 @@
 //! `list-panes` / `send-keys` を実行する。
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use yatamux_client::connection::ServerConnection;
-use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId};
+use yatamux_protocol::types::{PaneCapture, PaneId, SplitDirection, SurfaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
+
+#[derive(Serialize)]
+struct CapturePaneJsonOutput {
+    pane: PaneId,
+    content: String,
+    #[serde(flatten)]
+    capture: PaneCapture,
+}
 
 /// `yatamux list-panes [--json]` — 実行中のペイン一覧を標準出力に表示する
 ///
@@ -66,6 +75,7 @@ pub async fn capture_pane(
     pane_id: u32,
     lines: usize,
     plain_text: bool,
+    json: bool,
 ) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
@@ -79,10 +89,14 @@ pub async fn capture_pane(
         })
         .await?;
 
-    let content = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match conn.rx.recv().await {
-                Some(ServerMessage::PaneContent { content, .. }) => return Ok(content),
+                Some(ServerMessage::PaneContent {
+                    pane,
+                    content,
+                    capture,
+                }) => return Ok((pane, content, capture)),
                 Some(ServerMessage::Error { message }) => {
                     return Err(anyhow::anyhow!("{}", message))
                 }
@@ -98,7 +112,18 @@ pub async fn capture_pane(
     .await
     .context("timeout waiting for pane content")??;
 
-    print!("{}", content);
+    let (pane, content, capture) = response;
+    if json {
+        let capture = capture.context("server did not provide capture metadata")?;
+        let output = CapturePaneJsonOutput {
+            pane,
+            content,
+            capture,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print!("{}", content);
+    }
     Ok(())
 }
 

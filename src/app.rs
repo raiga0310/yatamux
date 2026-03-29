@@ -323,18 +323,20 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                         }
                         ServerMessage::PaneCreated { id: new_id, split_from: ipc_split_from, direction: ipc_direction, .. } => {
                             // on_pane_created フックを発火（fire-and-forget）
-                            if let Some(cmd) = &hooks.on_pane_created {
-                                if crate::config::HooksConfig::is_enabled(&Some(cmd.clone())) {
-                                    let cmd = cmd.clone();
-                                    let pane_id_str = new_id.0.to_string();
-                                    tokio::spawn(async move {
-                                        let _ = tokio::process::Command::new("cmd")
-                                            .args(["/C", &cmd])
-                                            .env("YATAMUX_PANE_ID", pane_id_str)
-                                            .env("YATAMUX_SESSION", DEFAULT_SESSION)
-                                            .spawn();
-                                    });
-                                }
+                            if let Some(cmd) = hooks
+                                .on_pane_created
+                                .as_deref()
+                                .filter(|cmd| !cmd.is_empty())
+                            {
+                                let cmd = cmd.to_owned();
+                                let pane_id_str = new_id.0.to_string();
+                                tokio::spawn(async move {
+                                    let _ = tokio::process::Command::new("cmd")
+                                        .args(["/C", &cmd])
+                                        .env("YATAMUX_PANE_ID", pane_id_str)
+                                        .env("YATAMUX_SESSION", DEFAULT_SESSION)
+                                        .spawn();
+                                });
                             }
                             // レイアウト切り替え用ペイン作成処理（通常の分割より優先）
                             if let Some(phase) = layout_switch.take() {
@@ -354,7 +356,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                                 .unwrap()
                                                 .pane_commands
                                                 .insert(new_id, cmd.clone());
-                                            let mut input = cmd.clone().into_bytes();
+                                            let mut input = cmd.as_bytes().to_vec();
                                             input.push(b'\r');
                                             let _ = client_tx
                                                 .send(ClientMessage::Input {
@@ -395,7 +397,10 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                             );
                                         } else {
                                             // 次のペインを作成
-                                            let (next_dir, _, _) = queue[0].clone();
+                                            let next_dir = queue
+                                                .front()
+                                                .map(|(dir, _, _)| *dir)
+                                                .expect("queue should be non-empty");
                                             let _ = client_tx
                                                 .send(ClientMessage::CreatePane {
                                                     surface: surf_id,
@@ -458,7 +463,10 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                                             );
                                         } else {
                                             // 次のペインを作成
-                                            let (next_dir, _, _) = queue[0].clone();
+                                            let next_dir = queue
+                                                .front()
+                                                .map(|(dir, _, _)| *dir)
+                                                .expect("queue should be non-empty");
                                             let _ = client_tx
                                                 .send(ClientMessage::CreatePane {
                                                     surface: surf_id,
@@ -535,18 +543,20 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
                         }
                         ServerMessage::PaneClosed { pane } => {
                             // on_pane_closed フックを発火（fire-and-forget）
-                            if let Some(cmd) = &hooks.on_pane_closed {
-                                if crate::config::HooksConfig::is_enabled(&Some(cmd.clone())) {
-                                    let cmd = cmd.clone();
-                                    let pane_id_str = pane.0.to_string();
-                                    tokio::spawn(async move {
-                                        let _ = tokio::process::Command::new("cmd")
-                                            .args(["/C", &cmd])
-                                            .env("YATAMUX_PANE_ID", pane_id_str)
-                                            .env("YATAMUX_SESSION", DEFAULT_SESSION)
-                                            .spawn();
-                                    });
-                                }
+                            if let Some(cmd) = hooks
+                                .on_pane_closed
+                                .as_deref()
+                                .filter(|cmd| !cmd.is_empty())
+                            {
+                                let cmd = cmd.to_owned();
+                                let pane_id_str = pane.0.to_string();
+                                tokio::spawn(async move {
+                                    let _ = tokio::process::Command::new("cmd")
+                                        .args(["/C", &cmd])
+                                        .env("YATAMUX_PANE_ID", pane_id_str)
+                                        .env("YATAMUX_SESSION", DEFAULT_SESSION)
+                                        .spawn();
+                                });
                             }
                             sinks.remove(&pane);
                             {
@@ -668,7 +678,7 @@ async fn apply_layout_config(
     // 最初のペインの command を送信
     if let Some(pane_cfg) = config.panes.first() {
         if let Some(cmd) = &pane_cfg.command {
-            let mut input = cmd.clone().into_bytes();
+            let mut input = cmd.as_bytes().to_vec();
             input.push(b'\r');
             let _ = client_tx
                 .send(ClientMessage::Input {
@@ -700,7 +710,7 @@ async fn apply_layout_config(
         active = new_id;
 
         if let Some(cmd) = &pane_cfg.command {
-            let mut input = cmd.clone().into_bytes();
+            let mut input = cmd.as_bytes().to_vec();
             input.push(b'\r');
             let _ = client_tx
                 .send(ClientMessage::Input {

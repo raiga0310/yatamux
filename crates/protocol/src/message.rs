@@ -1,4 +1,6 @@
-use crate::types::{PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId};
+use crate::types::{
+    PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -125,5 +127,10 @@ pub enum ServerMessage {
     PanesListed { panes: Vec<PaneInfo> },
 
     /// CapturePane への応答
-    PaneContent { pane: PaneId, content: String },
+    PaneContent {
+        pane: PaneId,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture: Option<PaneCapture>,
+    },
 }

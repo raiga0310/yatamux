@@ -602,6 +602,101 @@ OSC 133;D（Shell Integration: command_done）を検出し、`ServerMessage::Com
 - [ ] セキュリティを考慮し、リモートからは入力（Input）を受け付けない「読み取り専用（Read-only）セッション」の仕組みを導入
 - [ ] 外部から状態を確認するための簡易PWA/Webクライアントのプロトタイプ作成
 
+### C-30: 高水準 `exec` API（コマンド実行・終了コード・タイムアウトの一体化） 【優先度: 高】
+現状の Agent 連携は `send-keys` + `--wait-for-prompt` が中心で、シェルプロンプトや OSC 133;D に依存している。
+AI から見ると「1つのコマンド実行要求」を安全に扱いづらく、タイムアウト・終了コード・相関管理も不足している。
+
+- **概要**: `yatamux exec --pane <id> --timeout <sec> -- <command>` のような高水準 API を追加し、
+  入力送信・完了待機・終了コード取得・タイムアウト・失敗時エラー化を1回の要求にまとめる。
+- **狙い**: Agent が `send-keys` の細かい流儀を知らなくても、単発ジョブを安全に実行できるようにする。
+
+#### サブタスク
+- [ ] `yatamux-protocol` に `Exec` / `ExecResult` 相当のメッセージ設計を追加
+- [ ] IPC レベルで request_id を持てるようにし、複数同時実行時も応答を相関できるようにする
+- [ ] `src/cli.rs` に `exec` サブコマンドを追加し、timeout / exit code / stderr 相当の扱いを決める
+- [ ] 既存 `send-keys --wait-for-prompt` との責務分担を README に整理する
+
+### C-31: ペイン状態メタデータ取得強化（cwd / busy / active / floating / last_update） 【優先度: 高】
+現状の `list-panes --json` は `id / surface / title / cols / rows` のみで、
+Agent が「どのペインに何を送るべきか」を安全に判断するには情報が足りない。
+
+- **概要**: ペイン一覧や個別参照で、作業ディレクトリ、実行中コマンド、busy/idle、active、floating、
+  最終更新時刻などのメタデータを取得できるようにする。
+- **狙い**: 誤ったペインへの指示送信を減らし、Agent が現在の作業状況を自律判定できるようにする。
+
+#### サブタスク
+- [ ] `PaneInfo` を拡張するか、新しい `PaneState` API を追加する
+- [ ] サーバー側で cwd / 実行中コマンド / busy 状態の保持方法を設計する
+- [ ] `list-panes --json` の出力互換性ポリシーを決める（拡張 or 別コマンド）
+- [ ] README に「Agent が pane 選択前に確認すべき情報」を記載する
+
+### C-32: 出力購読 API（subscribe / diff stream）追加 【優先度: 高】
+現状は `capture-pane` によるポーリングが前提で、長時間ジョブ監視や複数ペイン監視では効率が悪い。
+
+- **概要**: 指定ペインの出力更新を IPC 経由で購読できる `subscribe-pane` / event stream を追加する。
+  フルダンプではなく差分・新着行ベースで流せるようにする。
+- **狙い**: Agent が `capture-pane` の連打なしで進捗監視・異常検知・完了判定を行えるようにする。
+
+#### サブタスク
+- [ ] `ServerMessage::Output` をそのまま購読するのか、Agent 向けに整形済みイベントを追加するのか設計する
+- [ ] pane 単位の subscribe / unsubscribe を IPC で扱えるようにする
+- [ ] 遅延クライアント向けに backlog / drop policy を設計する
+- [ ] CLI で扱う場合のストリーム出力形式（JSON Lines など）を決める
+
+### C-33: 明示的な割り込み・キャンセル API（Ctrl+C / terminate / close） 【優先度: 高】
+現状でも `Ctrl+C` をキー送信すれば多くのケースは止められるが、
+Agent 視点では「割り込み」「強制終了」「ペインを閉じる」が明示的な操作として分かれていた方が安全。
+
+- **概要**: `interrupt-pane`、`terminate-pane`、`close-pane` などの制御 API を CLI / IPC に追加する。
+- **狙い**: Agent が失敗したジョブやハングしたジョブを、キー入力に依存せず確実に停止できるようにする。
+
+#### サブタスク
+- [ ] `ClientMessage` に割り込み・終了系メッセージを追加する
+- [ ] ConPTY / 子プロセス kill の扱いを整理し、graceful と force の差を設計する
+- [ ] CLI サブコマンドとして `interrupt-pane` / `close-pane` の UX を定義する
+- [ ] 実行中ジョブへの誤爆を減らすため、確認用メタデータ表示との組み合わせを検討する
+
+### C-34: ペイン別名・ロール付け（alias / role） 【優先度: 中】
+Agent 運用では `pane 3` のような数値 ID よりも、`tests` `server` `agent-a` のような論理名で扱えた方が事故が少ない。
+
+- **概要**: ペインに alias / role を付与し、CLI / IPC で ID の代わりに参照できるようにする。
+- **狙い**: Agent のプロンプトやスクリプトが、動的に変わる pane ID に依存しないようにする。
+
+#### サブタスク
+- [ ] `PaneInfo` に alias / role フィールドを追加する
+- [ ] `rename-pane` または `set-pane-meta` 相当の CLI を追加する
+- [ ] `send-keys` / `capture-pane` / `exec` などが alias 指定を受け付けるようにする
+- [ ] セッション保存・復元時に alias / role を永続化する
+
+### C-35: `capture-pane` の構造化 JSON 出力 【優先度: 高】
+現状の `capture-pane --plain-text` は AI 向けとして有用だが、文字列ダンプのみでは
+カーソル位置、visible 部分、scrollback、タイトルなどを安定して機械処理しにくい。
+
+- **概要**: `capture-pane --json` を追加し、`visible_text`、`scrollback_tail`、`cursor`、`title`、
+  `pane_id`、`active` などを構造化して返す。
+- **狙い**: Agent が正規表現や行単位処理に頼りすぎず、安定して pane 状態を解釈できるようにする。
+
+#### サブタスク
+- [x] `PaneContent` の JSON 版レスポンス型を設計する
+- [x] `docs/test-plan-capture-pane-json.md` を作成する
+- [ ] 既存 `--plain-text` / 既定出力との住み分けを決める
+- [ ] visible screen と scrollback の切り分けルールを明文化する
+- [ ] README とテスト計画に Agent 向け利用例を追加する
+
+### C-36: 待機条件 API の一般化（output regex / silence / exit） 【優先度: 中】
+現状の待機は `send-keys --wait-for-prompt` に限定されており、
+対話的ツールや独自プロンプトを使うプロセスでは Agent が完了判定しづらい。
+
+- **概要**: `wait-for-output <regex>`、`wait-for-silence <duration>`、`wait-for-exit` など、
+  汎用的な待機条件を CLI / IPC に追加する。
+- **狙い**: Agent がシェル統合の有無に依存せず、ジョブ完了や安定状態を待てるようにする。
+
+#### サブタスク
+- [ ] 待機条件ごとのイベントソース（Output / PaneClosed / CommandFinished）を整理する
+- [ ] regex マッチの対象範囲（screen のみ / scrollback 含む）を決める
+- [ ] タイムアウト・キャンセルとの組み合わせ仕様を定義する
+- [ ] `exec` / `subscribe` と共有できる内部待機基盤に寄せる
+
 ---
 
 ## リファクタリング
@@ -636,3 +731,36 @@ dispatch_wm_keydown
 - [x] `dispatch_wm_keydown` を実装
 - [x] `WM_KEYDOWN` ブロックをディスパッチャ呼び出しに置き換え
 - [x] `cargo test && cargo clippy -- -D warnings && cargo fmt --check`
+
+### A-2: clone 監査と所有権ライフサイクルのリアーキテクチャ 【優先度: 高】
+
+現状のコードベースには、Rust として妥当な「ハンドルの cheap clone (`Arc` / `mpsc::Sender`)」と、
+設計上まだ整理余地のある「状態・文字列・レイアウトの clone」が混在している。
+とくに `app.rs` の fan-out / hook / layout 適用まわり、`window.rs` の lock 脱出用 snapshot clone、
+`layout.rs` の部分木 clone などは、状態ごとのライフサイクルを明示して再設計した方が見通しが良い。
+
+- **問題意識**:
+  - `clone` が「共有ハンドルの複製」なのか「所有権設計の逃げ」なのか、箇所ごとの意味が揃っていない
+  - lock を早く解放する目的で状態全体を clone しており、責務境界が曖昧になっている箇所がある
+  - 一時コマンド文字列やレイアウトノードが必要以上に複製され、ライフサイクルが読み取りづらい
+- **狙い**:
+  - セッション単位、ペイン単位、描画フレーム単位、一時イベント単位で「誰が所有し、どこで消費されるか」を明確化する
+  - `clone` を cheap handle clone / snapshot clone / accidental clone に分類し、後者2つを必要最小限に絞る
+  - Rust らしく borrow / move / `mem::take` / `Arc<str>` / `Cow<'_, str>` を使い分け、状態遷移を明示する
+
+#### 重点監査対象
+- `src/app.rs`: `ServerMessage` fan-out 時の `msg.clone()`、hook コマンド文字列の clone、多段レイアウト適用時の `command.clone()`
+- `crates/client/src/window.rs`: `launcher` / `theme_launcher` / `copy_mode` / `layout` の lock 脱出用 clone
+- `crates/client/src/layout.rs`: 部分木除去時の `(**first).clone()` / `(**second).clone()`
+- `crates/server/src/session.rs`: `title` / `body` / `name` などの文字列 clone と capture 用メタデータ生成
+- `crates/server/src/pane.rs`: PTY タスク間の所有権分配と notification payload の生成
+
+#### サブタスク
+- [x] `docs/design-ownership-lifecycle.md` を作成し、clone の分類表と各状態の owner / borrower / drop point を整理する
+- [x] `rg "\\.clone\\("` ベースで clone 監査を行い、cheap clone と削減対象 clone をリストアップする
+- [x] Low リスクの clone 整理（hook 判定、queue 先頭参照、notification body move、未使用 sender フィールド削除）を実装する
+- [ ] `src/app.rs` の fan-out / layout-switch 経路を、move 中心で書けるよう再設計する
+- [ ] `window.rs` の UI state 取得を「必要部分のみ抽出する view struct」に寄せ、全体 snapshot clone を減らす
+- [x] `layout.rs` の部分木操作を `Clone` 前提ではなく `mem::replace` / `Option::take` ベースに置き換えられるか検証する
+- [ ] 文字列 payload を `String` clone でばら撒いている箇所を `Arc<str>` / 所有権移動で削減できるか検証する
+- [x] 変更後に `cargo clippy -- -D warnings` と主要テストを通し、回帰のない ownership 境界に整える

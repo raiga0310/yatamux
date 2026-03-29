@@ -187,6 +187,9 @@ enum Commands {
         /// ANSI エスケープを除去してプレーンテキストで出力する（エージェント向け）
         #[arg(long)]
         plain_text: bool,
+        /// 構造化 JSON で出力する（エージェント向け）
+        #[arg(long)]
+        json: bool,
     },
     /// ペインを分割して新しいペインを作成
     SplitPane {
@@ -277,7 +280,8 @@ async fn main() -> Result<()> {
             target,
             lines,
             plain_text,
-        }) => cli::capture_pane(DEFAULT_SESSION, target, lines, plain_text).await,
+            json,
+        }) => cli::capture_pane(DEFAULT_SESSION, target, lines, plain_text, json).await,
         Some(Commands::SplitPane {
             dir,
             direction,
@@ -330,6 +334,34 @@ mod tests {
                 assert_eq!(pane, 1);
                 assert_eq!(text, "echo hi");
                 assert!(wait_for_prompt);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_capture_pane_json() {
+        let cli = Cli::try_parse_from([
+            "yatamux",
+            "capture-pane",
+            "--target",
+            "1",
+            "--lines",
+            "20",
+            "--json",
+        ])
+        .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::CapturePane {
+                target,
+                lines,
+                json,
+                ..
+            }) => {
+                assert_eq!(target, 1);
+                assert_eq!(lines, 20);
+                assert!(json);
             }
             _ => panic!("unexpected command"),
         }
