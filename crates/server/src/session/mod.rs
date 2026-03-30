@@ -3,46 +3,20 @@
 //! Workspace → Surface → Pane の階層を管理する。
 //! cmux のワークフローモデルに対応。
 
-use anyhow::{Context, Result};
+mod handlers;
+mod model;
+mod tree;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::info;
 
-use yatamux_protocol::types::{
-    CursorInfo, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, WorkspaceId,
-};
+use yatamux_protocol::types::{PaneId, SurfaceId, WorkspaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::CjkWidthConfig;
 
 use crate::pane::{Pane, PaneEvent};
-
-/// ペインの分割ツリーノード（二分木）
-pub enum PaneTree {
-    Leaf(PaneId),
-    Split {
-        direction: SplitDirection,
-        ratio: f32,
-        first: Box<PaneTree>,
-        second: Box<PaneTree>,
-    },
-}
-
-/// サーフェス（タブ）
-pub struct Surface {
-    pub id: SurfaceId,
-    pub workspace: WorkspaceId,
-    pub pane_tree: Option<PaneTree>,
-    pub active_pane: Option<PaneId>,
-}
-
-/// ワークスペース（セッション相当）
-pub struct Workspace {
-    pub id: WorkspaceId,
-    pub name: String,
-    pub surfaces: Vec<SurfaceId>,
-    pub active_surface: Option<SurfaceId>,
-}
+pub use model::{PaneTree, Surface, Workspace};
 
 /// サーバー本体
 pub struct Server {
@@ -104,342 +78,47 @@ impl Server {
                 }
                 // ペインからの内部イベント転送
                 Some((pane_id, event)) = self.pane_event_rx.recv() => {
-                    match event {
-                        PaneEvent::Notification(body) => {
-                            let _ = self.client_tx.send(ServerMessage::Notification {
-                                pane: pane_id,
-                                body,
-                            }).await;
-                        }
-                        PaneEvent::Bell => {
-                            let _ = self.client_tx.send(ServerMessage::Notification {
-                                pane: pane_id,
-                                body: "Bell".to_string(),
-                            }).await;
-                        }
-                        PaneEvent::ProcessExited => {
-                            let _ = self.client_tx.send(ServerMessage::Notification {
-                                pane: pane_id,
-                                body: "Process exited".to_string(),
-                            }).await;
-                            self.panes.remove(&pane_id);
-                            let _ = self.client_tx
-                                .send(ServerMessage::PaneClosed { pane: pane_id })
-                                .await;
-                        }
-                        PaneEvent::CommandFinished(exit_code) => {
-                            let _ = self.client_tx.send(ServerMessage::CommandFinished {
-                                pane: pane_id,
-                                exit_code,
-                            }).await;
-                        }
-                    }
+                    self.forward_pane_event(pane_id, event).await;
                 }
             }
         }
     }
 
-    async fn handle_client_message(&mut self, msg: ClientMessage) -> Result<()> {
-        match msg {
-            ClientMessage::CreateWorkspace { name } => {
-                let id = WorkspaceId(self.next_workspace_id);
-                self.next_workspace_id += 1;
-                let name = name.unwrap_or_else(|| format!("workspace-{}", id.0));
-                info!("Creating workspace {:?} '{}'", id, name);
-                self.workspaces.insert(
-                    id,
-                    Workspace {
-                        id,
-                        name: name.clone(),
-                        surfaces: Vec::new(),
-                        active_surface: None,
-                    },
-                );
-                self.client_tx
-                    .send(ServerMessage::WorkspaceCreated { id, name })
-                    .await
-                    .context("Failed to send WorkspaceCreated")?;
-            }
+    async fn send_notification(&mut self, pane: PaneId, body: String) {
+        let _ = self
+            .client_tx
+            .send(ServerMessage::Notification { pane, body })
+            .await;
+    }
 
-            ClientMessage::CreateSurface { workspace } => {
-                let id = SurfaceId(self.next_surface_id);
-                self.next_surface_id += 1;
-                info!("Creating surface {:?} in workspace {:?}", id, workspace);
-                if let Some(ws) = self.workspaces.get_mut(&workspace) {
-                    ws.surfaces.push(id);
-                    if ws.active_surface.is_none() {
-                        ws.active_surface = Some(id);
-                    }
-                }
-                self.surfaces.insert(
-                    id,
-                    Surface {
-                        id,
-                        workspace,
-                        pane_tree: None,
-                        active_pane: None,
-                    },
-                );
-                self.client_tx
-                    .send(ServerMessage::SurfaceCreated { id, workspace })
-                    .await
-                    .context("Failed to send SurfaceCreated")?;
-            }
+    async fn send_pane_closed(&mut self, pane: PaneId) {
+        let _ = self
+            .client_tx
+            .send(ServerMessage::PaneClosed { pane })
+            .await;
+    }
 
-            ClientMessage::CreatePane {
-                surface,
-                size,
-                split_from,
-                direction,
-                working_dir,
-            } => {
-                let id = PaneId(self.next_pane_id);
-                self.next_pane_id += 1;
-                info!("Creating pane {:?} in surface {:?}", id, surface);
+    async fn send_command_finished(&mut self, pane: PaneId, exit_code: Option<i32>) {
+        let _ = self
+            .client_tx
+            .send(ServerMessage::CommandFinished { pane, exit_code })
+            .await;
+    }
 
-                let pane = Pane::spawn(
-                    id,
-                    size,
-                    self.width_config.clone(),
-                    self.pane_output_tx.clone(),
-                    self.pane_event_tx.clone(),
-                    working_dir,
-                )?;
-                self.panes.insert(id, pane);
-
-                if let Some(s) = self.surfaces.get_mut(&surface) {
-                    match (split_from, direction, s.pane_tree.take()) {
-                        (Some(parent_id), Some(dir), Some(tree)) => {
-                            s.pane_tree = Some(split_pane_tree(tree, parent_id, id, dir));
-                        }
-                        (_, _, existing) => {
-                            s.pane_tree = Some(existing.unwrap_or(PaneTree::Leaf(id)));
-                            if s.pane_tree
-                                .as_ref()
-                                .is_none_or(|t| matches!(t, PaneTree::Leaf(_)))
-                            {
-                                s.pane_tree = Some(PaneTree::Leaf(id));
-                            }
-                        }
-                    }
-                    s.active_pane = Some(id);
-                }
-
-                self.client_tx
-                    .send(ServerMessage::PaneCreated {
-                        id,
-                        surface,
-                        split_from,
-                        direction,
-                    })
-                    .await
-                    .context("Failed to send PaneCreated")?;
-            }
-
-            ClientMessage::Input { pane, data } => {
-                if let Some(p) = self.panes.get(&pane) {
-                    p.send_input(data).await?;
-                } else {
-                    self.client_tx
-                        .send(ServerMessage::Error {
-                            message: format!("pane {} not found", pane.0),
-                        })
-                        .await
-                        .context("Failed to send Error")?;
-                }
-            }
-
-            ClientMessage::Resize { pane, size } => {
-                if let Some(p) = self.panes.get(&pane) {
-                    p.resize(size).await?;
-                }
-            }
-
-            ClientMessage::ClosePane { pane } => {
+    async fn forward_pane_event(&mut self, pane: PaneId, event: PaneEvent) {
+        match event {
+            PaneEvent::Notification(body) => self.send_notification(pane, body).await,
+            PaneEvent::Bell => self.send_notification(pane, "Bell".to_string()).await,
+            PaneEvent::ProcessExited => {
+                self.send_notification(pane, "Process exited".to_string())
+                    .await;
                 self.panes.remove(&pane);
-                self.client_tx
-                    .send(ServerMessage::PaneClosed { pane })
-                    .await?;
+                self.send_pane_closed(pane).await;
             }
-
-            ClientMessage::Detach => {
-                info!("Client detached, server continues running");
-            }
-
-            ClientMessage::RequestScreen { pane: _ } => {
-                // TODO: グリッドの現在状態を送信
-            }
-
-            ClientMessage::CapturePane {
-                pane,
-                lines,
-                plain_text: _,
-            } => {
-                if !self.panes.contains_key(&pane) {
-                    self.client_tx
-                        .send(ServerMessage::Error {
-                            message: format!("pane {} not found", pane.0),
-                        })
-                        .await
-                        .context("Failed to send Error")?;
-                    return Ok(());
-                }
-                let (content, capture) = if let Some(p) = self.panes.get(&pane) {
-                    let grid = p.grid.lock().await;
-                    let visible_text: Vec<String> = (0..grid.rows())
-                        .filter_map(|r| grid.row(r))
-                        .map(yatamux_terminal::grid::row_cells_to_text)
-                        .collect();
-                    let scrollback_tail: Vec<String> = if lines == 0 {
-                        Vec::new()
-                    } else {
-                        let tail_rows = lines.saturating_sub(grid.rows() as usize);
-                        let start = grid.scrollback_len().saturating_sub(tail_rows);
-                        (start..grid.scrollback_len())
-                            .filter_map(|i| grid.scrollback_row(i))
-                            .map(|row| yatamux_terminal::grid::row_cells_to_text(row))
-                            .collect()
-                    };
-                    if lines == 0 {
-                        (
-                            String::new(),
-                            Some(PaneCapture {
-                                title: p.title.lock().unwrap().clone(),
-                                cols: grid.cols(),
-                                rows: grid.rows(),
-                                lines_requested: lines,
-                                scrollback_len: grid.scrollback_len(),
-                                cursor: CursorInfo {
-                                    col: grid.cursor().col,
-                                    row: grid.cursor().row,
-                                    visible: grid.cursor_visible(),
-                                },
-                                visible_text: Vec::new(),
-                                scrollback_tail,
-                            }),
-                        )
-                    } else {
-                        // スクロールバック末尾 + 現在画面を取得
-                        let sb_len = grid.scrollback_len();
-                        let rows = grid.rows() as usize;
-                        let total_rows = sb_len + rows;
-                        // lines 行分だけ末尾から取得する
-                        let skip = total_rows.saturating_sub(lines);
-
-                        let mut parts: Vec<String> = Vec::new();
-                        // スクロールバック行
-                        for i in skip..sb_len {
-                            if let Some(row) = grid.scrollback_row(i) {
-                                parts.push(yatamux_terminal::grid::row_cells_to_text(row));
-                            }
-                        }
-                        // 画面行（スクロールバック分を差し引いた分）
-                        let screen_skip = skip.saturating_sub(sb_len);
-                        for r in screen_skip..rows {
-                            if let Some(row) = grid.row(r as u16) {
-                                parts.push(yatamux_terminal::grid::row_cells_to_text(row));
-                            }
-                        }
-                        (
-                            parts.join("\n"),
-                            Some(PaneCapture {
-                                title: p.title.lock().unwrap().clone(),
-                                cols: grid.cols(),
-                                rows: grid.rows(),
-                                lines_requested: lines,
-                                scrollback_len: sb_len,
-                                cursor: CursorInfo {
-                                    col: grid.cursor().col,
-                                    row: grid.cursor().row,
-                                    visible: grid.cursor_visible(),
-                                },
-                                visible_text,
-                                scrollback_tail,
-                            }),
-                        )
-                    }
-                } else {
-                    (String::new(), None)
-                };
-                self.client_tx
-                    .send(ServerMessage::PaneContent {
-                        pane,
-                        content,
-                        capture,
-                    })
-                    .await
-                    .context("Failed to send PaneContent")?;
-            }
-
-            ClientMessage::ListPanes => {
-                // サーフェスごとに属するペインを収集（非同期ロックのためクロージャ外で処理）
-                let mut panes: Vec<PaneInfo> = Vec::new();
-                for (surf_id, surface) in &self.surfaces {
-                    let ids_in_tree = surface
-                        .pane_tree
-                        .as_ref()
-                        .map(pane_ids_in_tree)
-                        .unwrap_or_default();
-                    for pane_id in &ids_in_tree {
-                        if let Some(pane) = self.panes.get(pane_id) {
-                            // std::sync::Mutex: await なし、デッドロックなし
-                            let s = pane.size.lock().unwrap();
-                            let (cols, rows) = (s.cols, s.rows);
-                            drop(s);
-                            let title = pane.title.lock().unwrap().clone();
-                            panes.push(PaneInfo {
-                                id: *pane_id,
-                                surface: *surf_id,
-                                title,
-                                cols,
-                                rows,
-                            });
-                        }
-                    }
-                }
-                self.client_tx
-                    .send(ServerMessage::PanesListed { panes })
-                    .await
-                    .context("Failed to send PanesListed")?;
+            PaneEvent::CommandFinished(exit_code) => {
+                self.send_command_finished(pane, exit_code).await;
             }
         }
-        Ok(())
-    }
-}
-
-/// ツリー内の全 PaneId を収集する
-fn pane_ids_in_tree(tree: &PaneTree) -> Vec<PaneId> {
-    match tree {
-        PaneTree::Leaf(id) => vec![*id],
-        PaneTree::Split { first, second, .. } => {
-            let mut ids = pane_ids_in_tree(first);
-            ids.extend(pane_ids_in_tree(second));
-            ids
-        }
-    }
-}
-
-/// `parent` の Leaf を `parent`/`child` の Split に置き換えるヘルパー
-fn split_pane_tree(tree: PaneTree, parent: PaneId, child: PaneId, dir: SplitDirection) -> PaneTree {
-    match tree {
-        PaneTree::Leaf(id) if id == parent => PaneTree::Split {
-            direction: dir,
-            ratio: 0.5,
-            first: Box::new(PaneTree::Leaf(id)),
-            second: Box::new(PaneTree::Leaf(child)),
-        },
-        PaneTree::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } => PaneTree::Split {
-            direction,
-            ratio,
-            first: Box::new(split_pane_tree(*first, parent, child, dir)),
-            second: Box::new(split_pane_tree(*second, parent, child, dir)),
-        },
-        other => other,
     }
 }
 

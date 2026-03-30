@@ -43,7 +43,7 @@ pub struct Pane {
     /// PTY コマンドチャネル（入力 / リサイズ）
     cmd_tx: mpsc::Sender<PtyCmd>,
     /// タイトル文字列（std::sync::Mutex: ListPanes でブロッキングなし取得のため）
-    pub title: Arc<std::sync::Mutex<String>>,
+    pub title: Arc<std::sync::Mutex<Arc<str>>>,
     /// 現在のペインサイズ（std::sync::Mutex: ListPanes でブロッキングなし取得のため）
     pub size: Arc<std::sync::Mutex<TermSize>>,
     /// 子プロセス kill ハンドル。Pane が Drop されるときに cmd.exe を終了させる。
@@ -70,7 +70,7 @@ impl Pane {
         working_dir: Option<String>,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
-        let title = Arc::new(std::sync::Mutex::new(String::new()));
+        let title = Arc::new(std::sync::Mutex::new(Arc::<str>::from("")));
         let pane_size = Arc::new(std::sync::Mutex::new(size));
 
         let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<Vec<u8>>(256);
@@ -131,7 +131,7 @@ impl Pane {
                     yatamux_terminal::vt::feed_bytes(&mut parser, &mut proc, &data);
 
                     if let Some(t) = proc.title.take() {
-                        *title_clone.lock().unwrap() = t;
+                        *title_clone.lock().unwrap() = Arc::<str>::from(t);
                     }
                     (
                         proc.notification.take(),

@@ -216,9 +216,11 @@ just lint && just test && just fmt
 
 すべてパスしてから PR を出すこと。
 
-## task.md
+## task.md / docs/tasks
 
-`task.md` が未実装タスクの一覧。
+`task.md` はタスク一覧の入口。
+未完了タスクの詳細は `docs/tasks/active.md` と `docs/tasks/refactor.md` を参照し、
+完了済みの履歴は `docs/tasks/archive-2026-03-30.md` に退避している。
 
 ## docs/troubleshoot.md
 

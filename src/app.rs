@@ -8,25 +8,29 @@
 //! 外部からの入力は merged チャネルでインプロセスの入力と合流し、
 //! サーバー出力はファンアウトタスクが GUI と IPC 両方に配信する。
 
-use std::collections::{HashMap, VecDeque};
+mod bootstrap;
+mod bridge;
+mod layout_restore;
+mod layout_switch;
+
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use yatamux_client::{
-    run_window, FocusAwareBackend, LayoutNode, LayoutNodeDef, LayoutSnapshot, NotificationBackend,
-    PaneStore, Theme,
-};
+use yatamux_client::{run_window, FocusAwareBackend, NotificationBackend, PaneStore, Theme};
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
-use yatamux_protocol::{ClientMessage, ServerMessage};
-use yatamux_server::{ipc::run_ipc_server, Server};
+use yatamux_protocol::ClientMessage;
 use yatamux_terminal::TerminalSink;
 
+use crate::app::{
+    bootstrap::bootstrap_runtime,
+    bridge::{spawn_bridge_fanout, spawn_server_bridge, BridgeChannels, ServerBridge},
+    layout_restore::load_initial_layout,
+};
 use crate::config::{parse_hex_color, AppConfig, AppearanceConfig};
-use crate::layout_config::{LayoutConfig, SplitDir};
-use crate::DEFAULT_SESSION;
 
 /// `AppearanceConfig` から `Theme` を構築する
 fn build_theme(appearance: &AppearanceConfig) -> Theme {
@@ -63,102 +67,24 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
     };
-
-    // ── サーバーをインプロセスで起動 ────────────────────────────────────
-    let (server_tx, mut server_rx) = mpsc::channel::<ServerMessage>(256);
-
-    // サーバー出力は window と IPC 両方へファンアウトする
-    // Server は単一の server_out_tx へ出力 → fan_out タスクが振り分ける
-    let (server_out_tx, mut server_out_rx) = mpsc::channel::<ServerMessage>(256);
-    let (ipc_out_tx, ipc_out_rx) = mpsc::channel::<ServerMessage>(256);
-
-    // 入力は window と IPC を merged_tx でマージ → server へ
-    let (merged_tx, merged_rx) = mpsc::channel::<ClientMessage>(256);
-    let client_tx = merged_tx.clone(); // window 用
-    let ipc_in_tx = merged_tx.clone(); // IPC 用
-
-    // server_out_rx → server_rx（window 用）と ipc_out_tx（IPC 用）へファンアウト
-    tokio::spawn(async move {
-        while let Some(msg) = server_out_rx.recv().await {
-            let _ = server_tx.send(msg.clone()).await;
-            let _ = ipc_out_tx.send(msg).await;
-        }
-    });
-
-    let server = Server::new(server_out_tx);
-    tokio::spawn(server.run(merged_rx));
-
-    // ── IPC サーバー起動（外部 CLI からの接続を受け付ける）────────────────
-    tokio::spawn(async move {
-        if let Err(e) = run_ipc_server(DEFAULT_SESSION, ipc_in_tx, ipc_out_rx).await {
-            tracing::error!("IPC server exited with error: {:#}", e);
-        }
-    });
-
-    // ── ワークスペース → サーフェス → 初期ペイン 作成 ───────────────────
-    client_tx
-        .send(ClientMessage::CreateWorkspace { name: None })
-        .await?;
-    let ws_id = wait_for!(server_rx, ServerMessage::WorkspaceCreated { id, .. } => id)?;
-
-    client_tx
-        .send(ClientMessage::CreateSurface { workspace: ws_id })
-        .await?;
-    let surf_id = wait_for!(server_rx, ServerMessage::SurfaceCreated { id, .. } => id)?;
-
-    client_tx
-        .send(ClientMessage::CreatePane {
-            surface: surf_id,
-            split_from: None,
-            direction: None,
-            size,
-            working_dir: None,
-        })
-        .await?;
-    let pane_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
+    let bootstrap = bootstrap_runtime(size).await?;
+    let client_tx = bootstrap.client_tx;
+    let mut server_rx = bootstrap.server_rx;
+    let ipc_out_tx = bootstrap.ipc_out_tx;
+    let surf_id = bootstrap.surf_id;
+    let pane_id = bootstrap.pane_id;
 
     tracing::info!("Pane {:?} created, opening window", pane_id);
 
-    // ── セッション復元 / レイアウト設定 / 初期ペインのみ ─────────────────
-    let session_path = LayoutSnapshot::default_path();
-    let (layout, sinks_vec, active_pane) = if let Some(name) = layout_name {
-        // --layout <name> が指定された場合はレイアウト設定を優先
-        let config_path = LayoutConfig::layout_path(&name);
-        match LayoutConfig::load(&config_path) {
-            Ok(config) => {
-                tracing::info!("レイアウト設定を適用します: {}", config_path.display());
-                apply_layout_config(config, pane_id, surf_id, size, &client_tx, &mut server_rx)
-                    .await?
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "レイアウト設定の読み込みに失敗しました（{}）: {:#}",
-                    config_path.display(),
-                    e
-                );
-                let sink = TerminalSink::new(size.cols, size.rows);
-                (LayoutNode::Leaf(pane_id), vec![(pane_id, sink)], pane_id)
-            }
-        }
-    } else if let Ok(snap) = LayoutSnapshot::load(&session_path) {
-        tracing::info!("セッションを復元します");
-        let mut old_to_new: HashMap<PaneId, PaneId> = HashMap::new();
-        let (layout, sinks_vec) = restore_node(
-            &snap.root,
-            pane_id,
-            surf_id,
-            size,
-            &client_tx,
-            &mut server_rx,
-            &mut old_to_new,
-        )
-        .await?;
-        let active = old_to_new.get(&snap.active).copied().unwrap_or(pane_id);
-        (layout, sinks_vec, active)
-    } else {
-        let sink = TerminalSink::new(size.cols, size.rows);
-        (LayoutNode::Leaf(pane_id), vec![(pane_id, sink)], pane_id)
-    };
+    let (layout, sinks_vec, active_pane) = load_initial_layout(
+        layout_name,
+        pane_id,
+        surf_id,
+        size,
+        &client_tx,
+        &mut server_rx,
+    )
+    .await?;
 
     let mut sinks: HashMap<PaneId, TerminalSink> = HashMap::new();
     let mut all_grids: HashMap<PaneId, Arc<Mutex<yatamux_terminal::Grid>>> = HashMap::new();
@@ -191,452 +117,34 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
     });
 
     // ── ペイン分割要求チャネル（Window → この tokio タスク）────────────
-    let (split_tx, mut split_rx) = mpsc::channel::<(PaneId, SplitDirection)>(8);
+    let (split_tx, split_rx) = mpsc::channel::<(PaneId, SplitDirection)>(8);
 
     // ── フローティングペイン要求チャネル（Window → この tokio タスク）──
-    let (float_tx, mut float_rx) = mpsc::channel::<()>(4);
+    let (float_tx, float_rx) = mpsc::channel::<()>(4);
 
     // ── レイアウトランチャー切り替えチャネル（Window → この tokio タスク）
-    let (layout_tx, mut layout_rx) = mpsc::channel::<String>(4);
+    let (layout_tx, layout_rx) = mpsc::channel::<String>(4);
 
-    // ── サーバー出力 + ペイン分割ハンドラ ───────────────────────────────
-    let pane_store2 = Arc::clone(&pane_store);
-    let notif_backend2 = Arc::clone(&notif_backend);
     let hooks = app_config.hooks;
     let theme = build_theme(&app_config.appearance);
-    tokio::spawn(async move {
-        let notif_backend = notif_backend2;
-        // 分割リクエスト待ちキュー (parent_id, direction, new_size)
-        let mut pending: VecDeque<(PaneId, SplitDirection, TermSize)> = VecDeque::new();
-        // 次の PaneCreated がフローティングペイン用かどうか
-        let mut pending_float = false;
-        // レイアウト切り替えフェーズ（None = 通常動作）
-        let mut layout_switch: Option<LayoutPhase> = None;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                // フローティングペイン要求
-                Some(()) = float_rx.recv() => {
-                    let floating = pane_store2.lock().unwrap().floating;
-                    match floating {
-                        None => {
-                            // 初回: 新しいペインを作成してフローティングに設定
-                            pending_float = true;
-                            let _ = client_tx.send(ClientMessage::CreatePane {
-                                surface: surf_id,
-                                split_from: None,
-                                direction: None,
-                                size,
-                                working_dir: None,
-                            }).await;
-                        }
-                        Some(_) => {
-                            // 既存フローティングペインの表示/非表示トグル
-                            let mut store = pane_store2.lock().unwrap();
-                            if store.floating_visible {
-                                store.hide_float();
-                            } else {
-                                store.show_float();
-                            }
-                        }
-                    }
-                }
-
-                // レイアウト切り替え要求
-                Some(name) = layout_rx.recv() => {
-                    // 実行中の分割・フローティング要求をキャンセル
-                    pending.clear();
-                    pending_float = false;
-
-                    let pane_ids: Vec<PaneId> = {
-                        let store = pane_store2.lock().unwrap();
-                        let mut ids: Vec<PaneId> = store.grids.keys().cloned().collect();
-                        // フローティングペインも閉じる
-                        if let Some(float_id) = store.floating {
-                            if !ids.contains(&float_id) {
-                                ids.push(float_id);
-                            }
-                        }
-                        ids
-                    };
-                    let remaining = pane_ids.len();
-                    for id in pane_ids {
-                        let _ = client_tx.send(ClientMessage::ClosePane { pane: id }).await;
-                    }
-                    if remaining == 0 {
-                        // ペインなし（通常は起こらない）→ 即座に新ペイン作成
-                        let config_path = LayoutConfig::layout_path(&name);
-                        if let Ok(config) = LayoutConfig::load(&config_path) {
-                            let _ = client_tx.send(ClientMessage::CreatePane {
-                                surface: surf_id,
-                                split_from: None,
-                                direction: None,
-                                size,
-                                working_dir: None,
-                            }).await;
-                            layout_switch = Some(LayoutPhase::WaitingFirst { config });
-                        }
-                    } else {
-                        layout_switch = Some(LayoutPhase::Closing { name, remaining });
-                    }
-                }
-
-                // ペイン分割要求
-                Some((parent_id, direction)) = split_rx.recv() => {
-                    // 親グリッドの現在サイズから新ペインのサイズを計算
-                    let new_size = {
-                        let store = pane_store2.lock().unwrap();
-                        if let Some(g) = store.grids.get(&parent_id) {
-                            let g = g.lock().unwrap();
-                            match direction {
-                                SplitDirection::Vertical =>
-                                    TermSize { cols: (g.cols() / 2).max(1), rows: g.rows() },
-                                SplitDirection::Horizontal =>
-                                    TermSize { cols: g.cols(), rows: (g.rows() / 2).max(1) },
-                            }
-                        } else {
-                            TermSize { cols: DEFAULT_COLS / 2, rows: DEFAULT_ROWS }
-                        }
-                    };
-                    pending.push_back((parent_id, direction, new_size));
-                    let _ = client_tx.send(ClientMessage::CreatePane {
-                        surface: surf_id,
-                        split_from: Some(parent_id),
-                        direction: Some(direction),
-                        size: new_size,
-                        working_dir: None,
-                    }).await;
-                }
-
-                // サーバーからのメッセージ
-                Some(msg) = server_rx.recv() => {
-                    match msg {
-                        ServerMessage::Output { pane, data } => {
-                            if let Some(sink) = sinks.get_mut(&pane) {
-                                // feed() は OSC 52 クリップボードデータがあれば Some を返す
-                                if let Some(clip) = sink.feed(&data) {
-                                    pane_store2.lock().unwrap().pending_clipboard = Some(clip);
-                                }
-                            }
-                        }
-                        ServerMessage::PaneCreated { id: new_id, split_from: ipc_split_from, direction: ipc_direction, .. } => {
-                            // on_pane_created フックを発火（fire-and-forget）
-                            if let Some(cmd) = hooks
-                                .on_pane_created
-                                .as_deref()
-                                .filter(|cmd| !cmd.is_empty())
-                            {
-                                let cmd = cmd.to_owned();
-                                let pane_id_str = new_id.0.to_string();
-                                tokio::spawn(async move {
-                                    let _ = tokio::process::Command::new("cmd")
-                                        .args(["/C", &cmd])
-                                        .env("YATAMUX_PANE_ID", pane_id_str)
-                                        .env("YATAMUX_SESSION", DEFAULT_SESSION)
-                                        .spawn();
-                                });
-                            }
-                            // レイアウト切り替え用ペイン作成処理（通常の分割より優先）
-                            if let Some(phase) = layout_switch.take() {
-                                match phase {
-                                    LayoutPhase::WaitingFirst { config } => {
-                                        let new_sink =
-                                            TerminalSink::new(size.cols, size.rows);
-                                        let new_grid = Arc::clone(&new_sink.grid);
-                                        sinks.insert(new_id, new_sink);
-
-                                        // 最初のペインのコマンドを送信・記録（C-23）
-                                        if let Some(cmd) =
-                                            config.panes.first().and_then(|p| p.command.as_ref())
-                                        {
-                                            pane_store2
-                                                .lock()
-                                                .unwrap()
-                                                .pane_commands
-                                                .insert(new_id, cmd.clone());
-                                            let mut input = cmd.as_bytes().to_vec();
-                                            input.push(b'\r');
-                                            let _ = client_tx
-                                                .send(ClientMessage::Input {
-                                                    pane: new_id,
-                                                    data: input,
-                                                })
-                                                .await;
-                                        }
-
-                                        let new_layout = LayoutNode::Leaf(new_id);
-                                        let new_grids = vec![(new_id, new_grid)];
-
-                                        // 残りペイン設定をキューに積む (direction, ratio, cmd)
-                                        let queue: std::collections::VecDeque<
-                                            (SplitDirection, f32, Option<String>),
-                                        > = config
-                                            .panes
-                                            .iter()
-                                            .skip(1)
-                                            .map(|p| {
-                                                let dir = match p.split {
-                                                    Some(SplitDir::Horizontal) => {
-                                                        SplitDirection::Horizontal
-                                                    }
-                                                    _ => SplitDirection::Vertical,
-                                                };
-                                                (dir, p.ratio, p.command.clone())
-                                            })
-                                            .collect();
-
-                                        if queue.is_empty() {
-                                            // 1ペインレイアウト → 即完了
-                                            finalize_layout_switch(
-                                                &pane_store2,
-                                                new_layout,
-                                                new_grids,
-                                                new_id,
-                                            );
-                                        } else {
-                                            // 次のペインを作成
-                                            let next_dir = queue
-                                                .front()
-                                                .map(|(dir, _, _)| *dir)
-                                                .expect("queue should be non-empty");
-                                            let _ = client_tx
-                                                .send(ClientMessage::CreatePane {
-                                                    surface: surf_id,
-                                                    split_from: Some(new_id),
-                                                    direction: Some(next_dir),
-                                                    size,
-                                                    working_dir: None,
-                                                })
-                                                .await;
-                                            layout_switch = Some(LayoutPhase::Applying {
-                                                queue,
-                                                layout: new_layout,
-                                                grids: new_grids,
-                                                prev: new_id,
-                                                active: new_id,
-                                            });
-                                        }
-                                    }
-                                    LayoutPhase::Applying {
-                                        mut queue,
-                                        mut layout,
-                                        mut grids,
-                                        prev,
-                                        ..
-                                    } => {
-                                        // queue[0] が今作成されたペインの設定
-                                        let (dir, ratio, cmd) = queue.pop_front().unwrap();
-
-                                        let new_sink =
-                                            TerminalSink::new(size.cols, size.rows);
-                                        let new_grid = Arc::clone(&new_sink.grid);
-                                        sinks.insert(new_id, new_sink);
-                                        grids.push((new_id, new_grid));
-                                        layout.split_leaf_with_ratio(prev, new_id, dir, ratio);
-
-                                        if let Some(cmd) = cmd {
-                                            // コマンドを記録してから送信（C-23）
-                                            pane_store2
-                                                .lock()
-                                                .unwrap()
-                                                .pane_commands
-                                                .insert(new_id, cmd.clone());
-                                            let mut input = cmd.into_bytes();
-                                            input.push(b'\r');
-                                            let _ = client_tx
-                                                .send(ClientMessage::Input {
-                                                    pane: new_id,
-                                                    data: input,
-                                                })
-                                                .await;
-                                        }
-
-                                        if queue.is_empty() {
-                                            // 全ペイン作成完了
-                                            finalize_layout_switch(
-                                                &pane_store2,
-                                                layout,
-                                                grids,
-                                                new_id,
-                                            );
-                                        } else {
-                                            // 次のペインを作成
-                                            let next_dir = queue
-                                                .front()
-                                                .map(|(dir, _, _)| *dir)
-                                                .expect("queue should be non-empty");
-                                            let _ = client_tx
-                                                .send(ClientMessage::CreatePane {
-                                                    surface: surf_id,
-                                                    split_from: Some(new_id),
-                                                    direction: Some(next_dir),
-                                                    size,
-                                                    working_dir: None,
-                                                })
-                                                .await;
-                                            layout_switch = Some(LayoutPhase::Applying {
-                                                queue,
-                                                layout,
-                                                grids,
-                                                prev: new_id,
-                                                active: new_id,
-                                            });
-                                        }
-                                    }
-                                    other => {
-                                        // Closing フェーズ中は PaneCreated は来ないはずだが
-                                        // 念のため戻す
-                                        layout_switch = Some(other);
-                                    }
-                                }
-                            } else if pending_float {
-                                // フローティングペイン作成完了
-                                pending_float = false;
-                                let float_size = TermSize { cols: DEFAULT_COLS, rows: DEFAULT_ROWS };
-                                let new_sink = TerminalSink::new(float_size.cols, float_size.rows);
-                                let new_grid = Arc::clone(&new_sink.grid);
-                                sinks.insert(new_id, new_sink);
-                                {
-                                    let mut store = pane_store2.lock().unwrap();
-                                    store.grids.insert(new_id, new_grid);
-                                    // レイアウトツリーには追加しない（フローティング管理）
-                                    store.floating = Some(new_id);
-                                    store.show_float();
-                                }
-                            } else if let Some((parent_id, direction, new_size)) = pending.pop_front() {
-                                let new_sink = TerminalSink::new(new_size.cols, new_size.rows);
-                                let new_grid = Arc::clone(&new_sink.grid);
-                                sinks.insert(new_id, new_sink);
-                                {
-                                    let mut store = pane_store2.lock().unwrap();
-                                    // 親ペインのクライアント側グリッドもリサイズ
-                                    // （分割後は幅/高さが半分になるため）
-                                    if let Some(g) = store.grids.get(&parent_id) {
-                                        g.lock().unwrap().resize(new_size.cols, new_size.rows);
-                                    }
-                                    store.grids.insert(new_id, new_grid);
-                                    store.layout.split_leaf(parent_id, new_id, direction);
-                                    store.active = new_id;
-                                }
-                                // 親ペインをサーバー側（ConPTY）でもリサイズ
-                                let _ = client_tx.send(ClientMessage::Resize {
-                                    pane: parent_id,
-                                    size: new_size,
-                                }).await;
-                            } else if let (Some(parent_id), Some(direction)) =
-                                (ipc_split_from, ipc_direction)
-                            {
-                                // IPC 経由（split-pane CLI）で作成されたペイン
-                                // pending には積まれていないが GUI レイアウトに反映する必要がある
-                                let new_sink = TerminalSink::new(size.cols, size.rows);
-                                let new_grid = Arc::clone(&new_sink.grid);
-                                sinks.insert(new_id, new_sink);
-                                {
-                                    let mut store = pane_store2.lock().unwrap();
-                                    store.grids.insert(new_id, new_grid);
-                                    store.layout.split_leaf(parent_id, new_id, direction);
-                                    store.active = new_id;
-                                }
-                            }
-                        }
-                        ServerMessage::PaneClosed { pane } => {
-                            // on_pane_closed フックを発火（fire-and-forget）
-                            if let Some(cmd) = hooks
-                                .on_pane_closed
-                                .as_deref()
-                                .filter(|cmd| !cmd.is_empty())
-                            {
-                                let cmd = cmd.to_owned();
-                                let pane_id_str = pane.0.to_string();
-                                tokio::spawn(async move {
-                                    let _ = tokio::process::Command::new("cmd")
-                                        .args(["/C", &cmd])
-                                        .env("YATAMUX_PANE_ID", pane_id_str)
-                                        .env("YATAMUX_SESSION", DEFAULT_SESSION)
-                                        .spawn();
-                                });
-                            }
-                            sinks.remove(&pane);
-                            {
-                                let mut store = pane_store2.lock().unwrap();
-                                store.grids.remove(&pane);
-                                if store.floating == Some(pane) {
-                                    store.floating = None;
-                                    store.floating_visible = false;
-                                }
-                                if layout_switch.is_none() {
-                                    // 通常の閉じる処理
-                                    let next = store.layout.remove_pane(pane);
-                                    if store.active == pane {
-                                        if let Some(next_id) = next {
-                                            store.active = next_id;
-                                        }
-                                    }
-                                    // C-9: 全ペインが閉じられたらアプリ終了
-                                    if store.grids.is_empty() {
-                                        store.should_quit = true;
-                                    }
-                                }
-                            }
-                            // レイアウト切り替え中のカウントダウン
-                            if let Some(LayoutPhase::Closing { remaining, .. }) =
-                                &mut layout_switch
-                            {
-                                *remaining -= 1;
-                                if *remaining == 0 {
-                                    if let Some(LayoutPhase::Closing { name, .. }) =
-                                        layout_switch.take()
-                                    {
-                                        let config_path = LayoutConfig::layout_path(&name);
-                                        match LayoutConfig::load(&config_path) {
-                                            Ok(config) => {
-                                                let _ = client_tx
-                                                    .send(ClientMessage::CreatePane {
-                                                        surface: surf_id,
-                                                        split_from: None,
-                                                        direction: None,
-                                                        size,
-                                                        working_dir: None,
-                                                    })
-                                                    .await;
-                                                layout_switch =
-                                                    Some(LayoutPhase::WaitingFirst { config });
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "レイアウト読み込み失敗: {:#}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        ServerMessage::Notification { pane, body } => {
-                            let active = pane_store2.lock().unwrap().active;
-                            if pane != active {
-                                notif_backend.notify(pane, body);
-                            }
-                        }
-                        ServerMessage::CommandFinished { pane, exit_code } => {
-                            let active = pane_store2.lock().unwrap().active;
-                            if pane != active {
-                                let body = match exit_code {
-                                    Some(code) => format!("Command finished (exit {})", code),
-                                    None => "Command finished".to_string(),
-                                };
-                                notif_backend.notify(pane, body);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    });
+    let bridge_rx = spawn_bridge_fanout(server_rx, ipc_out_tx);
+    spawn_server_bridge(
+        ServerBridge {
+            server_rx: bridge_rx,
+            client_tx,
+            surf_id,
+            size,
+            pane_store: Arc::clone(&pane_store),
+            notif_backend: Arc::clone(&notif_backend),
+            hooks,
+            sinks,
+        },
+        BridgeChannels {
+            split_rx,
+            float_rx,
+            layout_rx,
+        },
+    );
 
     // ── Win32 ウィンドウ（spawn_blocking でメッセージループ実行）────────
     tokio::task::spawn_blocking(move || {
@@ -656,194 +164,3 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
 
     Ok(())
 }
-
-/// 宣言的レイアウト設定を適用して初期ペインを構築する
-///
-/// `config.panes` を順番に処理し、各ペインを作成・分割する。
-/// 各ペインの `command` が設定されている場合はシェルへ入力として送信する。
-/// 戻り値は `(LayoutNode, Vec<(PaneId, TerminalSink)>, active_pane)` のタプル。
-async fn apply_layout_config(
-    config: LayoutConfig,
-    first_pane: PaneId,
-    surf_id: yatamux_protocol::types::SurfaceId,
-    size: TermSize,
-    client_tx: &mpsc::Sender<ClientMessage>,
-    server_rx: &mut mpsc::Receiver<ServerMessage>,
-) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>, PaneId)> {
-    let mut layout = LayoutNode::Leaf(first_pane);
-    let mut sinks: Vec<(PaneId, TerminalSink)> =
-        vec![(first_pane, TerminalSink::new(size.cols, size.rows))];
-    let mut active = first_pane;
-
-    // 最初のペインの command を送信
-    if let Some(pane_cfg) = config.panes.first() {
-        if let Some(cmd) = &pane_cfg.command {
-            let mut input = cmd.as_bytes().to_vec();
-            input.push(b'\r');
-            let _ = client_tx
-                .send(ClientMessage::Input {
-                    pane: first_pane,
-                    data: input,
-                })
-                .await;
-        }
-    }
-
-    // 2つ目以降のペインを順番に作成
-    for pane_cfg in config.panes.iter().skip(1) {
-        let direction = match pane_cfg.split {
-            Some(SplitDir::Horizontal) => SplitDirection::Horizontal,
-            Some(SplitDir::Vertical) | None => SplitDirection::Vertical,
-        };
-        client_tx
-            .send(ClientMessage::CreatePane {
-                surface: surf_id,
-                split_from: Some(active),
-                direction: Some(direction),
-                size,
-                working_dir: None,
-            })
-            .await?;
-        let new_id = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
-        sinks.push((new_id, TerminalSink::new(size.cols, size.rows)));
-        layout.split_leaf_with_ratio(active, new_id, direction, pane_cfg.ratio);
-        active = new_id;
-
-        if let Some(cmd) = &pane_cfg.command {
-            let mut input = cmd.as_bytes().to_vec();
-            input.push(b'\r');
-            let _ = client_tx
-                .send(ClientMessage::Input {
-                    pane: new_id,
-                    data: input,
-                })
-                .await;
-        }
-    }
-
-    Ok((layout, sinks, active))
-}
-
-/// 保存済みレイアウトを再帰的に再構築する
-///
-/// `def` のツリー構造に従い `CreatePane` を発行し、
-/// 新しい `LayoutNode` と各ペインの `TerminalSink` を返す。
-/// `old_to_new` に旧ペイン ID → 新ペイン ID のマッピングを蓄積する。
-async fn restore_node(
-    def: &LayoutNodeDef,
-    current_pane: PaneId,
-    surf_id: yatamux_protocol::types::SurfaceId,
-    size: TermSize,
-    client_tx: &mpsc::Sender<ClientMessage>,
-    server_rx: &mut mpsc::Receiver<ServerMessage>,
-    old_to_new: &mut HashMap<PaneId, PaneId>,
-) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>)> {
-    match def {
-        LayoutNodeDef::Leaf { id: old_id } => {
-            old_to_new.insert(*old_id, current_pane);
-            let sink = TerminalSink::new(size.cols, size.rows);
-            Ok((LayoutNode::Leaf(current_pane), vec![(current_pane, sink)]))
-        }
-        LayoutNodeDef::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } => {
-            client_tx
-                .send(ClientMessage::CreatePane {
-                    surface: surf_id,
-                    split_from: Some(current_pane),
-                    direction: Some(*direction),
-                    size,
-                    working_dir: None,
-                })
-                .await?;
-            let new_pane = wait_for!(server_rx, ServerMessage::PaneCreated { id, .. } => id)?;
-
-            let (first_layout, mut all_sinks) = Box::pin(restore_node(
-                first,
-                current_pane,
-                surf_id,
-                size,
-                client_tx,
-                server_rx,
-                old_to_new,
-            ))
-            .await?;
-            let (second_layout, second_sinks) = Box::pin(restore_node(
-                second, new_pane, surf_id, size, client_tx, server_rx, old_to_new,
-            ))
-            .await?;
-            all_sinks.extend(second_sinks);
-
-            Ok((
-                LayoutNode::Split {
-                    direction: *direction,
-                    ratio: *ratio,
-                    first: Box::new(first_layout),
-                    second: Box::new(second_layout),
-                },
-                all_sinks,
-            ))
-        }
-    }
-}
-
-/// レイアウト切り替えのフェーズ
-enum LayoutPhase {
-    /// 既存ペインが全て閉じるまで待機
-    Closing { name: String, remaining: usize },
-    /// 最初の新規ペインの PaneCreated を待機
-    WaitingFirst { config: LayoutConfig },
-    /// 残りペインを順次作成中
-    Applying {
-        /// 未送信の (dir, cmd) キュー（front が直近に送った CreatePane の設定）
-        queue: std::collections::VecDeque<(SplitDirection, f32, Option<String>)>,
-        layout: LayoutNode,
-        grids: Vec<(PaneId, Arc<Mutex<yatamux_terminal::Grid>>)>,
-        /// 直前に作成されたペイン ID（次の split_from に使う）
-        prev: PaneId,
-        // active は finalize 時に最後の new_id を直接使うため省略可だが型合わせで保持
-        #[allow(dead_code)]
-        active: PaneId,
-    },
-}
-
-/// レイアウト切り替え完了時に PaneStore を更新する
-fn finalize_layout_switch(
-    pane_store: &Arc<Mutex<PaneStore>>,
-    layout: LayoutNode,
-    grids: Vec<(PaneId, Arc<Mutex<yatamux_terminal::Grid>>)>,
-    active: PaneId,
-) {
-    let mut store = pane_store.lock().unwrap();
-    store.grids.clear();
-    for (id, grid) in grids {
-        store.grids.insert(id, grid);
-    }
-    store.layout = layout;
-    store.active = active;
-    store.floating = None;
-    store.floating_visible = false;
-    store.scroll_offset = 0;
-    store.launcher = None;
-    store.should_quit = false;
-}
-
-/// サーバーからの特定メッセージを待つマクロ
-macro_rules! wait_for {
-    ($rx:expr, $pat:pat => $val:expr) => {{
-        loop {
-            match $rx.recv().await {
-                Some($pat) => break Ok($val),
-                Some(ServerMessage::Error { message }) => {
-                    break Err(anyhow::anyhow!("Server error: {}", message))
-                }
-                Some(_) => continue,
-                None => break Err(anyhow::anyhow!("Server channel closed unexpectedly")),
-            }
-        }
-    }};
-}
-use wait_for;
