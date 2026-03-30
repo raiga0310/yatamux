@@ -13,6 +13,41 @@ use yatamux_protocol::{ClientMessage, ServerMessage};
 /// 名前付きパイプのベース名
 pub const PIPE_PREFIX: &str = r"\\.\pipe\yatamux-";
 
+#[cfg(windows)]
+fn create_named_pipe_server(
+    pipe_name: &str,
+    first_pipe_instance: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use windows::Win32::Security::{
+        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
+        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+    };
+
+    let mut security_descriptor = SECURITY_DESCRIPTOR::default();
+    let descriptor_ptr = PSECURITY_DESCRIPTOR(&mut security_descriptor as *mut _ as *mut _);
+    unsafe {
+        InitializeSecurityDescriptor(descriptor_ptr, 1)
+            .context("Failed to initialize named pipe security descriptor")?;
+        // Allow local clients to open the pipe for duplex I/O. Remote clients are
+        // still rejected by the default ServerOptions policy.
+        SetSecurityDescriptorDacl(descriptor_ptr, true, None, false)
+            .context("Failed to configure named pipe security descriptor")?;
+    }
+
+    let mut attrs = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: &mut security_descriptor as *mut _ as *mut _,
+        bInheritHandle: false.into(),
+    };
+
+    let mut options = ServerOptions::new();
+    options.first_pipe_instance(first_pipe_instance);
+
+    unsafe { options.create_with_security_attributes_raw(pipe_name, &mut attrs as *mut _ as _) }
+        .with_context(|| format!("Failed to create named pipe: {}", pipe_name))
+}
+
 /// IPC サーバーを起動し、クライアント接続を受け付ける
 ///
 /// - `server_tx`: クライアントからのメッセージを Server へ転送
@@ -27,8 +62,6 @@ pub async fn run_ipc_server(
 
     #[cfg(windows)]
     {
-        use tokio::net::windows::named_pipe::ServerOptions;
-
         // サーバー出力を全クライアントにブロードキャストするチャネル
         let (bcast_tx, _) = broadcast::channel::<ServerMessage>(256);
         let bcast_fwd = bcast_tx.clone();
@@ -42,9 +75,7 @@ pub async fn run_ipc_server(
         });
 
         // 最初のパイプインスタンス（排他作成）
-        let mut server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe_name)
+        let mut server = create_named_pipe_server(&pipe_name, true)
             .context("Failed to create named pipe (first instance)")?;
 
         loop {
@@ -56,9 +87,7 @@ pub async fn run_ipc_server(
             info!("Client connected");
 
             // 次の接続用インスタンスを先に準備
-            let next = ServerOptions::new()
-                .first_pipe_instance(false)
-                .create(&pipe_name)
+            let next = create_named_pipe_server(&pipe_name, false)
                 .context("Failed to create named pipe (next instance)")?;
 
             let connected = server;

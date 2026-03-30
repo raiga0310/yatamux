@@ -54,6 +54,7 @@ pub mod ime;
 pub mod layout;
 pub mod notification;
 pub mod session;
+pub mod theme;
 pub mod window;
 
 pub use ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr, PreeditSegment};
@@ -63,4 +64,5 @@ pub use layout::{
 };
 pub use notification::{FocusAwareBackend, NotificationBackend};
 pub use session::{LayoutNodeDef, LayoutSnapshot};
-pub use window::{run_window, Theme};
+pub use theme::Theme;
+pub use window::run_window;

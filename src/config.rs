@@ -85,6 +85,17 @@ pub struct HooksConfig {
     pub on_pane_closed: Option<String>,
 }
 
+impl HooksConfig {
+    /// フックコマンドが有効かどうかを判定する。
+    ///
+    /// `None`、空文字列、空白のみの文字列は無効扱いにする。
+    pub fn is_enabled(command: &Option<String>) -> bool {
+        command
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+}
+
 impl AppConfig {
     /// TOML ファイルから設定を読み込む
     ///
