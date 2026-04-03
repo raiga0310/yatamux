@@ -206,6 +206,8 @@ unsafe fn handle_wm_size(state_ptr: *mut ClientState, lparam: LPARAM) -> LRESULT
                 h: content_h,
             });
             state.resize_all_panes(content_w, content_h);
+        // バックバッファを無効化（次の WM_PAINT で再作成される）
+        state.content_bb.set(None);
         }
     }
     LRESULT(0)
@@ -275,6 +277,18 @@ pub(super) unsafe fn handle_wm_timer(
         if quit {
             let _ = DestroyWindow(hwnd);
             return LRESULT(0);
+        }
+
+        // カーソル行を常に dirty に（永続バックバッファ上のカーソル描画を毎フレーム更新）
+        {
+            let store = state.panes.lock().unwrap();
+            if let Some(g) = store.grids.get(&store.active) {
+                let mut grid = g.lock().unwrap();
+                if grid.cursor_visible() {
+                    let row = grid.cursor().row as usize;
+                    grid.mark_dirty(row);
+                }
+            }
         }
 
         let needs_repaint = {
@@ -487,6 +501,14 @@ unsafe fn handle_wm_close(state_ptr: *mut ClientState, hwnd: HWND) -> LRESULT {
 unsafe fn handle_wm_destroy(hwnd: HWND) -> LRESULT {
     let _ = KillTimer(Some(hwnd), TIMER_REPAINT);
     remove_tray_icon(hwnd);
+    // 永続バックバッファを解放
+    // SAFETY: GWLP_USERDATA への生ポインタ逆参照は wndproc.rs 全体で使う既存パターンと同じ。
+    // WM_CREATE で SetWindowLongPtrW が完了した後にのみ WM_DESTROY が来るため
+    // ポインタは有効。null チェックで未初期化ケースも除外する。
+    let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ClientState;
+    if !state_ptr.is_null() {
+        (*state_ptr).release_backbuffer();
+    }
     PostQuitMessage(0);
     LRESULT(0)
 }

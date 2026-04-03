@@ -145,6 +145,11 @@ impl Grid {
         self.dirty.iter().any(|&dirty| dirty)
     }
 
+    /// 全行をダーティに設定する（バックバッファ再作成時など）
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty.iter_mut().for_each(|d| *d = true);
+    }
+
     /// ダーティ行のインデックスを返しリセット
     pub fn take_dirty_rows(&mut self) -> Vec<u16> {
         self.dirty
