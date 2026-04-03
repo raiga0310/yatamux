@@ -6,16 +6,18 @@
 ## 参照先
 
 - 進行中の機能・バグ・ドキュメントタスク: `docs/tasks/active.md`
-- 実装挙動を変えない構造改善・モジュール分割タスク: `docs/tasks/refactor.md`
-- 分割前の旧 `task.md` スナップショット: `docs/tasks/archive-2026-03-30.md`
+- 完了済みリファクタリング履歴: `docs/tasks/refactor.md`（A-2〜A-8 すべて完了済み）
+- タスク履歴アーカイブ: `docs/tasks/archive-2026-03-30.md`, `docs/tasks/archive-2026-04-04.md`
 
 ## 直近の優先候補
 
-- `B-6`: 最後の 1 ペインを `Ctrl+Shift+W` で閉じたときの終了フロー整理
 - `C-30`: 高水準 `exec` API
 - `C-31`: ペイン状態メタデータ取得強化
-- `C-35`: `capture-pane --json` の詰め
-- `A-2` 以降: clone 整理と大きいファイルのモジュール分割
+- `C-32`: 出力購読 API
+- `C-33`: 明示的な割り込み・キャンセル API
+- `C-35`: `capture-pane --json` の詰め（残サブタスク 3 件）
+- `C-36`: 待機条件 API の一般化
+- `D-1`: `docs/test-plan-*` と実装済み自動テストの同期
 
 ## 運用ルール
 

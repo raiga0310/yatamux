@@ -114,6 +114,21 @@ mod win32 {
     /// ステータスバーの高さは `cell_height` × 1 行分
     const STATUS_BAR_ROWS: i32 = 1;
 
+    // ── バックバッファ ───────────────────────────────────────────────────────
+
+    /// 永続バックバッファのハンドル群。
+    ///
+    /// WM_SIZE でサイズが変わったときのみ再作成し、毎フレームの
+    /// `CreateCompatibleBitmap` / `DeleteObject` を省く。
+    /// Win32 メッセージスレッド専用なので `Cell<Option<...>>` で保持する。
+    #[derive(Copy, Clone)]
+    struct BackbufferHandle {
+        dc: HDC,
+        bmp: HBITMAP,
+        w: i32,
+        h: i32,
+    }
+
     // ── クライアント状態 ─────────────────────────────────────────────────────
 
     /// ウィンドウが保持するクライアント状態
@@ -153,6 +168,12 @@ mod win32 {
         pub layout_tx: mpsc::Sender<String>,
         /// 解決済みテーマ色（Cell で内部可変 — ランタイムテーマ切り替えに使用）
         theme: std::cell::Cell<WinTheme>,
+        /// 永続バックバッファ（WM_SIZE でのみ再作成）
+        content_bb: std::cell::Cell<Option<BackbufferHandle>>,
+        /// 前フレームのスクロールオフセット（変化検出用）
+        prev_scroll_offset: std::cell::Cell<usize>,
+        /// 前フレームのオーバーレイ状態キー（変化でグリッド全 dirty 化）
+        prev_overlay_key: std::cell::Cell<u32>,
     }
 
     impl ClientState {
@@ -194,6 +215,26 @@ mod win32 {
                 float_tx,
                 layout_tx,
                 theme: std::cell::Cell::new(theme),
+                content_bb: std::cell::Cell::new(None),
+                prev_scroll_offset: std::cell::Cell::new(0),
+                prev_overlay_key: std::cell::Cell::new(0),
+            }
+        }
+
+        /// バックバッファを解放する（WM_DESTROY 時に呼ぶ）
+        ///
+        /// # Safety
+        ///
+        /// `DeleteDC` / `DeleteObject` が Win32 unsafe API のため unsafe。
+        /// 呼び出し元は以下を保証すること:
+        /// - **Win32 メッセージスレッドから呼ぶ**: GDI オブジェクトは作成したスレッドで
+        ///   解放するのが原則。`WM_DESTROY` ハンドラからのみ呼ばれるため満たされる。
+        /// - **二重解放しない**: `content_bb.take()` で `None` にセットするため
+        ///   複数回呼んでも安全だが、意図的な二重呼び出しは避けること。
+        pub(super) unsafe fn release_backbuffer(&self) {
+            if let Some(bb) = self.content_bb.take() {
+                let _ = DeleteDC(bb.dc);
+                let _ = DeleteObject(bb.bmp.into());
             }
         }
 
@@ -339,30 +380,182 @@ mod win32 {
 
     // ── WndProc ──────────────────────────────────────────────────────────────
 
+    // ── 行ラン描画バッファ ────────────────────────────────────────────────────
+    // 同一 (fg, bg) の連続セルを 1 回の ExtTextOutW に畳み込み GDI 呼び出し数を削減する。
+    // ASCII 密集出力では ExtTextOutW を約 50% 削減できる。
+    //
+    // # ラン終了条件
+    // - 前景色または背景色が変わった
+    // - ボックス文字（U+2500–259F）が現れた
+    // - UTF-16 コードユニット数が 2 以上のグラフェム（サロゲートペア等）が現れた
+    // - 選択状態セル（is_sel）が現れた
+    // - 行末に達した
+    struct RowRunBuf {
+        bg: COLORREF,
+        fg: COLORREF,
+        /// 背景塗りスパンの左端 x
+        bg_x0: i32,
+        /// 背景塗りスパンの右端 x（セルを追加するたびに伸長）
+        bg_x1: i32,
+        /// バッファ中の各グラフェムの x 座標（`text_buf` と 1:1 対応）
+        grapheme_xs: Vec<i32>,
+        /// UTF-16 コードユニット列（1 コードユニット / グラフェムのみ格納）
+        text_buf: Vec<u16>,
+        y: i32,
+        cell_h: i32,
+        active: bool,
+    }
+
+    impl RowRunBuf {
+        fn new(y: i32, cell_h: i32) -> Self {
+            Self {
+                bg: COLORREF(0),
+                fg: COLORREF(0),
+                bg_x0: 0,
+                bg_x1: 0,
+                grapheme_xs: Vec::with_capacity(256),
+                text_buf: Vec::with_capacity(256),
+                y,
+                cell_h,
+                active: false,
+            }
+        }
+
+        /// ランが有効で bg が一致するか（ブランクセル用）
+        #[inline]
+        fn same_bg(&self, bg: COLORREF) -> bool {
+            self.active && self.bg == bg
+        }
+
+        /// ランが有効で (fg, bg) が一致するか（グラフェムセル用）
+        #[inline]
+        fn same_colors(&self, fg: COLORREF, bg: COLORREF) -> bool {
+            self.active && self.fg == fg && self.bg == bg
+        }
+
+        fn start_blank(&mut self, bg: COLORREF, x: i32) {
+            self.active = true;
+            self.bg = bg;
+            self.fg = COLORREF(0);
+            self.bg_x0 = x;
+            self.bg_x1 = x;
+        }
+
+        fn start_grapheme(&mut self, fg: COLORREF, bg: COLORREF, x: i32) {
+            self.active = true;
+            self.fg = fg;
+            self.bg = bg;
+            self.bg_x0 = x;
+            self.bg_x1 = x;
+        }
+
+        /// ランをフラッシュ（背景 + テキストを最大 2 回の ExtTextOutW で描画してリセット）
+        ///
+        /// # Safety
+        /// `dc` は有効な `HDC` であること（Win32 メッセージスレッドから呼ぶこと）
+        unsafe fn flush(&mut self, dc: HDC) {
+            if !self.active {
+                return;
+            }
+
+            // 1. 背景塗り（スパン全体を 1 回でカバー）
+            SetBkColor(dc, self.bg);
+            let span_rect = RECT {
+                left: self.bg_x0,
+                top: self.y,
+                right: self.bg_x1,
+                bottom: self.y + self.cell_h,
+            };
+            let _ = ExtTextOutW(
+                dc,
+                self.bg_x0,
+                self.y,
+                ETO_OPAQUE,
+                Some(&span_rect),
+                PCWSTR::null(),
+                0,
+                None,
+            );
+
+            // 2. テキスト描画（dx 配列で文字間隔を指定、1 回の ExtTextOutW）
+            if !self.text_buf.is_empty() {
+                let n = self.text_buf.len();
+                let mut dx: Vec<i32> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let next_x = if i + 1 < n {
+                        self.grapheme_xs[i + 1]
+                    } else {
+                        self.bg_x1
+                    };
+                    dx.push(next_x - self.grapheme_xs[i]);
+                }
+                SetTextColor(dc, self.fg);
+                SetBkColor(dc, self.bg);
+                let _ = ExtTextOutW(
+                    dc,
+                    self.grapheme_xs[0],
+                    self.y,
+                    ETO_CLIPPED,
+                    Some(&span_rect),
+                    PCWSTR(self.text_buf.as_ptr()),
+                    n as u32,
+                    Some(dx.as_ptr()),
+                );
+            }
+
+            // リセット
+            self.active = false;
+            self.grapheme_xs.clear();
+            self.text_buf.clear();
+        }
+    }
+
     // ── GDI 描画 ─────────────────────────────────────────────────────────────
 
     unsafe fn paint(hwnd: HWND, state: &ClientState) {
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
 
-        // バックバッファ（ちらつき防止）
+        // ── 永続バックバッファ（サイズ変更時のみ再作成）───────────────────
         let mut rect = RECT::default();
         GetClientRect(hwnd, &mut rect).ok();
-        let mem_dc = CreateCompatibleDC(Some(hdc));
-        let mem_bmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
-        let old_bmp = SelectObject(mem_dc, mem_bmp.into());
+        let win_w = rect.right;
+        let win_h = rect.bottom;
 
         // 現在のテーマ色を取得（paint 関数内で共通使用）
         let theme = state.theme.get();
 
-        // 背景塗りつぶし
-        let bg_brush = CreateSolidBrush(theme.bg);
-        FillRect(mem_dc, &rect, bg_brush);
-        let _ = DeleteObject(bg_brush.into());
-
-        // フォント設定
-        let old_font = SelectObject(mem_dc, state.hfont.into());
-        SetBkMode(mem_dc, OPAQUE);
+        let bb = match state.content_bb.get() {
+            Some(bb) if bb.w == win_w && bb.h == win_h => bb,
+            old => {
+                // 古いバックバッファを解放
+                if let Some(old_bb) = old {
+                    let _ = DeleteDC(old_bb.dc);
+                    let _ = DeleteObject(old_bb.bmp.into());
+                }
+                // 新しいバックバッファを作成
+                let dc = CreateCompatibleDC(Some(hdc));
+                let bmp = CreateCompatibleBitmap(hdc, win_w, win_h);
+                SelectObject(dc, bmp.into());
+                SelectObject(dc, state.hfont.into());
+                SetBkMode(dc, OPAQUE);
+                // 全面を背景色で初期化
+                let bg_brush = CreateSolidBrush(theme.bg);
+                FillRect(dc, &rect, bg_brush);
+                let _ = DeleteObject(bg_brush.into());
+                let new_bb = BackbufferHandle { dc, bmp, w: win_w, h: win_h };
+                state.content_bb.set(Some(new_bb));
+                // 全グリッドを dirty に（次のループで全行描画される）
+                {
+                    let store = state.panes.lock().unwrap();
+                    for g in store.grids.values() {
+                        g.lock().unwrap().mark_all_dirty();
+                    }
+                }
+                new_bb
+            }
+        };
+        let mem_dc = bb.dc;
 
         // ── コンテンツ領域とレイアウト ─────────────────────────────────
         let content_w = (rect.right - PADDING_X * 2).max(1);
@@ -385,6 +578,10 @@ mod win32 {
             grid_map,
             copy_mode_state,
             normal_selection,
+            has_launcher,
+            has_theme_launcher,
+            has_save_prompt,
+            floating_visible,
         ) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
@@ -396,16 +593,55 @@ mod win32 {
                 .collect();
             let cm = store.copy_mode.clone();
             let ns = store.normal_selection;
-            (store.active, store.scroll_offset, rects, seps, map, cm, ns)
+            let hl = store.launcher.is_some();
+            let htl = store.theme_launcher.is_some();
+            let hsp = store.save_prompt.is_some();
+            let fv = store.floating_visible;
+            (store.active, store.scroll_offset, rects, seps, map, cm, ns, hl, htl, hsp, fv)
         };
 
-        // ── 各ペインを描画 ──────────────────────────────────────────────
+        // ── オーバーレイ・スクロール変化の検出 → dirty 化 ──────────────────
+        // オーバーレイが表示/非表示に切り替わったとき、背後のセル内容をバックバッファに
+        // 復元するため全グリッドを dirty にする。
+        let overlay_key: u32 = (has_launcher as u32)
+            | ((has_theme_launcher as u32) << 1)
+            | ((has_save_prompt as u32) << 2)
+            | ((floating_visible as u32) << 3)
+            | ((copy_mode_state.is_some() as u32) << 4)
+            | ((normal_selection.is_some() as u32) << 5);
+
+        if overlay_key != state.prev_overlay_key.get() {
+            for g in grid_map.values() {
+                g.lock().unwrap().mark_all_dirty();
+            }
+        }
+        state.prev_overlay_key.set(overlay_key);
+
+        // スクロールオフセットが変化したらアクティブペインを全行 dirty に
+        if scroll_offset != state.prev_scroll_offset.get() {
+            if let Some(g) = grid_map.get(&active_pane) {
+                g.lock().unwrap().mark_all_dirty();
+            }
+        }
+        state.prev_scroll_offset.set(scroll_offset);
+
+        // ── 各ペインを描画（dirty 行のみ）────────────────────────────────
         let ime_state = state.ime.state.lock().unwrap();
 
         for (pane_id, pane_rect) in &pane_rects {
             let is_active = *pane_id == active_pane;
             if let Some(grid_arc) = grid_map.get(pane_id) {
-                let grid = grid_arc.lock().unwrap();
+                let mut grid = grid_arc.lock().unwrap();
+
+                // dirty 行のみ再描画。空なら非アクティブペインはスキップ。
+                // アクティブペインは WM_TIMER でカーソル行が常に dirty なので
+                // ここには必ず入る。
+                let dirty_rows: std::collections::HashSet<u16> =
+                    grid.take_dirty_rows().into_iter().collect();
+                if dirty_rows.is_empty() {
+                    continue;
+                }
+
                 let off_x = PADDING_X + pane_rect.x;
                 let off_y = PADDING_Y + pane_rect.y;
                 // ペインの表示幅をセル数に変換（グリッドが表示幅より広い場合に
@@ -419,6 +655,9 @@ mod win32 {
                 let view_start = sb_len.saturating_sub(effective_offset);
 
                 for row in 0..grid.rows() {
+                    if !dirty_rows.contains(&row) {
+                        continue;
+                    }
                     let combined_idx = view_start + row as usize;
                     let cells: &[Cell] = if combined_idx < sb_len {
                         match grid.scrollback_row(combined_idx) {
@@ -435,14 +674,8 @@ mod win32 {
                     let y = row as i32 * state.cell_height + off_y;
                     let mut x = off_x;
 
+                    let mut run = RowRunBuf::new(y, state.cell_height);
                     for (col_idx, cell) in cells.iter().take(display_cols).enumerate() {
-                        let cell_rect = RECT {
-                            left: x,
-                            top: y,
-                            right: x + state.cell_width,
-                            bottom: y + state.cell_height,
-                        };
-
                         // コピーモードまたは Normal モードマウス選択中セルかどうか判定
                         let is_copy_sel = is_active
                             && copy_mode_state.as_ref().is_some_and(|cm| {
@@ -466,24 +699,27 @@ mod win32 {
                                 };
                                 let width_px = state.cell_width * (*width as i32);
                                 let wide_rect = RECT {
+                                    left: x,
+                                    top: y,
                                     right: x + width_px,
-                                    ..cell_rect
+                                    bottom: y + state.cell_height,
                                 };
 
-                                SetBkColor(mem_dc, bg);
-                                let _ = ExtTextOutW(
-                                    mem_dc,
-                                    x,
-                                    y,
-                                    ETO_OPAQUE,
-                                    Some(&wide_rect),
-                                    PCWSTR::null(),
-                                    0,
-                                    None,
-                                );
-
                                 let first_cp = text.chars().next().map(|c| c as u32).unwrap_or(0);
-                                let handled = if (0x2500..=0x259F).contains(&first_cp) {
+                                if (0x2500..=0x259F).contains(&first_cp) {
+                                    // ボックス文字: ランをフラッシュして個別描画
+                                    run.flush(mem_dc);
+                                    SetBkColor(mem_dc, bg);
+                                    let _ = ExtTextOutW(
+                                        mem_dc,
+                                        x,
+                                        y,
+                                        ETO_OPAQUE,
+                                        Some(&wide_rect),
+                                        PCWSTR::null(),
+                                        0,
+                                        None,
+                                    );
                                     draw_box_char(
                                         mem_dc,
                                         x,
@@ -492,28 +728,51 @@ mod win32 {
                                         state.cell_height,
                                         first_cp,
                                         fg,
-                                    )
+                                    );
                                 } else {
-                                    false
-                                };
-
-                                if !handled {
-                                    SetTextColor(mem_dc, fg);
-                                    SetBkColor(mem_dc, bg);
                                     // GDI は ZWJ シーケンスをシェーピングできないため、
                                     // ZWJ 以降は描画せず基底グリフのみ表示する
                                     let render_str = zwj_render_text(text);
                                     let utf16: Vec<u16> = render_str.encode_utf16().collect();
-                                    let _ = ExtTextOutW(
-                                        mem_dc,
-                                        x,
-                                        y,
-                                        ETO_CLIPPED,
-                                        Some(&wide_rect),
-                                        PCWSTR(utf16.as_ptr()),
-                                        utf16.len() as u32,
-                                        None,
-                                    );
+
+                                    if utf16.len() == 1 && !is_sel {
+                                        // バッチ対象: 同一 (fg, bg) のランに追加
+                                        if !run.same_colors(fg, bg) {
+                                            run.flush(mem_dc);
+                                        }
+                                        if !run.active {
+                                            run.start_grapheme(fg, bg, x);
+                                        }
+                                        run.bg_x1 = x + width_px;
+                                        run.grapheme_xs.push(x);
+                                        run.text_buf.push(utf16[0]);
+                                    } else {
+                                        // 選択セル・マルチコードユニット: 個別描画
+                                        run.flush(mem_dc);
+                                        SetBkColor(mem_dc, bg);
+                                        let _ = ExtTextOutW(
+                                            mem_dc,
+                                            x,
+                                            y,
+                                            ETO_OPAQUE,
+                                            Some(&wide_rect),
+                                            PCWSTR::null(),
+                                            0,
+                                            None,
+                                        );
+                                        SetTextColor(mem_dc, fg);
+                                        SetBkColor(mem_dc, bg);
+                                        let _ = ExtTextOutW(
+                                            mem_dc,
+                                            x,
+                                            y,
+                                            ETO_CLIPPED,
+                                            Some(&wide_rect),
+                                            PCWSTR(utf16.as_ptr()),
+                                            utf16.len() as u32,
+                                            None,
+                                        );
+                                    }
                                 }
                                 x += state.cell_width;
                             }
@@ -523,21 +782,18 @@ mod win32 {
                             CellContent::Blank => {
                                 // 選択中はセル背景を選択色で塗りつぶす
                                 let blank_bg = if is_sel { theme.selection_bg } else { theme.bg };
-                                SetBkColor(mem_dc, blank_bg);
-                                let _ = ExtTextOutW(
-                                    mem_dc,
-                                    x,
-                                    y,
-                                    ETO_OPAQUE,
-                                    Some(&cell_rect),
-                                    PCWSTR::null(),
-                                    0,
-                                    None,
-                                );
+                                if !run.same_bg(blank_bg) {
+                                    run.flush(mem_dc);
+                                }
+                                if !run.active {
+                                    run.start_blank(blank_bg, x);
+                                }
+                                run.bg_x1 = x + state.cell_width;
                                 x += state.cell_width;
                             }
                         }
                     }
+                    run.flush(mem_dc);
                 }
 
                 // プリエディット（アクティブペインのみ）
@@ -766,25 +1022,20 @@ mod win32 {
         // ── レイアウト保存プロンプト ─────────────────────────────────
         paint_save_prompt(mem_dc, rect.right, rect.bottom, state);
 
-        // バックバッファを画面にコピー
+        // 永続バックバッファを画面にコピー
+        // （DC・ビットマップは persistent なので解放しない）
         BitBlt(
             hdc,
             0,
             0,
-            rect.right,
-            rect.bottom,
+            win_w,
+            win_h,
             Some(mem_dc),
             0,
             0,
             SRCCOPY,
         )
         .ok();
-
-        // リソース解放
-        SelectObject(mem_dc, old_font);
-        SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(mem_bmp.into());
-        let _ = DeleteDC(mem_dc);
 
         let _ = EndPaint(hwnd, &ps);
     }

@@ -13,4 +13,5 @@
 //! > (`window.rs`) が担っており、このクレートは現時点ではデバッグ出力専用。
 //! > Phase 2 で GPU レンダリングパスに昇格予定。
 
+pub mod draw_ops;
 pub mod text;

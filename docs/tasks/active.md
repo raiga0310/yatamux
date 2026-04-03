@@ -1,7 +1,7 @@
 # yatamux アクティブタスク
 
 未完了の機能・バグ・ドキュメントタスクをここで管理する。
-完了済みの履歴は `docs/tasks/archive-2026-03-30.md` を参照。
+完了済みの履歴は `docs/tasks/archive-2026-03-30.md`, `docs/tasks/archive-2026-04-04.md` を参照。
 
 ## バグ / 挙動
 
@@ -26,42 +26,8 @@
 - プロセス終了自動通知（F-4a）の実装により、OSC 133;D を設定しなくても
   プロセス終了時には通知が出るようになった
 
-### B-6: Pane が 1 枚のみの時に C-S-W を押してもアプリが終了しない 【優先度: 高】
-
-`Ctrl+Shift+W` でアクティブペインを閉じるとき、`close_active_pane()` が
-`LayoutNode::Leaf` を検出して早期リターンし、何もしない。
-C-9 では「最後の 1 ペインが閉じられたらアプリ終了」を定義しているが、
-`Ctrl+Shift+W` 経路はその終了フローに到達しない。
-
-- **根本原因**: `close_active_pane()` の `Leaf` ガードが ClosePane メッセージを抑止している。
-  `app.rs` の `PaneClosed` ハンドラは `grids.is_empty()` で `should_quit = true` にする実装があるが、
-  そもそもメッセージが届かないため発動しない。
-- **修正方針**: `close_active_pane()` のガードを削除し、最後の 1 ペインでも `ClosePane` を送信する。
-  `app.rs` の既存フローが `should_quit = true` → `WM_TIMER` → `DestroyWindow` で終了させる。
-
-#### サブタスク
-
-- [x] `window.rs`: `close_active_pane()` の Leaf ガードを削除
-- [x] `cargo test && cargo clippy -- -D warnings && cargo fmt --check`
-
 ## 機能
 
-### C-19: 現在のペイン構成を名前付きレイアウトファイルとして保存 【優先度: 中】
-
-C-4（セッション永続化）は起動時復元用の `session.toml` への自動保存であり、後から名前を付けて再利用する仕組みがない。
-C-5（宣言的レイアウト）は手書きの TOML 定義を読み込むが、現在の状態をファイルに書き出す機能がない。
-これらを組み合わせ、「今の画面構成を名前付きレイアウトファイルに書き出す」コマンドを追加する。
-
-- **概要**: Pane モードのキーバインド（`S`）で、現在の `PaneStore` のレイアウトツリーを `%APPDATA%\\yatamux\\layouts\\<NAME>.toml` に書き出す。保存後はランチャー（C-11）から選択して再適用可能。
-- **保存対象**: 各ペインの `command`、`working_dir`、分割方向、比率（ratio）。グリッドの内容（テキスト）は含まない。
-- **フォーマット**: C-5 の `[[panes]]` TOML 形式と互換を保つ（読み書き両対応）。
-
-#### サブタスク
-
-- [x] `docs/test-plan-save-layout.md` にテストケースを列挙
-- [x] `layout.rs`: `layout_to_toml(node)` + `save_layout_file(name, content)` で現在のレイアウトツリーを `[[panes]]` TOML に変換して書き出し
-- [x] `window.rs`: Pane モード中 `S` キーで名前入力プロンプトを表示 → Enter で保存、トースト通知
-- [x] `cargo test && cargo clippy -- -D warnings && cargo fmt --check`
 
 ### C-15: AIオーケストレーション向け Claude Code 統合スキル提供 【優先度: 中】
 
