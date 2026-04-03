@@ -37,9 +37,9 @@
 
 #### サブタスク
 
-- [ ] リポジトリ内に `integrations/claude-code/` などを設け、Yatamux操作用のプロンプトやコマンドのラッパースクリプトを作成
-- [ ] AIに対して「別タスクは `yatamux split-pane` で隔離し、`yatamux send-keys` で指示を送り、`yatamux capture-pane` で回収せよ」と教えるシステムプロンプトの設計
-- [ ] READMEに「AIサブエージェントの可視化と管理」に関するユースケース・チュートリアルを追記
+- [x] リポジトリ内に `integrations/claude-code/` などを設け、Yatamux操作用のプロンプトやコマンドのラッパースクリプトを作成
+- [x] AIに対して「別タスクは `yatamux split-pane` で隔離し、`yatamux send-keys` で指示を送り、`yatamux capture-pane` で回収せよ」と教えるシステムプロンプトの設計
+- [x] READMEに「AIサブエージェントの可視化と管理」に関するユースケース・チュートリアルを追記
 
 ### C-16: リモート監視用 WebSocket ブリッジ（スマホからの進捗モニタリング） 【優先度: 低】
 
