@@ -302,6 +302,57 @@ pub(super) unsafe fn handle_wm_timer(
             }
         }
 
+        // CPU 使用率（GetSystemTimes デルタ）
+        {
+            let mut idle = windows::Win32::Foundation::FILETIME::default();
+            let mut kernel = windows::Win32::Foundation::FILETIME::default();
+            let mut user = windows::Win32::Foundation::FILETIME::default();
+            if GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)).is_ok() {
+                let to_u64 = |ft: windows::Win32::Foundation::FILETIME| {
+                    ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
+                };
+                let idle_now = to_u64(idle);
+                let kernel_now = to_u64(kernel);
+                let user_now = to_u64(user);
+                let prev_idle = state.prev_idle_ticks.get();
+                let prev_kernel = state.prev_kernel_ticks.get();
+                let prev_user = state.prev_user_ticks.get();
+                if prev_kernel > 0 || prev_user > 0 {
+                    let d_idle = idle_now.saturating_sub(prev_idle);
+                    let d_kernel = kernel_now.saturating_sub(prev_kernel);
+                    let d_user = user_now.saturating_sub(prev_user);
+                    let total = d_kernel + d_user;
+                    if total > 0 {
+                        let busy = total.saturating_sub(d_idle);
+                        state.cpu_usage.set(busy as f32 / total as f32 * 100.0);
+                    }
+                }
+                state.prev_idle_ticks.set(idle_now);
+                state.prev_kernel_ticks.set(kernel_now);
+                state.prev_user_ticks.set(user_now);
+            }
+        }
+
+        // メモリ使用率（GlobalMemoryStatusEx）
+        {
+            let mut ms = MEMORYSTATUSEX {
+                dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
+            if GlobalMemoryStatusEx(&mut ms).is_ok() {
+                state.mem_usage.set(ms.dwMemoryLoad as f32);
+            }
+        }
+
+        // ニュースティッカー スクロール位置を進める
+        if state.news_scroll_px_per_tick > 0 {
+            let news_text = state.panes.lock().unwrap().news_text.clone();
+            if !news_text.is_empty() {
+                let cur = state.news_scroll_px.get();
+                state.news_scroll_px.set(cur + state.news_scroll_px_per_tick);
+            }
+        }
+
         let needs_repaint = {
             let store = state.panes.lock().unwrap();
             let dirty = store

@@ -38,6 +38,8 @@ mod win32 {
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows::Win32::System::Threading::GetSystemTimes;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -174,6 +176,18 @@ mod win32 {
         prev_scroll_offset: std::cell::Cell<usize>,
         /// 前フレームのオーバーレイ状態キー（変化でグリッド全 dirty 化）
         prev_overlay_key: std::cell::Cell<u32>,
+        /// ニュースティッカーのスクロール位置（px 単位、右→左方向）
+        news_scroll_px: std::cell::Cell<i32>,
+        /// ティッカー 1 ティックあたりスクロール量（px）
+        pub news_scroll_px_per_tick: i32,
+        /// CPU 使用率（0–100、GetSystemTimes デルタから算出）
+        cpu_usage: std::cell::Cell<f32>,
+        /// メモリ使用率（0–100、GlobalMemoryStatusEx から算出）
+        mem_usage: std::cell::Cell<f32>,
+        /// 前回 GetSystemTimes の idle/kernel/user（デルタ計算用）
+        prev_idle_ticks: std::cell::Cell<u64>,
+        prev_kernel_ticks: std::cell::Cell<u64>,
+        prev_user_ticks: std::cell::Cell<u64>,
     }
 
     impl ClientState {
@@ -190,6 +204,7 @@ mod win32 {
             float_tx: mpsc::Sender<()>,
             layout_tx: mpsc::Sender<String>,
             theme: WinTheme,
+            news_scroll_px_per_tick: i32,
         ) -> Self {
             Self {
                 panes,
@@ -218,6 +233,13 @@ mod win32 {
                 content_bb: std::cell::Cell::new(None),
                 prev_scroll_offset: std::cell::Cell::new(0),
                 prev_overlay_key: std::cell::Cell::new(0),
+                news_scroll_px: std::cell::Cell::new(0),
+                news_scroll_px_per_tick,
+                cpu_usage: std::cell::Cell::new(0.0),
+                mem_usage: std::cell::Cell::new(0.0),
+                prev_idle_ticks: std::cell::Cell::new(0),
+                prev_kernel_ticks: std::cell::Cell::new(0),
+                prev_user_ticks: std::cell::Cell::new(0),
             }
         }
 
@@ -1072,8 +1094,8 @@ mod win32 {
     /// 期限（4000ms）に近づくと消えるのではなく WM_TIMER 側で配列から除去される。
     /// ステータスバーをウィンドウ下端に描画する。
     ///
-    /// - 左: `[NORMAL]` / `[PANE]` + キーバインドヒント
-    /// - 右: `pane X/N`（アクティブペイン番号 / 総ペイン数）
+    /// - 左: `[NORMAL]` + ニュースティッカー（Normal）/ キーバインドヒント（Pane/Copy）
+    /// - 右: cwd（末尾表示・中央省略） + `C:XX% M:XX%` + `v0.x.y` + `pane X/N`
     unsafe fn paint_status_bar(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
         // Catppuccin Mocha: subtext1 = #bac2de, blue = #89b4fa, peach = #fab387, green = #a6e3a1
         let color_status_bg = state.theme.get().status_bar_bg;
@@ -1103,22 +1125,10 @@ mod win32 {
         let text_y = bar_y;
 
         // ── 左側: モード名 ──────────────────────────────────────────
-        let (mode_label, mode_color, hint) = match mode {
-            ClientMode::Normal => (
-                " NORMAL ",
-                COLOR_MODE_NORMAL,
-                " Ctrl+B: ペインモード  Ctrl+P: テーマ",
-            ),
-            ClientMode::Pane => (
-                " PANE ",
-                COLOR_MODE_PANE,
-                " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  V: コピー  </>: 横比  +/-: 縦比  L: レイアウト  S: 保存  q: 戻る",
-            ),
-            ClientMode::Copy => (
-                " COPY ",
-                COLOR_MODE_COPY,
-                " hjkl/矢印: 移動  v: 選択  y/Enter: コピー  q/Esc: 終了",
-            ),
+        let (mode_label, mode_color) = match mode {
+            ClientMode::Normal => (" NORMAL ", COLOR_MODE_NORMAL),
+            ClientMode::Pane => (" PANE ", COLOR_MODE_PANE),
+            ClientMode::Copy => (" COPY ", COLOR_MODE_COPY),
         };
 
         // モード名（色付き背景）
@@ -1141,36 +1151,37 @@ mod win32 {
         let _ = GetTextExtentPoint32W(hdc, &label_wide, &mut label_size);
         let hint_x = PADDING_X + label_size.cx;
 
-        // ヒントテキスト
         SetTextColor(hdc, COLOR_STATUS_FG);
         SetBkColor(hdc, color_status_bg);
-        let hint_wide: Vec<u16> = hint.encode_utf16().collect();
-        let _ = ExtTextOutW(
-            hdc,
-            hint_x,
-            text_y,
-            ETO_OPAQUE,
-            None,
-            PCWSTR(hint_wide.as_ptr()),
-            hint_wide.len() as u32,
-            None,
-        );
 
-        // ── 右側: ペイン番号 ────────────────────────────────────────
-        let (active_idx, total) = {
+        // ── 右側: cwd + CPU/RAM + バージョン + ペイン番号 ──────────
+        let (active_idx, total, cwd_str) = {
             let store = state.panes.lock().unwrap();
             let ids = store.layout.pane_ids();
             let total = ids.len();
             let idx = ids.iter().position(|&id| id == store.active).unwrap_or(0) + 1;
-            (idx, total)
+            let cwd = store
+                .pane_cwds
+                .get(&store.active)
+                .cloned()
+                .unwrap_or_default();
+            (idx, total, cwd)
         };
-        let right_text = format!(" pane {}/{} ", active_idx, total);
+        let cpu = state.cpu_usage.get();
+        let mem = state.mem_usage.get();
+        let right_text = format!(
+            " {} C:{:.0}% M:{:.0}% v{} pane {}/{} ",
+            truncate_path_middle(&cwd_str, 30),
+            cpu,
+            mem,
+            env!("CARGO_PKG_VERSION"),
+            active_idx,
+            total,
+        );
         let right_wide: Vec<u16> = right_text.encode_utf16().collect();
         let mut right_size = SIZE::default();
-        SetBkColor(hdc, color_status_bg);
         let _ = GetTextExtentPoint32W(hdc, &right_wide, &mut right_size);
-        let right_x = (win_w - right_size.cx).max(hint_x + label_size.cx);
-        SetTextColor(hdc, COLOR_STATUS_FG);
+        let right_x = (win_w - right_size.cx).max(0);
         let _ = ExtTextOutW(
             hdc,
             right_x,
@@ -1181,6 +1192,104 @@ mod win32 {
             right_wide.len() as u32,
             None,
         );
+
+        // ── 左側ヒントまたはティッカー ──────────────────────────────
+        // ティッカーが描画できる幅（モードラベルの右端 〜 右側テキストの左端の少し手前）
+        let ticker_right = right_x - PADDING_X;
+        let ticker_left = hint_x;
+        let ticker_w = ticker_right - ticker_left;
+
+        if ticker_w <= 0 {
+            return;
+        }
+
+        match mode {
+            ClientMode::Normal => {
+                // Normal モード: ニュースティッカー（右→左スクロール）
+                let news_text = state.panes.lock().unwrap().news_text.clone();
+                if news_text.is_empty() {
+                    // ニュースがなければデフォルトヒントを表示
+                    let hint = " Ctrl+B: ペインモード  Ctrl+P: テーマ";
+                    let hint_wide: Vec<u16> = hint.encode_utf16().collect();
+                    // クリッピング
+                    let _ = IntersectClipRect(hdc, ticker_left, bar_y, ticker_right, win_h);
+                    let _ = ExtTextOutW(
+                        hdc,
+                        ticker_left,
+                        text_y,
+                        ETO_OPAQUE,
+                        None,
+                        PCWSTR(hint_wide.as_ptr()),
+                        hint_wide.len() as u32,
+                        None,
+                    );
+                    let _ = SelectClipRgn(hdc, None);
+                } else {
+                    // ティッカー: news_scroll_px だけ左にオフセットして描画
+                    let ticker_wide: Vec<u16> = news_text.encode_utf16().collect();
+                    let mut ticker_size = SIZE::default();
+                    let _ = GetTextExtentPoint32W(hdc, &ticker_wide, &mut ticker_size);
+
+                    let total_w = ticker_size.cx + ticker_w; // テキスト幅 + 表示領域幅
+                    let scroll = state.news_scroll_px.get() % total_w.max(1);
+                    // テキストが完全に左にスクロールアウトしたらリセット
+                    let draw_x = ticker_left + ticker_w - scroll;
+
+                    let _ = IntersectClipRect(hdc, ticker_left, bar_y, ticker_right, win_h);
+                    let _ = ExtTextOutW(
+                        hdc,
+                        draw_x,
+                        text_y,
+                        ETO_OPAQUE,
+                        None,
+                        PCWSTR(ticker_wide.as_ptr()),
+                        ticker_wide.len() as u32,
+                        None,
+                    );
+                    let _ = SelectClipRgn(hdc, None);
+                }
+            }
+            ClientMode::Pane | ClientMode::Copy => {
+                // Pane/Copy モード: キーバインドヒントを表示
+                let hint = match mode {
+                    ClientMode::Pane => " E: 縦分割  O: 横分割  W: 削除  F: Float  X: Editor  V: コピー  </>: 横比  +/-: 縦比  L: レイアウト  S: 保存  q: 戻る",
+                    ClientMode::Copy => " hjkl/矢印: 移動  v: 選択  y/Enter: コピー  q/Esc: 終了",
+                    _ => "",
+                };
+                let hint_wide: Vec<u16> = hint.encode_utf16().collect();
+                let _ = IntersectClipRect(hdc, ticker_left, bar_y, ticker_right, win_h);
+                let _ = ExtTextOutW(
+                    hdc,
+                    ticker_left,
+                    text_y,
+                    ETO_OPAQUE,
+                    None,
+                    PCWSTR(hint_wide.as_ptr()),
+                    hint_wide.len() as u32,
+                    None,
+                );
+                let _ = SelectClipRgn(hdc, None);
+            }
+        }
+    }
+
+    /// パスの中央を省略して末尾が必ず見えるように短縮する。
+    ///
+    /// 例: `C:\Users\foo\dev\very\long\project\path` → `C:\...\path`（max_chars 超の場合）
+    fn truncate_path_middle(path: &str, max_chars: usize) -> String {
+        if path.len() <= max_chars {
+            return path.to_string();
+        }
+        // 末尾 suffix として最後の区切り以降を使う
+        let sep = if path.contains('\\') { '\\' } else { '/' };
+        let suffix: String = path
+            .rsplit(sep)
+            .next()
+            .map(|s| format!("{sep}{s}"))
+            .unwrap_or_default();
+        let prefix_budget = max_chars.saturating_sub(suffix.len() + 5); // 5 = "…" + sep + margin
+        let prefix: String = path.chars().take(prefix_budget.max(1)).collect();
+        format!("{prefix}…{suffix}")
     }
 
     unsafe fn paint_toasts(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
@@ -2526,6 +2635,7 @@ mod win32 {
         float_tx: mpsc::Sender<()>,
         layout_tx: mpsc::Sender<String>,
         theme: Theme,
+        news_scroll_px_per_tick: i32,
     ) -> anyhow::Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
@@ -2559,6 +2669,7 @@ mod win32 {
                 float_tx,
                 layout_tx,
                 win_theme,
+                news_scroll_px_per_tick,
             ));
             let state_ptr = Box::into_raw(state);
 
@@ -2921,6 +3032,7 @@ pub fn run_window(
     _float_tx: tokio::sync::mpsc::Sender<()>,
     _layout_tx: tokio::sync::mpsc::Sender<String>,
     _theme: Theme,
+    _news_scroll_px_per_tick: i32,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }

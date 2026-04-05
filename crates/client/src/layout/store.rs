@@ -153,6 +153,9 @@ pub struct PaneStore {
     /// `WM_MOUSEMOVE` で更新。描画ループでアンダーラインを引くために参照する。
     /// `None` = ホバー対象なし。
     pub hovered_url: Option<(PaneId, usize, usize, usize, String)>,
+    /// ニュースティッカー本文（RSS から取得した見出しを区切り文字で連結）
+    /// 空文字列 = 未取得またはティッカー無効
+    pub news_text: String,
 }
 
 impl PaneStore {
@@ -179,6 +182,7 @@ impl PaneStore {
             pane_cwds: HashMap::new(),
             layout_changed: false,
             hovered_url: None,
+            news_text: String::new(),
         }
     }
 
