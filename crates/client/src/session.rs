@@ -49,13 +49,11 @@ impl From<&LayoutNode> for LayoutNodeDef {
 
 /// 保存時にコマンドをセッション継続フラグ付きに変換する。
 ///
-/// - `claude` → `claude --continue`
-/// - `codex`  → `codex --continue`
+/// - `claude` → `claude --continue`（`-c`/`--continue` で最新会話を継続）
+/// - `codex`  → `codex resume --last`（`resume` サブコマンド + `--last` で最新セッションを継続）
 /// - その他 → そのまま
-/// - 既に `--continue` または `--resume` を含む場合は重複させない
+/// - 既に継続フラグ・サブコマンドが含まれている場合は重複させない
 pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
-    const CONTINUE_TOOLS: &[&str] = &["claude", "codex"];
-
     let trimmed = cmd.trim();
     let base = trimmed.split_whitespace().next().unwrap_or(trimmed);
 
@@ -66,15 +64,25 @@ pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
         .unwrap_or(base)
         .to_lowercase();
 
-    if CONTINUE_TOOLS.contains(&base_name.as_str()) {
-        // 既に --continue / --resume が含まれていれば重複させない
-        if trimmed.contains("--continue") || trimmed.contains("--resume") {
-            trimmed.to_string()
-        } else {
-            format!("{} --continue", trimmed)
+    match base_name.as_str() {
+        "claude" => {
+            // 既に --continue / --resume / -c が含まれていれば重複させない
+            if trimmed.contains("--continue") || trimmed.contains("--resume") || trimmed.contains(" -c") {
+                trimmed.to_string()
+            } else {
+                format!("{} --continue", trimmed)
+            }
         }
-    } else {
-        trimmed.to_string()
+        "codex" => {
+            // codex は `resume` サブコマンド + `--last` で最新セッションを継続する
+            // 既に resume サブコマンドが含まれていれば重複させない
+            if trimmed.contains("resume") {
+                trimmed.to_string()
+            } else {
+                format!("{} resume --last", trimmed)
+            }
+        }
+        _ => trimmed.to_string(),
     }
 }
 
@@ -336,8 +344,20 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_codex_adds_continue() {
-        assert_eq!(normalize_command_for_restore("codex"), "codex --continue");
+    fn test_normalize_codex_adds_resume_last() {
+        // codex は resume サブコマンド + --last で最新セッションを継続する
+        assert_eq!(
+            normalize_command_for_restore("codex"),
+            "codex resume --last"
+        );
+    }
+
+    #[test]
+    fn test_normalize_codex_already_has_resume_no_duplication() {
+        assert_eq!(
+            normalize_command_for_restore("codex resume --last"),
+            "codex resume --last"
+        );
     }
 
     #[test]
