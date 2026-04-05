@@ -70,7 +70,10 @@ pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
     match base_name.as_str() {
         "claude" => {
             // 既に --continue / --resume / -c が含まれていれば重複させない
-            if trimmed.contains("--continue") || trimmed.contains("--resume") || trimmed.contains(" -c") {
+            if trimmed.contains("--continue")
+                || trimmed.contains("--resume")
+                || trimmed.contains(" -c")
+            {
                 trimmed.to_string()
             } else {
                 format!("{} --continue", trimmed)

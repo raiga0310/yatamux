@@ -162,8 +162,8 @@ pub(super) async fn restore_node(
             let sink = TerminalSink::new(size.cols, size.rows);
             // cwd が記録されていれば先に cd してから command を実行する
             if let Some(dir) = cwd {
-                // Windows: `cd /d <path>` でドライブをまたいで移動できる
-                send_command_input(client_tx, current_pane, Some(&format!("cd /d {}", dir))).await;
+                // Windows: `cd /d "<path>"` でドライブをまたいで移動（引用符でスペース対応）
+                send_command_input(client_tx, current_pane, Some(&format!("cd /d \"{}\"", dir))).await;
             }
             if let Some(cmd) = command {
                 pane_commands.insert(current_pane, cmd.clone());

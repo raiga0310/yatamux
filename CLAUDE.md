@@ -83,7 +83,7 @@ src/layout_config.rs      宣言的レイアウト設定。%APPDATA%\yatamux\lay
 - `VtProcessor`: `vte::Perform` 実装。パース結果を `Grid` メソッド呼び出しに変換。OSC 52 受信時は `clipboard_data: Option<Vec<u8>>` にデコード済みバイト列を格納。
 - `TerminalSink`: `Grid + vte::Parser` をまとめたラッパー。`feed(&[u8]) -> Option<Vec<u8>>` で VT バイト列を受け取りグリッドを更新。OSC 52 が含まれていた場合のみ `Some(decoded)` を返す。
 - `PtySession`: `portable-pty` ラッパー。ConPTY を起動し PTY 読み書きを管理。`write()` は `write_all` 後に `flush()` を呼ぶ（Ctrl+C 即時到達のため）。`clone_child_killer()` で `Drop` 時の子プロセス kill 用ハンドルを取得できる。`child_pid: Option<u32>` を spawn 時に記録し、`child_pid()` で参照できる。
-- `process.rs`: `find_active_command(parent_pid) -> Option<String>`。`CreateToolhelp32Snapshot + Process32First/Next` でプロセスツリーを BFS 走査し、既知シェル（cmd/powershell/pwsh/bash/sh）を除いた最初の孫プロセス名を返す。Windows 以外は常に `None` のスタブ。
+- `process.rs`: `find_active_command(parent_pid) -> Option<String>`。`CreateToolhelp32Snapshot + Process32First/Next` でプロセスツリーを BFS 走査し、既知シェル（cmd/powershell/pwsh/bash/sh）を除いた最初の孫プロセス名を返す。Windows 以外は常に `None` のスタブ。`find_process_cwd(pid) -> Option<String>` は `NtQueryInformationProcess`（ntdll.dll を `LoadLibraryA` で動的ロード）→ PEB → `ReadProcessMemory` で `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath`（offset 0x38、UTF-16 LE）を読み取り、末尾 `\` を除去して返す。
 - `CjkWidthConfig`: East Asian Ambiguous 幅の設定。ConPTY のカーソル位置を信用せずこちらで計算する。
 
 **`yatamux-server`** — ペイン・セッション管理
@@ -103,9 +103,9 @@ src/layout_config.rs      宣言的レイアウト設定。%APPDATA%\yatamux\lay
 - `Ctrl+F` で `float_tx` 経由のフローティングペイン切り替え。`WM_LBUTTONDOWN` でクリック座標からペインを特定してフォーカス移動。`WM_MOUSEWHEEL` で `scroll_offset` を増減。
 - `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。テーマは `theme: std::cell::Cell<WinTheme>`（`WinTheme` は `#[derive(Copy,Clone)]`）で保持し、ランタイムに `state.theme.set(new_theme)` で切り替える。フォント変更は再起動が必要。
 - `close_active_pane()`: ペイン数に関わらず常に `ClosePane` を送信する（最後の1ペインも同様）。`app.rs` の `PaneClosed` ハンドラが `grids.is_empty()` を検出して `should_quit = true` → `WM_TIMER` → `DestroyWindow` でアプリを終了させる（C-9 経路）。
-- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>`、`save_prompt: Option<String>`、`normal_selection: Option<(usize,usize,usize,usize)>`、`should_quit: bool`、`pane_commands: HashMap<PaneId, String>` を持つ。`pane_commands` はレイアウト設定経由で起動したペインに設定されるほか、SaveAndQuit 時に OS のプロセスツリー走査で自動補完される。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
+- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>`、`save_prompt: Option<String>`、`normal_selection: Option<(usize,usize,usize,usize)>`、`should_quit: bool`、`pane_commands: HashMap<PaneId, String>`、`pane_cwds: HashMap<PaneId, String>`、`layout_changed: bool` を持つ。`pane_commands` はレイアウト設定経由で起動したペインに設定されるほか、SaveAndQuit 時に OS のプロセスツリー走査で自動補完される。`pane_cwds` は `AllPaneProcesses` 応答から補完されセッション保存時に `session.toml` へ書き出される。`layout_changed` はペイン分割・削除後に `true` になり、次の `WM_TIMER` でバックバッファをクリアして残像を防ぐ。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
 - ランチャー / テーマランチャー / 保存プロンプトの描画は、lock 解放を早めるために render snapshot struct を組み立ててから描画する。
-- `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。`normalize_command_for_restore(cmd)` が保存時に既知ツールのコマンドを変換する（`claude` → `claude --continue`、`codex` → `codex resume --last`）。
+- `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。`LayoutNodeDef::Leaf` は `command: Option<String>` と `cwd: Option<String>` を持ち、復元時に `cd /d <cwd>` → コマンド実行の順で送信する（`layout_restore.rs`）。`normalize_command_for_restore(cmd)` が保存時に既知ツールのコマンドを変換する（`claude` → `claude --continue`、`codex` → `codex resume --last`）。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
 
 #### WM_KEYDOWN キー処理アーキテクチャ（A-1）
@@ -132,7 +132,7 @@ dispatch_wm_keydown(state, hwnd, &KeyInput { vk, ctrl, shift, wparam, lparam })
 - `ServerMessage::Notification { pane, body }`: OSC 9/99/777、BEL（`\x07`）、PTY 終了時などに発火。`app.rs` がバックグラウンドペインからの通知を `pending_toasts` に変換する。
 - `ServerMessage::PaneContent.capture` は `Option<PaneCapture>`。`yatamux capture-pane --json` がこれを整形して出力する。
 - `ClientMessage::SaveAndQuit`: IPC 経由で送信するとセッション保存 + 終了フローを起動。
-- `ClientMessage::QueryAllPaneProcesses` / `ServerMessage::AllPaneProcesses { commands: HashMap<String, Option<String>> }`: SaveAndQuit フロー内で実行中プロセス名を取得するために使用。
+- `ClientMessage::QueryAllPaneProcesses` / `ServerMessage::AllPaneProcesses { commands: HashMap<String, Option<String>>, cwds: HashMap<String, Option<String>> }`: SaveAndQuit フロー内で実行中プロセス名と作業ディレクトリを取得するために使用。`cwds` は `find_process_cwd` で取得した各ペインの cwd。
 
 ### レンダリングの仕組み
 
@@ -228,6 +228,12 @@ just lint && just test && just fmt
 `task.md` はタスク一覧の入口。
 未完了タスクの詳細は `docs/tasks/active.md` と `docs/tasks/refactor.md` を参照し、
 完了済みの履歴は `docs/tasks/archive-2026-03-30.md` / `docs/tasks/archive-2026-04-04.md` に退避している。
+
+## Codex 委託
+
+非実装タスク（git操作・テスト計画MD作成・docs更新・コード調査）は積極的に Codex へ委託してトークン消費を抑える。
+実装・バグ修正・アーキテクチャ判断は Claude が直接担う。
+委託方法: **必ず** Bash ツールで `codex exec --full-auto -C . "<タスク>"` を実行する。自分でファイルを読んだり grep したりして調査してはいけない。
 
 ## docs/troubleshoot.md
 

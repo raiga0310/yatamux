@@ -136,13 +136,13 @@ pub struct PaneStore {
     pub save_prompt: Option<String>,
     /// テーマランチャー UI の状態（Some = 表示中）
     pub theme_launcher: Option<ThemeLauncherState>,
-    /// ペイン ID → セッション保存時の作業ディレクトリ（SaveAndQuit 時に収集）
-    pub pane_cwds: HashMap<PaneId, String>,
     /// ペイン ID → 起動コマンド文字列（レイアウト適用時に記録、C-23）
     ///
     /// レイアウトファイルから適用されたコマンドのみ記録される。
     /// 手動入力したコマンドは含まれない。
     pub pane_commands: HashMap<PaneId, String>,
+    /// ペイン ID → セッション保存時の作業ディレクトリ（SaveAndQuit 時に収集）
+    pub pane_cwds: HashMap<PaneId, String>,
     /// レイアウト変更フラグ（split / close 後に `true` にする）
     ///
     /// `WM_TIMER` で検出し `content_bb` を破棄して全画面再描画をトリガーする。
@@ -175,8 +175,8 @@ impl PaneStore {
             normal_selection: None,
             save_prompt: None,
             theme_launcher: None,
-            pane_cwds: HashMap::new(),
             pane_commands: HashMap::new(),
+            pane_cwds: HashMap::new(),
             layout_changed: false,
             hovered_url: None,
         }
