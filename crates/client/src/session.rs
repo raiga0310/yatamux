@@ -9,6 +9,8 @@
 //! グリッドを持たない `LayoutNodeDef` / `LayoutSnapshot` を別途定義し、
 //! `From<&LayoutNode>` で変換してシリアライズする。
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use yatamux_protocol::types::{PaneId, SplitDirection};
 
@@ -20,6 +22,9 @@ use crate::layout::{LayoutNode, PaneStore};
 pub enum LayoutNodeDef {
     Leaf {
         id: PaneId,
+        /// 復元時に自動実行するコマンド（layout.toml や layout switch 経由で設定された場合のみ）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
     Split {
         direction: SplitDirection,
@@ -38,8 +43,18 @@ pub struct LayoutSnapshot {
 
 impl From<&LayoutNode> for LayoutNodeDef {
     fn from(node: &LayoutNode) -> Self {
+        Self::from_with_commands(node, &HashMap::new())
+    }
+}
+
+impl LayoutNodeDef {
+    /// `pane_commands` を参照しながら変換する。各 Leaf にコマンドを埋め込む。
+    pub fn from_with_commands(node: &LayoutNode, cmds: &HashMap<PaneId, String>) -> Self {
         match node {
-            LayoutNode::Leaf(id) => LayoutNodeDef::Leaf { id: *id },
+            LayoutNode::Leaf(id) => LayoutNodeDef::Leaf {
+                id: *id,
+                command: cmds.get(id).cloned(),
+            },
             LayoutNode::Split {
                 direction,
                 ratio,
@@ -48,8 +63,8 @@ impl From<&LayoutNode> for LayoutNodeDef {
             } => LayoutNodeDef::Split {
                 direction: *direction,
                 ratio: *ratio,
-                first: Box::new(LayoutNodeDef::from(first.as_ref())),
-                second: Box::new(LayoutNodeDef::from(second.as_ref())),
+                first: Box::new(Self::from_with_commands(first, cmds)),
+                second: Box::new(Self::from_with_commands(second, cmds)),
             },
         }
     }
@@ -58,9 +73,10 @@ impl From<&LayoutNode> for LayoutNodeDef {
 /// `PaneStore` の現在状態を `session.toml` に保存する。
 ///
 /// `WM_CLOSE` および `SaveAndQuit` の両方から呼ばれる共通関数。
+/// `pane_commands` を Leaf ノードに埋め込んで保存するため、次回起動時に復元できる。
 pub fn save_session(store: &PaneStore, path: &std::path::Path) {
     let snap = LayoutSnapshot {
-        root: LayoutNodeDef::from(&store.layout),
+        root: LayoutNodeDef::from_with_commands(&store.layout, &store.pane_commands),
         active: store.active,
     };
     if let Err(e) = snap.save(path) {
@@ -114,7 +130,7 @@ mod tests {
     // TC-01: Leaf ノードの TOML ラウンドトリップ
     #[test]
     fn test_layout_leaf_roundtrip() {
-        let node = LayoutNodeDef::Leaf { id: PaneId(1) };
+        let node = LayoutNodeDef::Leaf { id: PaneId(1), command: None };
         let toml = toml::to_string(&node).unwrap();
         let restored: LayoutNodeDef = toml::from_str(&toml).unwrap();
         assert_eq!(node, restored);
@@ -126,8 +142,8 @@ mod tests {
         let node = LayoutNodeDef::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
-            first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1) }),
-            second: Box::new(LayoutNodeDef::Leaf { id: PaneId(2) }),
+            first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1), command: None }),
+            second: Box::new(LayoutNodeDef::Leaf { id: PaneId(2), command: None }),
         };
         let toml = toml::to_string(&node).unwrap();
         let restored: LayoutNodeDef = toml::from_str(&toml).unwrap();
@@ -140,12 +156,12 @@ mod tests {
         let node = LayoutNodeDef::Split {
             direction: SplitDirection::Vertical,
             ratio: 0.5,
-            first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1) }),
+            first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1), command: None }),
             second: Box::new(LayoutNodeDef::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.6,
-                first: Box::new(LayoutNodeDef::Leaf { id: PaneId(2) }),
-                second: Box::new(LayoutNodeDef::Leaf { id: PaneId(3) }),
+                first: Box::new(LayoutNodeDef::Leaf { id: PaneId(2), command: None }),
+                second: Box::new(LayoutNodeDef::Leaf { id: PaneId(3), command: None }),
             }),
         };
         let toml = toml::to_string(&node).unwrap();
@@ -160,8 +176,8 @@ mod tests {
             root: LayoutNodeDef::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.5,
-                first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1) }),
-                second: Box::new(LayoutNodeDef::Leaf { id: PaneId(2) }),
+                first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1), command: None }),
+                second: Box::new(LayoutNodeDef::Leaf { id: PaneId(2), command: None }),
             },
             active: PaneId(2),
         };
@@ -182,7 +198,7 @@ mod tests {
     fn test_layout_node_to_def_leaf() {
         let node = LayoutNode::Leaf(PaneId(5));
         let def = LayoutNodeDef::from(&node);
-        assert_eq!(def, LayoutNodeDef::Leaf { id: PaneId(5) });
+        assert_eq!(def, LayoutNodeDef::Leaf { id: PaneId(5), command: None });
     }
 
     // TC-07: LayoutNode::Split → LayoutNodeDef::Split 変換
@@ -237,7 +253,7 @@ mod tests {
     #[test]
     fn test_snapshot_file_roundtrip() {
         let snap = LayoutSnapshot {
-            root: LayoutNodeDef::Leaf { id: PaneId(1) },
+            root: LayoutNodeDef::Leaf { id: PaneId(1), command: None },
             active: PaneId(1),
         };
         let dir = std::env::temp_dir().join("yatamux_test");

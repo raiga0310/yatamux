@@ -76,7 +76,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
 
     tracing::info!("Pane {:?} created, opening window", pane_id);
 
-    let (layout, sinks_vec, active_pane) = load_initial_layout(
+    let (layout, sinks_vec, active_pane, initial_pane_commands) = load_initial_layout(
         layout_name,
         pane_id,
         surf_id,
@@ -98,6 +98,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
         store.layout = layout;
         store.grids = all_grids;
         store.active = active_pane;
+        store.pane_commands = initial_pane_commands;
         Arc::new(Mutex::new(store))
     };
 
