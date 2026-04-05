@@ -6,6 +6,187 @@ use yatamux_terminal::Grid;
 
 use super::{LauncherState, LayoutNode, PaneRect, ThemeLauncherState};
 
+/// アプリ内入力欄の編集状態。
+///
+/// 現在はレイアウト保存プロンプトで使用するが、履歴・カーソル移動・
+/// Emacs 風編集キーを持つ行編集モデルとして他の入力 UI にも流用できる。
+#[derive(Clone, Debug)]
+pub struct PromptState {
+    pub text: String,
+    pub cursor: usize,
+    history_index: Option<usize>,
+    history_draft: Option<String>,
+}
+
+impl PromptState {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            history_index: None,
+            history_draft: None,
+        }
+    }
+
+    pub fn insert_char(&mut self, ch: char) {
+        self.detach_history();
+        self.text.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.detach_history();
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    pub fn move_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = prev_char_boundary(&self.text, self.cursor);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = next_char_boundary(&self.text, self.cursor);
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.detach_history();
+        let start = prev_char_boundary(&self.text, self.cursor);
+        self.text.drain(start..self.cursor);
+        self.cursor = start;
+        true
+    }
+
+    pub fn kill_to_end(&mut self) -> Option<String> {
+        if self.cursor >= self.text.len() {
+            return None;
+        }
+        self.detach_history();
+        Some(self.text.drain(self.cursor..).collect())
+    }
+
+    pub fn kill_to_start(&mut self) -> Option<String> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.detach_history();
+        let killed: String = self.text.drain(..self.cursor).collect();
+        self.cursor = 0;
+        Some(killed)
+    }
+
+    pub fn kill_prev_word(&mut self) -> Option<String> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.detach_history();
+
+        let mut start = self.cursor;
+        while start > 0 {
+            let prev = prev_char_boundary(&self.text, start);
+            let ch = self.text[prev..start].chars().next().unwrap_or('\0');
+            if !ch.is_whitespace() {
+                break;
+            }
+            start = prev;
+        }
+        while start > 0 {
+            let prev = prev_char_boundary(&self.text, start);
+            let ch = self.text[prev..start].chars().next().unwrap_or('\0');
+            if ch.is_whitespace() {
+                break;
+            }
+            start = prev;
+        }
+        if start == self.cursor {
+            return None;
+        }
+        let killed: String = self.text.drain(start..self.cursor).collect();
+        self.cursor = start;
+        Some(killed)
+    }
+
+    pub fn history_prev(&mut self, history: &[String]) -> bool {
+        if history.is_empty() {
+            return false;
+        }
+        match self.history_index {
+            None => {
+                self.history_draft = Some(self.text.clone());
+                self.history_index = Some(history.len() - 1);
+            }
+            Some(0) => return false,
+            Some(idx) => self.history_index = Some(idx - 1),
+        }
+        self.text = history[self.history_index.unwrap()].clone();
+        self.move_end();
+        true
+    }
+
+    pub fn history_next(&mut self, history: &[String]) -> bool {
+        let Some(idx) = self.history_index else {
+            return false;
+        };
+
+        if idx + 1 < history.len() {
+            self.history_index = Some(idx + 1);
+            self.text = history[idx + 1].clone();
+        } else {
+            self.history_index = None;
+            self.text = self.history_draft.take().unwrap_or_default();
+        }
+        self.move_end();
+        true
+    }
+
+    fn detach_history(&mut self) {
+        self.history_index = None;
+        self.history_draft = None;
+    }
+}
+
+impl Default for PromptState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn prev_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    text[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
+    cursor
+        + text[cursor..]
+            .chars()
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(0)
+}
+
 /// コピーモードのカーソルと選択状態
 ///
 /// `cursor` はスクリーン座標（col, row）の 0-based インデックス。
@@ -133,7 +314,11 @@ pub struct PaneStore {
     /// Normal モードのマウス選択状態（anchor_col, anchor_row, end_col, end_row）
     pub normal_selection: Option<(usize, usize, usize, usize)>,
     /// レイアウト保存プロンプトの入力バッファ（Some = プロンプト表示中）
-    pub save_prompt: Option<String>,
+    pub save_prompt: Option<PromptState>,
+    /// 保存プロンプトの入力履歴（新しいものが末尾）
+    pub save_prompt_history: Vec<String>,
+    /// `Ctrl+K/U/W` で削除したテキストを保持する yank バッファ
+    pub save_prompt_yank: String,
     /// テーマランチャー UI の状態（Some = 表示中）
     pub theme_launcher: Option<ThemeLauncherState>,
     /// ペイン ID → 起動コマンド文字列（レイアウト適用時に記録、C-23）
@@ -177,6 +362,8 @@ impl PaneStore {
             copy_mode: None,
             normal_selection: None,
             save_prompt: None,
+            save_prompt_history: Vec::new(),
+            save_prompt_yank: String::new(),
             theme_launcher: None,
             pane_commands: HashMap::new(),
             pane_cwds: HashMap::new(),
@@ -216,6 +403,26 @@ impl PaneStore {
             }
         }
     }
+
+    pub fn push_save_prompt_history(&mut self, entry: String) {
+        const HISTORY_LIMIT: usize = 20;
+
+        if entry.is_empty() {
+            return;
+        }
+        if self
+            .save_prompt_history
+            .last()
+            .is_some_and(|last| last == &entry)
+        {
+            return;
+        }
+        self.save_prompt_history.push(entry);
+        if self.save_prompt_history.len() > HISTORY_LIMIT {
+            let drop_count = self.save_prompt_history.len() - HISTORY_LIMIT;
+            self.save_prompt_history.drain(..drop_count);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -225,7 +432,7 @@ mod tests {
     use yatamux_protocol::types::PaneId;
     use yatamux_terminal::Grid;
 
-    use super::{CopyState, PaneStore};
+    use super::{CopyState, PaneStore, PromptState};
     use crate::layout::PaneRect;
 
     // TC-01: layout_changed は false で初期化される
@@ -254,6 +461,49 @@ mod tests {
         assert!(store.layout_changed);
         store.layout_changed = false;
         assert!(!store.layout_changed);
+    }
+
+    #[test]
+    fn test_prompt_history_roundtrip_restores_draft() {
+        let history = vec!["first".to_string(), "second".to_string()];
+        let mut prompt = PromptState::new();
+        prompt.insert_str("draft");
+
+        assert!(prompt.history_prev(&history));
+        assert_eq!(prompt.text, "second");
+        assert!(prompt.history_prev(&history));
+        assert_eq!(prompt.text, "first");
+        assert!(prompt.history_next(&history));
+        assert_eq!(prompt.text, "second");
+        assert!(prompt.history_next(&history));
+        assert_eq!(prompt.text, "draft");
+    }
+
+    #[test]
+    fn test_prompt_kill_and_yank() {
+        let mut prompt = PromptState::new();
+        prompt.insert_str("alpha beta");
+        prompt.move_start();
+        prompt.move_right();
+        prompt.move_right();
+        let killed = prompt.kill_to_end().unwrap();
+        assert_eq!(killed, "pha beta");
+        prompt.insert_str(&killed);
+        assert_eq!(prompt.text, "alpha beta");
+
+        let killed_word = prompt.kill_prev_word().unwrap();
+        assert_eq!(killed_word, "beta");
+        prompt.insert_str(&killed_word);
+        assert_eq!(prompt.text, "alpha beta");
+    }
+
+    #[test]
+    fn test_prompt_backspace_respects_utf8_boundaries() {
+        let mut prompt = PromptState::new();
+        prompt.insert_str("あい");
+        assert!(prompt.backspace());
+        assert_eq!(prompt.text, "あ");
+        assert_eq!(prompt.cursor, "あ".len());
     }
 
     #[test]

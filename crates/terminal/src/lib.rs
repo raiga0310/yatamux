@@ -92,7 +92,10 @@ mod tests {
     fn test_terminal_sink_new_all_dirty() {
         let sink = TerminalSink::new(80, 24);
         let mut grid = sink.grid.lock().unwrap();
-        assert!(grid.has_dirty_rows(), "新規 TerminalSink の Grid は全行 dirty でなければならない");
+        assert!(
+            grid.has_dirty_rows(),
+            "新規 TerminalSink の Grid は全行 dirty でなければならない"
+        );
         let dirty = grid.take_dirty_rows();
         assert_eq!(dirty.len(), 24);
     }

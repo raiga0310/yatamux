@@ -51,6 +51,12 @@ impl PtySession {
             }
             cmd.cwd(dir);
         }
+        cmd.env("YATAMUX", "1");
+        cmd.env("TERM_PROGRAM", "yatamux");
+        cmd.env(
+            "YATAMUX_SESSION",
+            std::env::var("YATAMUX_SESSION").unwrap_or_else(|_| "default".to_string()),
+        );
 
         let child = pair
             .slave

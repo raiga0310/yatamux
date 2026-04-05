@@ -75,7 +75,13 @@ unsafe fn handle_ime_composition(
             s.committed.clone()
         };
         if let Some(text) = committed {
-            state.send_input(text.into_bytes());
+            let mut store = state.panes.lock().unwrap();
+            if let Some(prompt) = &mut store.save_prompt {
+                prompt.insert_str(&text);
+            } else {
+                drop(store);
+                state.send_input(text.into_bytes());
+            }
             state.ime.state.lock().unwrap().committed = None;
         }
 
@@ -131,8 +137,8 @@ pub(super) unsafe fn handle_wm_char(
                 if let Some(ch) = char::from_u32(code) {
                     if !ch.is_control() {
                         let mut store = state.panes.lock().unwrap();
-                        if let Some(s) = &mut store.save_prompt {
-                            s.push(ch);
+                        if let Some(prompt) = &mut store.save_prompt {
+                            prompt.insert_char(ch);
                         }
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
@@ -349,7 +355,9 @@ pub(super) unsafe fn handle_wm_timer(
             let news_text = state.panes.lock().unwrap().news_text.clone();
             if !news_text.is_empty() {
                 let cur = state.news_scroll_px.get();
-                state.news_scroll_px.set(cur + state.news_scroll_px_per_tick);
+                state
+                    .news_scroll_px
+                    .set(cur + state.news_scroll_px_per_tick);
             }
         }
 
