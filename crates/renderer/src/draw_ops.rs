@@ -121,7 +121,11 @@ pub fn count_draw_ops(
                     let (raw_fg, raw_bg) = {
                         let fg = resolve_color(cell.style.fg, DEFAULT_FG);
                         let bg = resolve_color(cell.style.bg, DEFAULT_BG);
-                        if cell.style.reverse { (bg, fg) } else { (fg, bg) }
+                        if cell.style.reverse {
+                            (bg, fg)
+                        } else {
+                            (fg, bg)
+                        }
                     };
 
                     // 背景色変化 → SetBkColor
@@ -165,7 +169,12 @@ pub fn count_draw_ops_batched(
 
     // ラン状態
     #[derive(Default, Clone, Copy, PartialEq)]
-    enum RunKind { #[default] None, Blank, Text }
+    enum RunKind {
+        #[default]
+        None,
+        Blank,
+        Text,
+    }
 
     struct Run {
         kind: RunKind,
@@ -213,14 +222,23 @@ pub fn count_draw_ops_batched(
                         }
                     }
                     flush(&mut run, &mut stats);
-                    run = Some(Run { kind: RunKind::Blank, bg, fg: DEFAULT_FG, has_text: false });
+                    run = Some(Run {
+                        kind: RunKind::Blank,
+                        bg,
+                        fg: DEFAULT_FG,
+                        has_text: false,
+                    });
                 }
                 CellContent::Grapheme { text, .. } => {
                     stats.cells_processed += 1;
                     let (raw_fg, raw_bg) = {
                         let fg = resolve_color(cell.style.fg, DEFAULT_FG);
                         let bg = resolve_color(cell.style.bg, DEFAULT_BG);
-                        if cell.style.reverse { (bg, fg) } else { (fg, bg) }
+                        if cell.style.reverse {
+                            (bg, fg)
+                        } else {
+                            (fg, bg)
+                        }
                     };
 
                     let first_cp = text.chars().next().map(|c| c as u32).unwrap_or(0);
@@ -270,7 +288,11 @@ mod tests {
     use yatamux_terminal::CjkWidthConfig;
 
     fn ascii_style(fg: Color, bg: Color) -> CellStyle {
-        CellStyle { fg: Some(fg), bg: Some(bg), ..Default::default() }
+        CellStyle {
+            fg: Some(fg),
+            bg: Some(bg),
+            ..Default::default()
+        }
     }
 
     fn make_grid(cols: u16, rows: u16) -> Grid {
@@ -283,8 +305,16 @@ mod tests {
     fn print_op_counts() {
         use super::count_draw_ops_batched;
 
-        let fg = Color { r: 0xCD, g: 0xD6, b: 0xF4 };
-        let bg = Color { r: 0x1E, g: 0x1E, b: 0x2E };
+        let fg = Color {
+            r: 0xCD,
+            g: 0xD6,
+            b: 0xF4,
+        };
+        let bg = Color {
+            r: 0x1E,
+            g: 0x1E,
+            b: 0x2E,
+        };
         let style = ascii_style(fg, bg);
 
         macro_rules! show {
@@ -294,20 +324,32 @@ mod tests {
                 let save = if b.total_gdi_calls() > 0 {
                     let ratio = a.total_gdi_calls() * 100 / b.total_gdi_calls();
                     100i64 - ratio as i64
-                } else { 0 };
-                println!("[{:30}] before={:5}  after={:5}  {:+}%", $label, b.total_gdi_calls(), a.total_gdi_calls(), -save);
+                } else {
+                    0
+                };
+                println!(
+                    "[{:30}] before={:5}  after={:5}  {:+}%",
+                    $label,
+                    b.total_gdi_calls(),
+                    a.total_gdi_calls(),
+                    -save
+                );
             }};
         }
 
         // S-1: idle_prompt（全行 vs カーソル 1 行のみ dirty）
         let mut g = make_grid(80, 24);
-        for ch in "$ ".chars() { g.write_char(&ch.to_string(), style); }
+        for ch in "$ ".chars() {
+            g.write_char(&ch.to_string(), style);
+        }
         let one_row: std::collections::HashSet<u16> = [0].into();
         show!("idle_prompt 80x24 ALL ", g, None);
         show!("idle_prompt 80x24 1row", g, Some(&one_row));
 
         let mut g = make_grid(200, 50);
-        for ch in "$ ".chars() { g.write_char(&ch.to_string(), style); }
+        for ch in "$ ".chars() {
+            g.write_char(&ch.to_string(), style);
+        }
         show!("idle_prompt 200x50 ALL", g, None);
 
         // S-2: dense_ascii (同色全埋め)
@@ -325,15 +367,18 @@ mod tests {
         }
 
         // S-3: multicolor (セルごとに fg が変化)
-        let palette: &[(u8,u8,u8)] = &[
-            (0xF3,0x8B,0xA8),(0xA6,0xE3,0xA1),(0xF9,0xE2,0xAF),(0x89,0xB4,0xFA),
+        let palette: &[(u8, u8, u8)] = &[
+            (0xF3, 0x8B, 0xA8),
+            (0xA6, 0xE3, 0xA1),
+            (0xF9, 0xE2, 0xAF),
+            (0x89, 0xB4, 0xFA),
         ];
         for (cols, rows) in [(80u16, 24u16), (200u16, 50u16)] {
             let mut g = make_grid(cols, rows);
             for row in 0..rows {
                 for col in 0..cols {
-                    let (r,gv,b) = palette[((row*cols+col) as usize) % palette.len()];
-                    let s = ascii_style(Color{r,g:gv,b}, bg);
+                    let (r, gv, b) = palette[((row * cols + col) as usize) % palette.len()];
+                    let s = ascii_style(Color { r, g: gv, b }, bg);
                     let ch = (b'a' + (col % 26) as u8) as char;
                     g.write_char(&ch.to_string(), s);
                 }
@@ -344,7 +389,11 @@ mod tests {
         }
 
         // S-4: vim_style (行ごとに bg が交互)
-        let bg2 = Color { r: 0x31, g: 0x32, b: 0x44 };
+        let bg2 = Color {
+            r: 0x31,
+            g: 0x32,
+            b: 0x44,
+        };
         for (cols, rows) in [(80u16, 24u16), (200u16, 50u16)] {
             let mut g = make_grid(cols, rows);
             for row in 0..rows {

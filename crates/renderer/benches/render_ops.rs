@@ -30,8 +30,16 @@ fn ascii_style(fg: Color, bg: Color) -> CellStyle {
 /// アイドル時のベースライン。大半のセルが Blank なので ExtTextOutW は少ないはず。
 fn grid_idle_prompt(cols: u16, rows: u16) -> Grid {
     let mut grid = make_grid(cols, rows);
-    let fg = Color { r: 0xCD, g: 0xD6, b: 0xF4 };
-    let bg = Color { r: 0x1E, g: 0x1E, b: 0x2E };
+    let fg = Color {
+        r: 0xCD,
+        g: 0xD6,
+        b: 0xF4,
+    };
+    let bg = Color {
+        r: 0x1E,
+        g: 0x1E,
+        b: 0x2E,
+    };
     let style = ascii_style(fg, bg);
     // 先頭行に "$ " のみ書き込む
     for ch in "$ ".chars() {
@@ -45,8 +53,16 @@ fn grid_idle_prompt(cols: u16, rows: u16) -> Grid {
 /// `ls -la` のような密な ASCII 出力。色変化なしで ExtTextOutW が最大になるケース。
 fn grid_dense_ascii(cols: u16, rows: u16) -> Grid {
     let mut grid = make_grid(cols, rows);
-    let fg = Color { r: 0xCD, g: 0xD6, b: 0xF4 };
-    let bg = Color { r: 0x1E, g: 0x1E, b: 0x2E };
+    let fg = Color {
+        r: 0xCD,
+        g: 0xD6,
+        b: 0xF4,
+    };
+    let bg = Color {
+        r: 0x1E,
+        g: 0x1E,
+        b: 0x2E,
+    };
     let style = ascii_style(fg, bg);
     for _ in 0..rows {
         for c in 0..cols {
@@ -64,7 +80,11 @@ fn grid_dense_ascii(cols: u16, rows: u16) -> Grid {
 /// `cargo build` のカラー出力に近い。色切り替えが全セルで発生する。
 fn grid_multicolor(cols: u16, rows: u16) -> Grid {
     let mut grid = make_grid(cols, rows);
-    let bg = Color { r: 0x1E, g: 0x1E, b: 0x2E };
+    let bg = Color {
+        r: 0x1E,
+        g: 0x1E,
+        b: 0x2E,
+    };
     // ANSI 16 色の fg を順番に使う
     let fg_palette: &[(u8, u8, u8)] = &[
         (0xF3, 0x8B, 0xA8), // red
@@ -94,11 +114,27 @@ fn grid_multicolor(cols: u16, rows: u16) -> Grid {
 /// vim のステータスバーや htop のように行全体が異なる背景色を持つパターン。
 fn grid_vim_style(cols: u16, rows: u16) -> Grid {
     let mut grid = make_grid(cols, rows);
-    let fg = Color { r: 0xCD, g: 0xD6, b: 0xF4 };
-    let bg_normal = Color { r: 0x1E, g: 0x1E, b: 0x2E };
-    let bg_highlight = Color { r: 0x31, g: 0x32, b: 0x44 };
+    let fg = Color {
+        r: 0xCD,
+        g: 0xD6,
+        b: 0xF4,
+    };
+    let bg_normal = Color {
+        r: 0x1E,
+        g: 0x1E,
+        b: 0x2E,
+    };
+    let bg_highlight = Color {
+        r: 0x31,
+        g: 0x32,
+        b: 0x44,
+    };
     for row in 0..rows {
-        let bg = if row % 2 == 0 { bg_normal } else { bg_highlight };
+        let bg = if row % 2 == 0 {
+            bg_normal
+        } else {
+            bg_highlight
+        };
         let style = ascii_style(fg, bg);
         for col in 0..cols {
             let ch = (b'a' + (col % 26) as u8) as char;

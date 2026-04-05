@@ -543,7 +543,12 @@ mod win32 {
                 let bg_brush = CreateSolidBrush(theme.bg);
                 FillRect(dc, &rect, bg_brush);
                 let _ = DeleteObject(bg_brush.into());
-                let new_bb = BackbufferHandle { dc, bmp, w: win_w, h: win_h };
+                let new_bb = BackbufferHandle {
+                    dc,
+                    bmp,
+                    w: win_w,
+                    h: win_h,
+                };
                 state.content_bb.set(Some(new_bb));
                 // 全グリッドを dirty に（次のループで全行描画される）
                 {
@@ -597,7 +602,19 @@ mod win32 {
             let htl = store.theme_launcher.is_some();
             let hsp = store.save_prompt.is_some();
             let fv = store.floating_visible;
-            (store.active, store.scroll_offset, rects, seps, map, cm, ns, hl, htl, hsp, fv)
+            (
+                store.active,
+                store.scroll_offset,
+                rects,
+                seps,
+                map,
+                cm,
+                ns,
+                hl,
+                htl,
+                hsp,
+                fv,
+            )
         };
 
         // ── オーバーレイ・スクロール変化の検出 → dirty 化 ──────────────────
@@ -1024,18 +1041,7 @@ mod win32 {
 
         // 永続バックバッファを画面にコピー
         // （DC・ビットマップは persistent なので解放しない）
-        BitBlt(
-            hdc,
-            0,
-            0,
-            win_w,
-            win_h,
-            Some(mem_dc),
-            0,
-            0,
-            SRCCOPY,
-        )
-        .ok();
+        BitBlt(hdc, 0, 0, win_w, win_h, Some(mem_dc), 0, 0, SRCCOPY).ok();
 
         let _ = EndPaint(hwnd, &ps);
     }
