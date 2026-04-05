@@ -25,6 +25,9 @@ pub enum LayoutNodeDef {
         /// 復元時に自動実行するコマンド（layout.toml や layout switch 経由で設定された場合のみ）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        /// セッション保存時の作業ディレクトリ（復元時に CD してから command を実行する）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     Split {
         direction: SplitDirection,
@@ -43,7 +46,7 @@ pub struct LayoutSnapshot {
 
 impl From<&LayoutNode> for LayoutNodeDef {
     fn from(node: &LayoutNode) -> Self {
-        Self::from_with_commands(node, &HashMap::new())
+        Self::from_with_commands(node, &HashMap::new(), &HashMap::new())
     }
 }
 
@@ -87,12 +90,17 @@ pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
 }
 
 impl LayoutNodeDef {
-    /// `pane_commands` を参照しながら変換する。各 Leaf にコマンドを埋め込む。
-    pub fn from_with_commands(node: &LayoutNode, cmds: &HashMap<PaneId, String>) -> Self {
+    /// `pane_commands` / `pane_cwds` を参照しながら変換する。各 Leaf にコマンドと cwd を埋め込む。
+    pub fn from_with_commands(
+        node: &LayoutNode,
+        cmds: &HashMap<PaneId, String>,
+        cwds: &HashMap<PaneId, String>,
+    ) -> Self {
         match node {
             LayoutNode::Leaf(id) => LayoutNodeDef::Leaf {
                 id: *id,
                 command: cmds.get(id).map(|c| normalize_command_for_restore(c)),
+                cwd: cwds.get(id).cloned(),
             },
             LayoutNode::Split {
                 direction,
@@ -102,8 +110,8 @@ impl LayoutNodeDef {
             } => LayoutNodeDef::Split {
                 direction: *direction,
                 ratio: *ratio,
-                first: Box::new(Self::from_with_commands(first, cmds)),
-                second: Box::new(Self::from_with_commands(second, cmds)),
+                first: Box::new(Self::from_with_commands(first, cmds, cwds)),
+                second: Box::new(Self::from_with_commands(second, cmds, cwds)),
             },
         }
     }
@@ -115,7 +123,11 @@ impl LayoutNodeDef {
 /// `pane_commands` を Leaf ノードに埋め込んで保存するため、次回起動時に復元できる。
 pub fn save_session(store: &PaneStore, path: &std::path::Path) {
     let snap = LayoutSnapshot {
-        root: LayoutNodeDef::from_with_commands(&store.layout, &store.pane_commands),
+        root: LayoutNodeDef::from_with_commands(
+            &store.layout,
+            &store.pane_commands,
+            &store.pane_cwds,
+        ),
         active: store.active,
     };
     if let Err(e) = snap.save(path) {
@@ -172,6 +184,7 @@ mod tests {
         let node = LayoutNodeDef::Leaf {
             id: PaneId(1),
             command: None,
+            cwd: None,
         };
         let toml = toml::to_string(&node).unwrap();
         let restored: LayoutNodeDef = toml::from_str(&toml).unwrap();
@@ -187,10 +200,12 @@ mod tests {
             first: Box::new(LayoutNodeDef::Leaf {
                 id: PaneId(1),
                 command: None,
+                cwd: None,
             }),
             second: Box::new(LayoutNodeDef::Leaf {
                 id: PaneId(2),
                 command: None,
+                cwd: None,
             }),
         };
         let toml = toml::to_string(&node).unwrap();
@@ -207,6 +222,7 @@ mod tests {
             first: Box::new(LayoutNodeDef::Leaf {
                 id: PaneId(1),
                 command: None,
+                cwd: None,
             }),
             second: Box::new(LayoutNodeDef::Split {
                 direction: SplitDirection::Horizontal,
@@ -214,10 +230,12 @@ mod tests {
                 first: Box::new(LayoutNodeDef::Leaf {
                     id: PaneId(2),
                     command: None,
+                    cwd: None,
                 }),
                 second: Box::new(LayoutNodeDef::Leaf {
                     id: PaneId(3),
                     command: None,
+                    cwd: None,
                 }),
             }),
         };
@@ -236,10 +254,12 @@ mod tests {
                 first: Box::new(LayoutNodeDef::Leaf {
                     id: PaneId(1),
                     command: None,
+                    cwd: None,
                 }),
                 second: Box::new(LayoutNodeDef::Leaf {
                     id: PaneId(2),
                     command: None,
+                    cwd: None,
                 }),
             },
             active: PaneId(2),
@@ -265,7 +285,8 @@ mod tests {
             def,
             LayoutNodeDef::Leaf {
                 id: PaneId(5),
-                command: None
+                command: None,
+                cwd: None,
             }
         );
     }
@@ -325,6 +346,7 @@ mod tests {
             root: LayoutNodeDef::Leaf {
                 id: PaneId(1),
                 command: None,
+                cwd: None,
             },
             active: PaneId(1),
         };

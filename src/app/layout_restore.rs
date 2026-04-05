@@ -156,9 +156,15 @@ pub(super) async fn restore_node(
         LayoutNodeDef::Leaf {
             id: old_id,
             command,
+            cwd,
         } => {
             old_to_new.insert(*old_id, current_pane);
             let sink = TerminalSink::new(size.cols, size.rows);
+            // cwd が記録されていれば先に cd してから command を実行する
+            if let Some(dir) = cwd {
+                // Windows: `cd /d <path>` でドライブをまたいで移動できる
+                send_command_input(client_tx, current_pane, Some(&format!("cd /d {}", dir))).await;
+            }
             if let Some(cmd) = command {
                 pane_commands.insert(current_pane, cmd.clone());
                 send_command_input(client_tx, current_pane, Some(cmd.as_str())).await;
