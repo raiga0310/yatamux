@@ -188,6 +188,8 @@ mod win32 {
         prev_idle_ticks: std::cell::Cell<u64>,
         prev_kernel_ticks: std::cell::Cell<u64>,
         prev_user_ticks: std::cell::Cell<u64>,
+        /// アプリバージョン文字列（メインクレートから受け取る）
+        pub app_version: &'static str,
     }
 
     impl ClientState {
@@ -205,6 +207,7 @@ mod win32 {
             layout_tx: mpsc::Sender<String>,
             theme: WinTheme,
             news_scroll_px_per_tick: i32,
+            app_version: &'static str,
         ) -> Self {
             Self {
                 panes,
@@ -240,6 +243,7 @@ mod win32 {
                 prev_idle_ticks: std::cell::Cell::new(0),
                 prev_kernel_ticks: std::cell::Cell::new(0),
                 prev_user_ticks: std::cell::Cell::new(0),
+                app_version,
             }
         }
 
@@ -1174,7 +1178,7 @@ mod win32 {
             truncate_path_middle(&cwd_str, 30),
             cpu,
             mem,
-            env!("CARGO_PKG_VERSION"),
+            state.app_version,
             active_idx,
             total,
         );
@@ -2636,6 +2640,7 @@ mod win32 {
         layout_tx: mpsc::Sender<String>,
         theme: Theme,
         news_scroll_px_per_tick: i32,
+        app_version: &'static str,
     ) -> anyhow::Result<()> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
@@ -2670,6 +2675,7 @@ mod win32 {
                 layout_tx,
                 win_theme,
                 news_scroll_px_per_tick,
+                app_version,
             ));
             let state_ptr = Box::into_raw(state);
 
@@ -3033,6 +3039,7 @@ pub fn run_window(
     _layout_tx: tokio::sync::mpsc::Sender<String>,
     _theme: Theme,
     _news_scroll_px_per_tick: i32,
+    _app_version: &'static str,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Win32 window is only available on Windows")
 }

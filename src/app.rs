@@ -202,6 +202,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
             layout_tx,
             theme,
             news_scroll_px_per_tick,
+            env!("CARGO_PKG_VERSION"),
         )
     })
     .await??;
