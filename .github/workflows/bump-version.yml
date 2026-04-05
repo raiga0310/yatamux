@@ -6,20 +6,19 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   bump:
     name: Bump patch version
     runs-on: ubuntu-latest
-    # バージョンバンプコミット自身や docs/CI のみの変更はスキップ
+    # バージョンバンプ / docs / ci のコミット自身はスキップして無限ループを防止
     if: |
       !startsWith(github.event.head_commit.message, 'chore: bump version') &&
       !startsWith(github.event.head_commit.message, 'docs:') &&
       !startsWith(github.event.head_commit.message, 'ci:')
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -34,12 +33,19 @@ jobs:
           echo "new=$new" >> "$GITHUB_OUTPUT"
           echo "Bumped: $current → $new"
 
-      - name: Commit and push tag
+      - name: Create bump PR
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch="chore/bump-version-${{ steps.version.outputs.new }}"
+          git checkout -b "$branch"
           git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to ${{ steps.version.outputs.new }}"
-          git tag "v${{ steps.version.outputs.new }}"
-          git push
-          git push origin "v${{ steps.version.outputs.new }}"
+          git push origin "$branch"
+          gh pr create \
+            --title "chore: bump version to ${{ steps.version.outputs.new }}" \
+            --body "自動バージョンバンプ PR。マージすると v${{ steps.version.outputs.new }} タグが作成され Release が起動します。" \
+            --base master \
+            --head "$branch"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
