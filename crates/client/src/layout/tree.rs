@@ -339,6 +339,10 @@ impl LayoutNode {
     ///
     /// - `<`/`>` キーは `SplitDirection::Vertical`（縦線分割 = 横比）を対象にする
     /// - `+`/`-` キーは `SplitDirection::Horizontal`（横線分割 = 縦比）を対象にする
+    ///
+    /// delta の符号が境界移動方向を決める（フォーカスペインが first/second のどちらでも同じ）。
+    /// - `delta > 0`: ratio 増加 → Vertical なら境界が右へ、Horizontal なら境界が下へ
+    /// - `delta < 0`: ratio 減少 → Vertical なら境界が左へ、Horizontal なら境界が上へ
     pub fn adjust_ratio_for_dir(
         &mut self,
         id: PaneId,
@@ -358,16 +362,11 @@ impl LayoutNode {
                 {
                     return true;
                 }
-                if *direction == target_dir {
-                    if first.pane_ids().contains(&id) {
-                        *ratio = (*ratio + delta).clamp(0.1, 0.9);
-                        true
-                    } else if second.pane_ids().contains(&id) {
-                        *ratio = (*ratio - delta).clamp(0.1, 0.9);
-                        true
-                    } else {
-                        false
-                    }
+                if *direction == target_dir
+                    && (first.pane_ids().contains(&id) || second.pane_ids().contains(&id))
+                {
+                    *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                    true
                 } else {
                     false
                 }
