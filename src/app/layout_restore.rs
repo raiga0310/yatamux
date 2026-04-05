@@ -24,7 +24,12 @@ pub(super) async fn load_initial_layout(
     size: TermSize,
     client_tx: &mpsc::Sender<ClientMessage>,
     server_rx: &mut mpsc::Receiver<ServerMessage>,
-) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>, PaneId, PaneCommands)> {
+) -> Result<(
+    LayoutNode,
+    Vec<(PaneId, TerminalSink)>,
+    PaneId,
+    PaneCommands,
+)> {
     let session_path = LayoutSnapshot::default_path();
     if let Some(name) = layout_name {
         let config_path = LayoutConfig::layout_path(&name);
@@ -86,7 +91,12 @@ pub(super) async fn apply_layout_config(
     size: TermSize,
     client_tx: &mpsc::Sender<ClientMessage>,
     server_rx: &mut mpsc::Receiver<ServerMessage>,
-) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>, PaneId, PaneCommands)> {
+) -> Result<(
+    LayoutNode,
+    Vec<(PaneId, TerminalSink)>,
+    PaneId,
+    PaneCommands,
+)> {
     let mut layout = LayoutNode::Leaf(first_pane);
     let mut sinks: Vec<(PaneId, TerminalSink)> =
         vec![(first_pane, TerminalSink::new(size.cols, size.rows))];
@@ -131,6 +141,7 @@ pub(super) async fn apply_layout_config(
 /// 保存済みレイアウトを再帰的に再構築する。
 ///
 /// `pane_commands` には復元時に送信したコマンドが（新 PaneId をキーとして）蓄積される。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn restore_node(
     def: &LayoutNodeDef,
     current_pane: PaneId,
@@ -142,7 +153,10 @@ pub(super) async fn restore_node(
     pane_commands: &mut PaneCommands,
 ) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>)> {
     match def {
-        LayoutNodeDef::Leaf { id: old_id, command } => {
+        LayoutNodeDef::Leaf {
+            id: old_id,
+            command,
+        } => {
             old_to_new.insert(*old_id, current_pane);
             let sink = TerminalSink::new(size.cols, size.rows);
             if let Some(cmd) = command {

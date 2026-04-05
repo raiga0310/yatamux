@@ -39,6 +39,7 @@
 
 pub mod cell;
 pub mod grid;
+pub mod process;
 pub mod pty;
 pub mod vt;
 pub mod width;

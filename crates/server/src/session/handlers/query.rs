@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use yatamux_protocol::types::{PaneId, PaneInfo};
 use yatamux_protocol::ServerMessage;
 
@@ -33,6 +34,21 @@ impl Server {
             })
             .await
             .context("Failed to send PaneContent")?;
+        Ok(())
+    }
+
+    pub(super) async fn handle_query_all_pane_processes(&mut self) -> Result<()> {
+        let mut commands: HashMap<String, Option<String>> = HashMap::new();
+        for (&pane_id, pane) in &self.panes {
+            let cmd = pane
+                .child_pid
+                .and_then(yatamux_terminal::process::find_active_command);
+            commands.insert(pane_id.0.to_string(), cmd);
+        }
+        self.client_tx
+            .send(ServerMessage::AllPaneProcesses { commands })
+            .await
+            .context("Failed to send AllPaneProcesses")?;
         Ok(())
     }
 

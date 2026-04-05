@@ -2,6 +2,7 @@ use crate::types::{
     PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// `Arc<[u8]>` を `Vec<u8>` と同じワイヤーフォーマットで serde する補助モジュール
@@ -69,6 +70,9 @@ pub enum ClientMessage {
 
     /// セッションを保存してから終了する（セルフアップデート用）
     SaveAndQuit,
+
+    /// 全ペインで実際に動いている子プロセス名を問い合わせる
+    QueryAllPaneProcesses,
 }
 
 /// サーバー → クライアント メッセージ
@@ -139,6 +143,14 @@ pub enum ServerMessage {
 
     /// SaveAndQuit の通知（IPC 経由で SaveAndQuit を受信したときにブリッジへ転送）
     SaveAndQuit,
+
+    /// QueryAllPaneProcesses への応答。各ペインで動いているコマンド名（None = 不明）
+    ///
+    /// JSON シリアライズで HashMap のキーは文字列になるため、
+    /// ペイン ID の raw 値（u32）を文字列キーとして使う。
+    AllPaneProcesses {
+        commands: HashMap<String, Option<String>>,
+    },
 }
 
 // ── テスト ─────────────────────────────────────────────────────────────────────
@@ -164,5 +176,30 @@ mod tests {
         let restored: ServerMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         assert!(matches!(restored, ServerMessage::SaveAndQuit));
+    }
+
+    // QueryAllPaneProcesses のラウンドトリップ
+    #[test]
+    fn test_query_all_pane_processes_roundtrip() {
+        let msg = ClientMessage::QueryAllPaneProcesses;
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        assert!(matches!(restored, ClientMessage::QueryAllPaneProcesses));
+
+        let mut commands = HashMap::new();
+        commands.insert("1".to_string(), Some("claude".to_string()));
+        commands.insert("2".to_string(), None);
+        let msg = ServerMessage::AllPaneProcesses { commands };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ServerMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ServerMessage::AllPaneProcesses { commands } => {
+                assert_eq!(commands.get("1"), Some(&Some("claude".to_string())));
+                assert_eq!(commands.get("2"), Some(&None));
+            }
+            _ => panic!("期待する variant でない"),
+        }
     }
 }

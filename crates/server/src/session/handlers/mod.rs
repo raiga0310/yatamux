@@ -42,6 +42,7 @@ impl Server {
                 let _ = self.client_tx.send(ServerMessage::SaveAndQuit).await;
                 Ok(())
             }
+            ClientMessage::QueryAllPaneProcesses => self.handle_query_all_pane_processes().await,
         }
     }
 

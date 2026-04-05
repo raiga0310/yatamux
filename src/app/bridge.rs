@@ -57,6 +57,9 @@ pub(super) enum BridgeEvent {
         exit_code: Option<i32>,
     },
     SaveAndQuit,
+    AllPaneProcesses {
+        commands: std::collections::HashMap<PaneId, Option<String>>,
+    },
 }
 
 impl BridgeEvent {
@@ -86,6 +89,15 @@ impl BridgeEvent {
                 exit_code: *exit_code,
             }),
             ServerMessage::SaveAndQuit => Some(Self::SaveAndQuit),
+            ServerMessage::AllPaneProcesses { commands } => {
+                // サーバーは PaneId.0 の文字列をキーとして送ってくるため、
+                // パースして PaneId に戻す
+                let parsed = commands
+                    .iter()
+                    .filter_map(|(k, v)| k.parse::<u32>().ok().map(|n| (PaneId(n), v.clone())))
+                    .collect();
+                Some(Self::AllPaneProcesses { commands: parsed })
+            }
             _ => None,
         }
     }
@@ -174,10 +186,33 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
         let mut pending: VecDeque<(PaneId, SplitDirection, TermSize)> = VecDeque::new();
         let mut pending_float = false;
         let mut layout_switch: Option<LayoutPhase> = None;
+        // SaveAndQuit 後に AllPaneProcesses を待っているか
+        let mut waiting_for_processes = false;
+        // SaveAndQuit のタイムアウト用デッドライン
+        let mut processes_deadline: Option<tokio::time::Instant> = None;
 
         loop {
             tokio::select! {
                 biased;
+
+                // SaveAndQuit 後の AllPaneProcesses タイムアウト処理
+                _ = async {
+                    if let Some(dl) = processes_deadline {
+                        tokio::time::sleep_until(dl).await;
+                    } else {
+                        // deadline がなければ永遠に pending（他の arm が先に動く）
+                        std::future::pending::<()>().await;
+                    }
+                }, if waiting_for_processes => {
+                    waiting_for_processes = false;
+                    processes_deadline = None;
+                    let path = yatamux_client::session::LayoutSnapshot::default_path();
+                    {
+                        let store = pane_store.lock().unwrap();
+                        yatamux_client::session::save_session(&store, &path);
+                    }
+                    pane_store.lock().unwrap().should_quit = true;
+                }
 
                 Some(()) = float_rx.recv() => {
                     let floating = pane_store.lock().unwrap().floating;
@@ -380,14 +415,40 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                             notify_if_inactive(&pane_store, &notif_backend, pane, body);
                         }
                         BridgeEvent::SaveAndQuit => {
-                            // セッションを保存してから should_quit フラグを立てる
-                            // WM_TIMER が should_quit を検出して DestroyWindow を呼ぶ
-                            let path = yatamux_client::session::LayoutSnapshot::default_path();
-                            {
-                                let store = pane_store.lock().unwrap();
-                                yatamux_client::session::save_session(&store, &path);
+                            // プロセス名クエリを送信して AllPaneProcesses を待つ
+                            let _ = client_tx
+                                .send(ClientMessage::QueryAllPaneProcesses)
+                                .await;
+                            waiting_for_processes = true;
+                            processes_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(5),
+                            );
+                        }
+                        BridgeEvent::AllPaneProcesses { commands } => {
+                            if waiting_for_processes {
+                                waiting_for_processes = false;
+                                processes_deadline = None;
+                                // pane_commands にまだ登録されていないペインを補完
+                                {
+                                    let mut store = pane_store.lock().unwrap();
+                                    for (pane_id, cmd_opt) in commands {
+                                        if let Some(cmd) = cmd_opt {
+                                            store
+                                                .pane_commands
+                                                .entry(pane_id)
+                                                .or_insert(cmd);
+                                        }
+                                    }
+                                }
+                                let path =
+                                    yatamux_client::session::LayoutSnapshot::default_path();
+                                {
+                                    let store = pane_store.lock().unwrap();
+                                    yatamux_client::session::save_session(&store, &path);
+                                }
+                                pane_store.lock().unwrap().should_quit = true;
                             }
-                            pane_store.lock().unwrap().should_quit = true;
                         }
                     }
                 }

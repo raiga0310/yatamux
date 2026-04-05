@@ -17,6 +17,8 @@ pub struct PtySession {
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// 子プロセス（take_child() で取り出し可能）
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// 子プロセスの PID（spawn 時に取得。take_child() 後も保持する）
+    child_pid: Option<u32>,
 }
 
 impl PtySession {
@@ -83,10 +85,14 @@ impl PtySession {
             .take_writer()
             .context("Failed to take PTY writer")?;
 
+        // PID は take_child() 後も使えるように spawn 時点で保持する
+        let child_pid = child.process_id();
+
         Ok(Self {
             writer,
             master: pair.master,
             child: Some(child),
+            child_pid,
         })
     }
 
@@ -134,6 +140,14 @@ impl PtySession {
     /// 子プロセスが終了しているか確認（非ブロッキング）
     pub fn try_wait(&mut self) -> Option<u32> {
         self.child.as_mut()?.try_wait().ok()?.map(|s| s.exit_code())
+    }
+
+    /// 子プロセスの PID を返す。
+    ///
+    /// `take_child()` 後も保持されるため、子プロセス終了後でも参照できる。
+    /// PID を取得できなかった場合は `None` を返す。
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
     }
 }
 
