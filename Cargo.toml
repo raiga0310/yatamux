@@ -9,6 +9,13 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.16"
+edition = "2021"
+description = "CJK-aware terminal multiplexer for Windows"
+repository = "https://github.com/raiga0310/yatamux"
+license = "MIT"
+
 [workspace.dependencies]
 # IPC / async
 tokio = { version = "1", features = ["full"] }
@@ -72,11 +79,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [package]
 name = "yatamux"
-version = "0.1.16"
-edition = "2021"
-description = "CJK-aware terminal multiplexer for Windows"
-repository = "https://github.com/raiga0310/yatamux"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "yatamux"
