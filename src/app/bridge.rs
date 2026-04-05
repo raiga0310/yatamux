@@ -59,6 +59,7 @@ pub(super) enum BridgeEvent {
     SaveAndQuit,
     AllPaneProcesses {
         commands: std::collections::HashMap<PaneId, Option<String>>,
+        cwds: std::collections::HashMap<PaneId, Option<String>>,
     },
 }
 
@@ -89,14 +90,21 @@ impl BridgeEvent {
                 exit_code: *exit_code,
             }),
             ServerMessage::SaveAndQuit => Some(Self::SaveAndQuit),
-            ServerMessage::AllPaneProcesses { commands } => {
+            ServerMessage::AllPaneProcesses { commands, cwds } => {
                 // サーバーは PaneId.0 の文字列をキーとして送ってくるため、
                 // パースして PaneId に戻す
-                let parsed = commands
+                let parsed_cmds = commands
                     .iter()
                     .filter_map(|(k, v)| k.parse::<u32>().ok().map(|n| (PaneId(n), v.clone())))
                     .collect();
-                Some(Self::AllPaneProcesses { commands: parsed })
+                let parsed_cwds = cwds
+                    .iter()
+                    .filter_map(|(k, v)| k.parse::<u32>().ok().map(|n| (PaneId(n), v.clone())))
+                    .collect();
+                Some(Self::AllPaneProcesses {
+                    commands: parsed_cmds,
+                    cwds: parsed_cwds,
+                })
             }
             _ => None,
         }
@@ -429,11 +437,11 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                     + std::time::Duration::from_secs(5),
                             );
                         }
-                        BridgeEvent::AllPaneProcesses { commands } => {
+                        BridgeEvent::AllPaneProcesses { commands, cwds } => {
                             if waiting_for_processes {
                                 waiting_for_processes = false;
                                 processes_deadline = None;
-                                // pane_commands にまだ登録されていないペインを補完
+                                // pane_commands / pane_cwds にまだ登録されていないペインを補完
                                 {
                                     let mut store = pane_store.lock().unwrap();
                                     for (pane_id, cmd_opt) in commands {
@@ -442,6 +450,14 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                                 .pane_commands
                                                 .entry(pane_id)
                                                 .or_insert(cmd);
+                                        }
+                                    }
+                                    for (pane_id, cwd_opt) in cwds {
+                                        if let Some(cwd) = cwd_opt {
+                                            store
+                                                .pane_cwds
+                                                .entry(pane_id)
+                                                .or_insert(cwd);
                                         }
                                     }
                                 }

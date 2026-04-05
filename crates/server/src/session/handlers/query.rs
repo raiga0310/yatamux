@@ -39,14 +39,20 @@ impl Server {
 
     pub(super) async fn handle_query_all_pane_processes(&mut self) -> Result<()> {
         let mut commands: HashMap<String, Option<String>> = HashMap::new();
+        let mut cwds: HashMap<String, Option<String>> = HashMap::new();
         for (&pane_id, pane) in &self.panes {
+            let key = pane_id.0.to_string();
             let cmd = pane
                 .child_pid
                 .and_then(yatamux_terminal::process::find_active_command);
-            commands.insert(pane_id.0.to_string(), cmd);
+            let cwd = pane
+                .child_pid
+                .and_then(yatamux_terminal::process::find_process_cwd);
+            commands.insert(key.clone(), cmd);
+            cwds.insert(key, cwd);
         }
         self.client_tx
-            .send(ServerMessage::AllPaneProcesses { commands })
+            .send(ServerMessage::AllPaneProcesses { commands, cwds })
             .await
             .context("Failed to send AllPaneProcesses")?;
         Ok(())

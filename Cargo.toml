@@ -44,6 +44,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dwm",
     "Win32_UI_Shell",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
 ] }
 
 # Base64 (OSC 52 クリップボード)

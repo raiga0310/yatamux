@@ -141,6 +141,8 @@ pub struct PaneStore {
     /// レイアウトファイルから適用されたコマンドのみ記録される。
     /// 手動入力したコマンドは含まれない。
     pub pane_commands: HashMap<PaneId, String>,
+    /// ペイン ID → 作業ディレクトリ（SaveAndQuit 時に OS プロセスツリーから取得）
+    pub pane_cwds: HashMap<PaneId, String>,
     /// レイアウト変更フラグ（split / close 後に `true` にする）
     ///
     /// `WM_TIMER` で検出し `content_bb` を破棄して全画面再描画をトリガーする。
@@ -174,6 +176,7 @@ impl PaneStore {
             save_prompt: None,
             theme_launcher: None,
             pane_commands: HashMap::new(),
+            pane_cwds: HashMap::new(),
             layout_changed: false,
             hovered_url: None,
         }

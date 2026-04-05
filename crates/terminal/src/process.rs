@@ -102,6 +102,155 @@ pub fn find_active_command(_parent_pid: u32) -> Option<String> {
     None
 }
 
+/// 指定 PID のプロセスの現在の作業ディレクトリを返す。
+///
+/// NtQueryInformationProcess（ntdll.dll を動的ロード）→ PEB →
+/// ReadProcessMemory で RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath
+/// （offset 0x38、UTF-16 LE）を読み取り、末尾の `\` を除去して返す。
+///
+/// Windows 以外のプラットフォームでは常に `None` を返すスタブ。
+#[cfg(windows)]
+pub fn find_process_cwd(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // NtQueryInformationProcess の関数ポインタ型
+    #[repr(C)]
+    struct ProcessBasicInformation {
+        reserved1: usize,
+        peb_base_address: usize,
+        reserved2: [usize; 2],
+        unique_process_id: usize,
+        reserved3: usize,
+    }
+
+    type NtQueryFn = unsafe extern "system" fn(
+        HANDLE,
+        u32,
+        *mut std::ffi::c_void,
+        u32,
+        *mut u32,
+    ) -> i32;
+
+    let handle = unsafe {
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?
+    };
+
+    let result = (|| -> Option<String> {
+        // ntdll.dll を動的ロードして NtQueryInformationProcess を取得
+        let ntdll =
+            unsafe { LoadLibraryA(windows::core::PCSTR(b"ntdll.dll\0".as_ptr())).ok()? };
+        let fn_ptr = unsafe {
+            GetProcAddress(
+                ntdll,
+                windows::core::PCSTR(b"NtQueryInformationProcess\0".as_ptr()),
+            )?
+        };
+        let nt_query: NtQueryFn = unsafe { std::mem::transmute(fn_ptr) };
+
+        // ProcessBasicInformation (class 0) で PEB アドレスを取得
+        let mut pbi = ProcessBasicInformation {
+            reserved1: 0,
+            peb_base_address: 0,
+            reserved2: [0; 2],
+            unique_process_id: 0,
+            reserved3: 0,
+        };
+        let mut ret_len = 0u32;
+        let status = unsafe {
+            nt_query(
+                handle,
+                0,
+                &mut pbi as *mut _ as *mut _,
+                std::mem::size_of::<ProcessBasicInformation>() as u32,
+                &mut ret_len,
+            )
+        };
+        if status != 0 || pbi.peb_base_address == 0 {
+            return None;
+        }
+        let peb_addr = pbi.peb_base_address as u64;
+
+        // PEB + 0x20 → ProcessParameters ポインタ（64-bit）
+        let mut proc_params_ptr: u64 = 0;
+        unsafe {
+            ReadProcessMemory(
+                handle,
+                (peb_addr + 0x20) as *const _,
+                &mut proc_params_ptr as *mut _ as *mut _,
+                8,
+                None,
+            )
+            .ok()?;
+        }
+        if proc_params_ptr == 0 {
+            return None;
+        }
+
+        // RTL_USER_PROCESS_PARAMETERS + 0x38 → CurrentDirectory.DosPath.Length (u16)
+        let mut length: u16 = 0;
+        unsafe {
+            ReadProcessMemory(
+                handle,
+                (proc_params_ptr + 0x38) as *const _,
+                &mut length as *mut _ as *mut _,
+                2,
+                None,
+            )
+            .ok()?;
+        }
+        if length == 0 {
+            return None;
+        }
+
+        // CurrentDirectory.DosPath.Buffer は UNICODE_STRING の +8 バイト目（64-bit）
+        let mut buffer_ptr: u64 = 0;
+        unsafe {
+            ReadProcessMemory(
+                handle,
+                (proc_params_ptr + 0x38 + 8) as *const _,
+                &mut buffer_ptr as *mut _ as *mut _,
+                8,
+                None,
+            )
+            .ok()?;
+        }
+        if buffer_ptr == 0 {
+            return None;
+        }
+
+        // UTF-16 LE の文字列を読み取る
+        let num_chars = (length / 2) as usize;
+        let mut buf = vec![0u16; num_chars];
+        unsafe {
+            ReadProcessMemory(
+                handle,
+                buffer_ptr as *const _,
+                buf.as_mut_ptr() as *mut _,
+                num_chars * 2,
+                None,
+            )
+            .ok()?;
+        }
+
+        let s = String::from_utf16_lossy(&buf);
+        Some(s.trim_end_matches('\\').to_string())
+    })();
+
+    unsafe { CloseHandle(handle).ok() };
+    result
+}
+
+/// Windows 以外プラットフォーム用スタブ
+#[cfg(not(windows))]
+pub fn find_process_cwd(_pid: u32) -> Option<String> {
+    None
+}
+
 // ── テスト ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
