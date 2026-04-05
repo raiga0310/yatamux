@@ -352,14 +352,14 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
         extract_checksum, need_update, parse_release_info, plan_update_paths, verify_checksum,
     };
 
-    const GITHUB_API_URL: &str = "https://api.github.com/repos/raiga0310/cmux-win/releases/latest";
+    const GITHUB_API_URL: &str = "https://api.github.com/repos/raiga0310/yatamux/releases/latest";
     const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
     eprintln!("現在のバージョン: v{}", CURRENT_VERSION);
     eprintln!("GitHub Releases を確認中...");
 
-    // GitHub API で最新リリース情報を取得
-    let client = reqwest::blocking::Client::builder()
+    // GitHub API で最新リリース情報を取得（async reqwest: tokio ランタイム内で使用）
+    let client = reqwest::Client::builder()
         .user_agent(format!("yatamux/{}", CURRENT_VERSION))
         .build()
         .context("HTTP クライアントの初期化に失敗")?;
@@ -367,14 +367,22 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
     let resp = client
         .get(GITHUB_API_URL)
         .send()
+        .await
         .context("GitHub API への接続に失敗")?;
 
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        eprintln!(
+            "リリースが見つかりません。GitHub にまだリリースが公開されていない可能性があります。"
+        );
+        return Ok(());
+    }
     if !resp.status().is_success() {
         anyhow::bail!("GitHub API エラー: {}", resp.status());
     }
 
     let json = resp
         .text()
+        .await
         .context("GitHub API レスポンスの読み取りに失敗")?;
     let release = parse_release_info(&json).ok_or_else(|| {
         anyhow::anyhow!("リリース情報のパースに失敗（yatamux.exe が見つかりません）")
@@ -393,8 +401,10 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
     let checksums_text = client
         .get(&release.checksum_url)
         .send()
+        .await
         .context("checksums.txt のダウンロードに失敗")?
         .text()
+        .await
         .context("checksums.txt の読み取りに失敗")?;
 
     // yatamux.exe をダウンロード
@@ -402,8 +412,10 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
     let binary = client
         .get(&release.asset_url)
         .send()
+        .await
         .context("バイナリのダウンロードに失敗")?
         .bytes()
+        .await
         .context("バイナリの読み取りに失敗")?;
 
     // SHA256 検証
