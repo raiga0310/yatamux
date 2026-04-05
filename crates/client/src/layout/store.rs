@@ -141,7 +141,7 @@ pub struct PaneStore {
     /// レイアウトファイルから適用されたコマンドのみ記録される。
     /// 手動入力したコマンドは含まれない。
     pub pane_commands: HashMap<PaneId, String>,
-    /// ペイン ID → 作業ディレクトリ（SaveAndQuit 時に OS プロセスツリーから取得）
+    /// ペイン ID → セッション保存時の作業ディレクトリ（SaveAndQuit 時に収集）
     pub pane_cwds: HashMap<PaneId, String>,
     /// レイアウト変更フラグ（split / close 後に `true` にする）
     ///

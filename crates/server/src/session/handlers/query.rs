@@ -45,10 +45,11 @@ impl Server {
             let cmd = pane
                 .child_pid
                 .and_then(yatamux_terminal::process::find_active_command);
+            commands.insert(key.clone(), cmd);
+            // child_pid (cmd.exe 等) の cwd を取得する
             let cwd = pane
                 .child_pid
                 .and_then(yatamux_terminal::process::find_process_cwd);
-            commands.insert(key.clone(), cmd);
             cwds.insert(key, cwd);
         }
         self.client_tx

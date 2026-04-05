@@ -1,0 +1,4 @@
+cargo:rustc-link-arg=/MANIFEST:EMBED
+cargo:rustc-link-arg=/MANIFESTINPUT:C:\Users\raiga\dev\cmux-win\.claude\worktrees\great-einstein/manifest.xml
+cargo:rerun-if-changed=manifest.xml
+cargo:rerun-if-changed=build.rs

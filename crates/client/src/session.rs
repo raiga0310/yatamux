@@ -25,7 +25,7 @@ pub enum LayoutNodeDef {
         /// 復元時に自動実行するコマンド（layout.toml や layout switch 経由で設定された場合のみ）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
-        /// 復元時に移動する作業ディレクトリ（SaveAndQuit 時に OS プロセスツリーから取得）
+        /// セッション保存時の作業ディレクトリ（復元時に CD してから command を実行する）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
@@ -93,7 +93,7 @@ pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
 }
 
 impl LayoutNodeDef {
-    /// `pane_commands` と `pane_cwds` を参照しながら変換する。各 Leaf にコマンドと cwd を埋め込む。
+    /// `pane_commands` / `pane_cwds` を参照しながら変換する。各 Leaf にコマンドと cwd を埋め込む。
     pub fn from_with_commands(
         node: &LayoutNode,
         cmds: &HashMap<PaneId, String>,
