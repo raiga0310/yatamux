@@ -351,21 +351,26 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
         // Windows: WaitForSingleObject でプロセス終了を待つ
         #[cfg(windows)]
         {
-            use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+            use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
             use windows::Win32::System::Threading::{
                 OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
             };
 
-            let handle: HANDLE = unsafe {
-                OpenProcess(PROCESS_SYNCHRONIZE, false, pid).context("OpenProcess に失敗")?
-            };
-            // 30秒タイムアウト
-            let result = unsafe { WaitForSingleObject(handle, 30_000) };
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-            if result != WAIT_OBJECT_0 {
-                anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid);
+            match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+                Ok(handle) => {
+                    // 30秒タイムアウト
+                    let result = unsafe { WaitForSingleObject(handle, 30_000) };
+                    unsafe {
+                        let _ = CloseHandle(handle);
+                    }
+                    if result != WAIT_OBJECT_0 {
+                        anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid);
+                    }
+                }
+                Err(_) => {
+                    // プロセスがすでに終了していた場合はそのまま続行
+                    eprintln!("PID {} はすでに終了しています。リネームを続行します。", pid);
+                }
             }
         }
 

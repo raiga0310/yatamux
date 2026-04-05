@@ -466,28 +466,22 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
             eprintln!("アップデートヘルパーを起動しました。このプロセスを終了します。");
         }
         Err(_) => {
-            // GUI が起動していない → 直接 rename してそのまま終了（新ウィンドウは開かない）
-            eprintln!("実行中の yatamux インスタンスが見つかりません。バイナリを直接置換します。");
-            let (_, bak_path) = plan_update_paths(&exe);
-            if bak_path.exists() {
-                std::fs::remove_file(&bak_path)
-                    .with_context(|| format!("古い .bak の削除に失敗: {}", bak_path.display()))?;
-            }
-            std::fs::rename(&exe, &bak_path).with_context(|| {
-                format!(
-                    "exe → .bak リネームに失敗: {} → {}",
-                    exe.display(),
-                    bak_path.display()
-                )
-            })?;
-            std::fs::rename(&new_path, &exe).with_context(|| {
-                format!(
-                    ".new → exe リネームに失敗: {} → {}",
-                    new_path.display(),
-                    exe.display()
-                )
-            })?;
-            eprintln!("バイナリ置換完了。次回起動時から新バージョンになります。");
+            // GUI が起動していない → ヘルパーを起動して自プロセス終了後に rename させる
+            // （Windows では実行中の exe を rename できないため self PID を渡して待機）
+            eprintln!(
+                "実行中の yatamux インスタンスが見つかりません。ヘルパーでバイナリを置換します。"
+            );
+            let self_pid = std::process::id();
+            std::process::Command::new(&exe)
+                .args([
+                    "--apply-update",
+                    &self_pid.to_string(),
+                    &new_path.to_string_lossy(),
+                    // --launch なし: 新ウィンドウは開かない
+                ])
+                .spawn()
+                .context("アップデートヘルパーの起動に失敗")?;
+            eprintln!("ヘルパーを起動しました。このプロセスを終了します。");
         }
     }
     Ok(())
