@@ -37,25 +37,29 @@ just fmt          # rustfmt
 外部 CLI・エージェント向けに Named Pipe IPC サーバー（`\\.\pipe\yatamux-{session}`）も常時起動する。
 
 ```
-src/main.rs          エントリポイント。tokio::main。clap で引数解析し AppConfig を読み込んで app::run() へ渡す。
-                     サブコマンド（list-panes / send-keys / capture-pane / split-pane / layout）は src/cli.rs へ委譲。
-src/app.rs           起動オーケストレーション。
-                     ① Server を起動（server_out_tx → fan_out タスク → GUI/IPC へ配信）
-                     ② IPC サーバーを起動（外部 CLI 接続受け付け）
-                     ③ Workspace → Surface → 初期 Pane を作成
-                     ④ セッション復元 / --layout 設定 / 初期ペインのみ の3パスで起動
-                     ⑤ tokio::select! ループ（出力ルーティング＋ペイン分割＋フローティング
-                        ＋フック発火＋通知ルーティング＋レイアウト切り替え）
-                     ⑥ spawn_blocking で Win32 メッセージループを起動
-src/cli.rs           IPC 経由 CLI サブコマンド実装。
-                     `list-panes --json`、`send-keys --raw/--enter/--wait-for-prompt`、
-                     `capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete` を提供。
-src/config.rs        AppConfig / HooksConfig / AppearanceConfig。%APPDATA%\yatamux\config.toml から読み込む。
-                     on_pane_created / on_pane_closed フックを cmd.exe /C で非同期発火。
-                     `parse_hex_color(s)` で `"#rrggbb"` → `(u8,u8,u8)` 変換。
-                     `AppearanceConfig` は `[appearance]` セクション（font_family / font_size /
-                     background / foreground / cursor / selection_bg / status_bar_bg）。
-src/layout_config.rs 宣言的レイアウト設定。%APPDATA%\yatamux\layouts\<name>.toml から読み込む。
+src/main.rs               エントリポイント。tokio::main。clap で引数解析し AppConfig を読み込んで app::run() へ渡す。
+                          サブコマンド（list-panes / send-keys / capture-pane / split-pane / layout / update）は src/cli.rs へ委譲。
+                          `--apply-update <PID> <NEW_PATH> [--launch]` 内部ヘルパーモードも実装（セルフアップデート）。
+src/app.rs                起動オーケストレーション。bootstrap → load_initial_layout → PaneStore 構築 → run_window 起動。
+src/app/bootstrap.rs      Server・IPC サーバー・チャネルの初期化。`BootstrapHandles` を返す。
+src/app/bridge.rs         fan_out タスクと ServerBridge タスクの定義。
+                          `BridgeEvent` で Server → GUI 間のイベントを型付け。
+                          SaveAndQuit ハンドラ: QueryAllPaneProcesses → AllPaneProcesses 待機（5s timeout）
+                          → pane_commands 補完 → save_session() の非同期フロー。
+src/app/layout_restore.rs 起動時レイアウト決定。`load_initial_layout()` がセッション復元 / layout.toml 適用 / 初期ペインのみ
+                          の3パスを担当。`restore_node()` で session.toml を再帰的に再構築。
+src/app/layout_switch.rs  実行中のレイアウト切り替えフェーズ管理（LayoutPhase ステートマシン）。
+src/cli.rs                IPC 経由 CLI サブコマンド実装。
+                          `list-panes --json`、`send-keys --raw/--enter/--wait-for-prompt`、
+                          `capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete`、`update` を提供。
+src/update.rs             セルフアップデートのロジック（バージョン比較・JSON パース・SHA256 検証・パス導出）。
+                          HTTP 通信・IPC 送信・プロセス起動は src/cli.rs の `update()` が担当。
+src/config.rs             AppConfig / HooksConfig / AppearanceConfig。%APPDATA%\yatamux\config.toml から読み込む。
+                          on_pane_created / on_pane_closed フックを cmd.exe /C で非同期発火。
+                          `parse_hex_color(s)` で `"#rrggbb"` → `(u8,u8,u8)` 変換。
+                          `AppearanceConfig` は `[appearance]` セクション（font_family / font_size /
+                          background / foreground / cursor / selection_bg / status_bar_bg）。
+src/layout_config.rs      宣言的レイアウト設定。%APPDATA%\yatamux\layouts\<name>.toml から読み込む。
 ```
 
 ### チャネル構成
@@ -78,13 +82,14 @@ src/layout_config.rs 宣言的レイアウト設定。%APPDATA%\yatamux\layouts\
 - `Grid`: 仮想スクリーンバッファ。`dirty: Vec<bool>` で差分描画フラグを管理。オルタネートスクリーンは `saved_main: Option<MainScreenSnapshot>` で実装。
 - `VtProcessor`: `vte::Perform` 実装。パース結果を `Grid` メソッド呼び出しに変換。OSC 52 受信時は `clipboard_data: Option<Vec<u8>>` にデコード済みバイト列を格納。
 - `TerminalSink`: `Grid + vte::Parser` をまとめたラッパー。`feed(&[u8]) -> Option<Vec<u8>>` で VT バイト列を受け取りグリッドを更新。OSC 52 が含まれていた場合のみ `Some(decoded)` を返す。
-- `PtySession`: `portable-pty` ラッパー。ConPTY を起動し PTY 読み書きを管理。`write()` は `write_all` 後に `flush()` を呼ぶ（Ctrl+C 即時到達のため）。`clone_child_killer()` で `Drop` 時の子プロセス kill 用ハンドルを取得できる。
+- `PtySession`: `portable-pty` ラッパー。ConPTY を起動し PTY 読み書きを管理。`write()` は `write_all` 後に `flush()` を呼ぶ（Ctrl+C 即時到達のため）。`clone_child_killer()` で `Drop` 時の子プロセス kill 用ハンドルを取得できる。`child_pid: Option<u32>` を spawn 時に記録し、`child_pid()` で参照できる。
+- `process.rs`: `find_active_command(parent_pid) -> Option<String>`。`CreateToolhelp32Snapshot + Process32First/Next` でプロセスツリーを BFS 走査し、既知シェル（cmd/powershell/pwsh/bash/sh）を除いた最初の孫プロセス名を返す。Windows 以外は常に `None` のスタブ。
 - `CjkWidthConfig`: East Asian Ambiguous 幅の設定。ConPTY のカーソル位置を信用せずこちらで計算する。
 
 **`yatamux-server`** — ペイン・セッション管理
 - `Server::run()`: tokio `select!` で `ClientMessage` 受信とペイン出力転送を並行処理。
 - 階層: `Workspace` → `Surface`（タブ）→ `PaneTree`（二分木）→ `Pane`
-- `Pane::spawn()`: tokio タスクを2つ起動（PTY 読み取り・書き込み）。読み取り側は VT パース後 `Grid` を更新し、生バイト列を `pane_output_tx` へも転送する。`Drop` 時に `child_killer.kill()` を呼んで cmd.exe を終了させる（孤児プロセス防止）。
+- `Pane::spawn()`: tokio タスクを2つ起動（PTY 読み取り・書き込み）。読み取り側は VT パース後 `Grid` を更新し、生バイト列を `pane_output_tx` へも転送する。`Drop` 時に `child_killer.kill()` を呼んで cmd.exe を終了させる（孤児プロセス防止）。`child_pid: Option<u32>` フィールドで ConPTY 直接子プロセスの PID を保持する（`QueryAllPaneProcesses` ハンドラが参照）。
 - `PaneEvent` は `pane.rs` ↔ `session.rs` 間の内部イベント型。旧 stringly typed 制御メッセージの代わりに `Notification(String)` / `Bell` / `ProcessExited` / `CommandFinished(Option<i32>)` を流す。
 - `Pane.title` / `Pane.size` は `std::sync::Mutex`（`tokio::sync::Mutex` にすると `handle_client_message` 内でデッドロックするため。`docs/troubleshoot.md` T-01 参照）。
 - `PaneTree` は `server/src/session.rs` 内のローカル型（`yatamux-client` の `LayoutNode` とは別物）。
@@ -98,9 +103,9 @@ src/layout_config.rs 宣言的レイアウト設定。%APPDATA%\yatamux\layouts\
 - `Ctrl+F` で `float_tx` 経由のフローティングペイン切り替え。`WM_LBUTTONDOWN` でクリック座標からペインを特定してフォーカス移動。`WM_MOUSEWHEEL` で `scroll_offset` を増減。
 - `ClientState`: `Arc<Mutex<PaneStore>>` を中心に持つ。Win32 スレッドと tokio タスクが共有。`active_toasts: Mutex<Vec<Toast>>` でアニメーション中のトーストを管理。テーマは `theme: std::cell::Cell<WinTheme>`（`WinTheme` は `#[derive(Copy,Clone)]`）で保持し、ランタイムに `state.theme.set(new_theme)` で切り替える。フォント変更は再起動が必要。
 - `close_active_pane()`: ペイン数に関わらず常に `ClosePane` を送信する（最後の1ペインも同様）。`app.rs` の `PaneClosed` ハンドラが `grids.is_empty()` を検出して `should_quit = true` → `WM_TIMER` → `DestroyWindow` でアプリを終了させる（C-9 経路）。
-- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>`、`save_prompt: Option<String>`、`normal_selection: Option<(usize,usize,usize,usize)>`、`should_quit: bool`、`pane_commands: HashMap<PaneId, String>` を持つ。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
+- `layout.rs`: クライアント側レイアウトツリー（`LayoutNode`）と `PaneStore`。`compute_rects()` でペインのピクセル矩形を計算。`PaneStore` は `pending_clipboard: Option<Vec<u8>>`、`pending_toasts: VecDeque<Toast>`、`scroll_offset: usize`、`floating: Option<PaneId>`、`floating_visible: bool`、`launcher: Option<LauncherState>`、`theme_launcher: Option<ThemeLauncherState>`、`copy_mode: Option<CopyState>`、`save_prompt: Option<String>`、`normal_selection: Option<(usize,usize,usize,usize)>`、`should_quit: bool`、`pane_commands: HashMap<PaneId, String>` を持つ。`pane_commands` はレイアウト設定経由で起動したペインに設定されるほか、SaveAndQuit 時に OS のプロセスツリー走査で自動補完される。`list_available_themes()` / `load_theme_from_file(name)` でテーマ TOML を読み込む。
 - ランチャー / テーマランチャー / 保存プロンプトの描画は、lock 解放を早めるために render snapshot struct を組み立ててから描画する。
-- `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。
+- `session.rs`: `LayoutSnapshot` を `%APPDATA%\yatamux\session.toml` に保存・読み込みする。`LayoutNodeDef` は serde 可能な `LayoutNode` の鏡像型。`normalize_command_for_restore(cmd)` が保存時に既知ツールのコマンドを変換する（`claude` → `claude --continue`、`codex` → `codex resume --last`）。
 - `ime.rs`: `WM_IME_*` ハンドラと候補ウィンドウ管理。
 
 #### WM_KEYDOWN キー処理アーキテクチャ（A-1）
@@ -126,6 +131,8 @@ dispatch_wm_keydown(state, hwnd, &KeyInput { vk, ctrl, shift, wparam, lparam })
 - `ServerMessage::Output.data` は `Arc<[u8]>` 型（ファンアウト時のコピーレス配信のため）。
 - `ServerMessage::Notification { pane, body }`: OSC 9/99/777、BEL（`\x07`）、PTY 終了時などに発火。`app.rs` がバックグラウンドペインからの通知を `pending_toasts` に変換する。
 - `ServerMessage::PaneContent.capture` は `Option<PaneCapture>`。`yatamux capture-pane --json` がこれを整形して出力する。
+- `ClientMessage::SaveAndQuit`: IPC 経由で送信するとセッション保存 + 終了フローを起動。
+- `ClientMessage::QueryAllPaneProcesses` / `ServerMessage::AllPaneProcesses { commands: HashMap<String, Option<String>> }`: SaveAndQuit フロー内で実行中プロセス名を取得するために使用。
 
 ### レンダリングの仕組み
 
@@ -220,7 +227,7 @@ just lint && just test && just fmt
 
 `task.md` はタスク一覧の入口。
 未完了タスクの詳細は `docs/tasks/active.md` と `docs/tasks/refactor.md` を参照し、
-完了済みの履歴は `docs/tasks/archive-2026-03-30.md` に退避している。
+完了済みの履歴は `docs/tasks/archive-2026-03-30.md` / `docs/tasks/archive-2026-04-04.md` に退避している。
 
 ## docs/troubleshoot.md
 
