@@ -11,6 +11,8 @@ use yatamux_protocol::{ClientMessage, ServerMessage};
 pub struct ServerConnection {
     pub tx: mpsc::Sender<ClientMessage>,
     pub rx: mpsc::Receiver<ServerMessage>,
+    /// 接続先サーバー（yatamux GUI）のプロセス ID
+    pub server_pid: u32,
 }
 
 impl ServerConnection {
@@ -18,12 +20,24 @@ impl ServerConnection {
     pub async fn connect(session: &str) -> Result<Self> {
         #[cfg(windows)]
         {
+            use std::os::windows::io::AsRawHandle;
             use tokio::net::windows::named_pipe::ClientOptions;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 
             let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
             let pipe = ClientOptions::new()
                 .open(&pipe_name)
                 .with_context(|| format!("Failed to connect to named pipe: {}", pipe_name))?;
+
+            // GUI プロセスの PID を取得（バイナリ置換の待機に使う）
+            let server_pid = {
+                let handle = HANDLE(pipe.as_raw_handle() as _);
+                let mut pid = 0u32;
+                unsafe { GetNamedPipeServerProcessId(handle, &mut pid) }
+                    .context("GetNamedPipeServerProcessId に失敗")?;
+                pid
+            };
 
             let (reader, mut writer) = tokio::io::split(pipe);
             let mut lines = BufReader::new(reader).lines();
@@ -57,6 +71,7 @@ impl ServerConnection {
             Ok(Self {
                 tx: client_tx,
                 rx: server_rx,
+                server_pid,
             })
         }
 

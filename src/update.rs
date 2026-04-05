@@ -18,6 +18,8 @@ pub struct ReleaseInfo {
     pub asset_url: String,
     /// `checksums.txt` アセットのダウンロード URL
     pub checksum_url: String,
+    /// リリース公開日時（ISO 8601、例: `2026-04-05T09:00:00Z`）
+    pub published_at: Option<String>,
 }
 
 /// バージョン文字列をパースして `(major, minor, patch)` を返す。
@@ -52,6 +54,7 @@ pub fn need_update(current: &str, latest: &str) -> bool {
 pub fn parse_release_info(json: &str) -> Option<ReleaseInfo> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let tag_name = v["tag_name"].as_str()?.to_string();
+    let published_at = v["published_at"].as_str().map(|s| s.to_string());
     let assets = v["assets"].as_array()?;
 
     let mut asset_url: Option<String> = None;
@@ -71,6 +74,7 @@ pub fn parse_release_info(json: &str) -> Option<ReleaseInfo> {
         tag_name,
         asset_url: asset_url?,
         checksum_url: checksum_url?,
+        published_at,
     })
 }
 
@@ -163,6 +167,7 @@ mod tests {
     fn test_parse_release_info_normal() {
         let json = r#"{
             "tag_name": "v0.2.0",
+            "published_at": "2026-04-05T09:00:00Z",
             "assets": [
                 {
                     "name": "yatamux.exe",
@@ -178,6 +183,7 @@ mod tests {
         assert_eq!(info.tag_name, "v0.2.0");
         assert_eq!(info.asset_url, "https://example.com/yatamux.exe");
         assert_eq!(info.checksum_url, "https://example.com/checksums.txt");
+        assert_eq!(info.published_at.as_deref(), Some("2026-04-05T09:00:00Z"));
     }
 
     #[test]

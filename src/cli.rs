@@ -388,7 +388,13 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
         anyhow::anyhow!("リリース情報のパースに失敗（yatamux.exe が見つかりません）")
     })?;
 
-    eprintln!("最新バージョン: {}", release.tag_name);
+    // 日時を "2026-04-05T09:12:25Z" → "2026-04-05 09:12 UTC" に整形
+    let published = release
+        .published_at
+        .as_deref()
+        .map(|s| s.replace('T', " ").trim_end_matches('Z').trim().to_string() + " UTC")
+        .unwrap_or_else(|| "不明".to_string());
+    eprintln!("最新バージョン: {} （{}）", release.tag_name, published);
 
     if !need_update(CURRENT_VERSION, &release.tag_name) {
         eprintln!("すでに最新バージョンです。");
@@ -432,37 +438,58 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
         .with_context(|| format!("バイナリの書き込みに失敗: {}", new_path.display()))?;
     eprintln!("バイナリを書き込みました: {}", new_path.display());
 
-    // 現在のプロセス ID を取得
-    let current_pid = std::process::id();
-
     // IPC 経由で SaveAndQuit を送信（yatamux GUI が起動中の場合）
     match yatamux_client::connection::ServerConnection::connect(session).await {
         Ok(conn) => {
-            eprintln!("yatamux インスタンスに SaveAndQuit を送信中...");
+            // GUI の PID を取得（バイナリ置換前に GUI の終了を待つため）
+            let gui_pid = conn.server_pid;
+            eprintln!(
+                "yatamux インスタンス（PID {}）に SaveAndQuit を送信中...",
+                gui_pid
+            );
             let _ = conn
                 .tx
                 .send(yatamux_protocol::ClientMessage::SaveAndQuit)
                 .await;
-            // 接続が切れるまで少し待つ
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // --apply-update ヘルパーを起動（GUI PID 待機 + 置換後に新インスタンスを起動）
+            eprintln!("アップデートヘルパーを起動中...");
+            std::process::Command::new(&exe)
+                .args([
+                    "--apply-update",
+                    &gui_pid.to_string(),
+                    &new_path.to_string_lossy(),
+                    "--launch",
+                ])
+                .spawn()
+                .context("アップデートヘルパーの起動に失敗")?;
+            eprintln!("アップデートヘルパーを起動しました。このプロセスを終了します。");
         }
         Err(_) => {
-            eprintln!("実行中の yatamux インスタンスが見つかりません（直接置換します）");
+            // GUI が起動していない → 直接 rename してそのまま終了（新ウィンドウは開かない）
+            eprintln!("実行中の yatamux インスタンスが見つかりません。バイナリを直接置換します。");
+            let (_, bak_path) = plan_update_paths(&exe);
+            if bak_path.exists() {
+                std::fs::remove_file(&bak_path)
+                    .with_context(|| format!("古い .bak の削除に失敗: {}", bak_path.display()))?;
+            }
+            std::fs::rename(&exe, &bak_path).with_context(|| {
+                format!(
+                    "exe → .bak リネームに失敗: {} → {}",
+                    exe.display(),
+                    bak_path.display()
+                )
+            })?;
+            std::fs::rename(&new_path, &exe).with_context(|| {
+                format!(
+                    ".new → exe リネームに失敗: {} → {}",
+                    new_path.display(),
+                    exe.display()
+                )
+            })?;
+            eprintln!("バイナリ置換完了。次回起動時から新バージョンになります。");
         }
     }
-
-    // --apply-update ヘルパーを起動
-    eprintln!("アップデートヘルパーを起動中...");
-    std::process::Command::new(&exe)
-        .args([
-            "--apply-update",
-            &current_pid.to_string(),
-            &new_path.to_string_lossy(),
-        ])
-        .spawn()
-        .context("アップデートヘルパーの起動に失敗")?;
-
-    eprintln!("アップデートヘルパーを起動しました。このプロセスを終了します。");
     Ok(())
 }
 

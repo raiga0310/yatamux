@@ -139,10 +139,14 @@ struct Cli {
 
     /// 内部ヘルパーモード: 指定 PID の終了を待ってバイナリ置換を行う
     ///
-    /// 使用法: --apply-update <PID> <NEW_EXE_PATH>
+    /// 使用法: --apply-update <PID> <NEW_EXE_PATH> [--launch]
     /// このオプションはセルフアップデート処理から内部的に使用される。
     #[arg(long, value_names = ["PID", "NEW_PATH"], num_args = 2, hide = true)]
     apply_update: Option<Vec<String>>,
+
+    /// --apply-update と組み合わせて使用: 置換後に新しいインスタンスを起動する
+    #[arg(long, hide = true)]
+    launch: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -278,13 +282,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // --apply-update <pid> <new_path> モード
+    // --apply-update <pid> <new_path> [--launch] モード
     if let Some(args) = cli.apply_update {
         let pid: u32 = args[0]
             .parse()
             .map_err(|_| anyhow::anyhow!("無効な PID: {}", args[0]))?;
         let new_path = std::path::PathBuf::from(&args[1]);
-        return apply_update(pid, &new_path).await;
+        return apply_update(pid, &new_path, cli.launch).await;
     }
 
     match cli.command {
@@ -329,54 +333,54 @@ async fn main() -> Result<()> {
     }
 }
 
-/// `--apply-update <pid> <new_path>` ヘルパーモード
+/// `--apply-update <pid> <new_path> [--launch]` ヘルパーモード
 ///
-/// 1. 指定 PID のプロセス終了を待つ
+/// 1. 指定 PID のプロセス終了を待つ（pid=0 の場合はスキップ）
 /// 2. `<exe>` を `<exe>.bak` にリネーム
 /// 3. `<new_path>` を `<exe>` にリネーム
-/// 4. 新しい exe を起動
-async fn apply_update(pid: u32, new_path: &std::path::Path) -> anyhow::Result<()> {
+/// 4. `--launch` が指定されている場合のみ新しい exe を起動
+async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> anyhow::Result<()> {
     use anyhow::Context;
 
     let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
     let (_, bak_path) = update::plan_update_paths(&exe);
 
-    eprintln!("PID {} の終了を待機中...", pid);
+    if pid != 0 {
+        eprintln!("PID {} の終了を待機中...", pid);
 
-    // Windows: WaitForSingleObject でプロセス終了を待つ
-    #[cfg(windows)]
-    {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-        use windows::Win32::System::Threading::{
-            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-        };
+        // Windows: WaitForSingleObject でプロセス終了を待つ
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+            use windows::Win32::System::Threading::{
+                OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+            };
 
-        let handle: HANDLE = unsafe {
-            OpenProcess(PROCESS_SYNCHRONIZE, false, pid).context("OpenProcess に失敗")?
-        };
-        // 30秒タイムアウト
-        let result = unsafe { WaitForSingleObject(handle, 30_000) };
-        unsafe {
-            let _ = CloseHandle(handle);
-        }
-        if result != WAIT_OBJECT_0 {
-            anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid);
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        // 非 Windows: 簡易的にポーリング
-        for _ in 0..60 {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            // /proc/<pid> が存在しなければ終了とみなす
-            if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                break;
+            let handle: HANDLE = unsafe {
+                OpenProcess(PROCESS_SYNCHRONIZE, false, pid).context("OpenProcess に失敗")?
+            };
+            // 30秒タイムアウト
+            let result = unsafe { WaitForSingleObject(handle, 30_000) };
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            if result != WAIT_OBJECT_0 {
+                anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid);
             }
         }
-    }
 
-    eprintln!("PID {} が終了しました。バイナリを置換します。", pid);
+        #[cfg(not(windows))]
+        {
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                    break;
+                }
+            }
+        }
+
+        eprintln!("PID {} が終了しました。バイナリを置換します。", pid);
+    }
 
     // 既存の .bak を削除（存在する場合）
     if bak_path.exists() {
@@ -402,12 +406,14 @@ async fn apply_update(pid: u32, new_path: &std::path::Path) -> anyhow::Result<()
         )
     })?;
 
-    eprintln!("バイナリ置換完了。新しいインスタンスを起動します。");
-
-    // 新しい exe を起動
-    update::build_launch_command(&exe)
-        .spawn()
-        .context("新しい yatamux の起動に失敗")?;
+    if launch {
+        eprintln!("バイナリ置換完了。新しいインスタンスを起動します。");
+        update::build_launch_command(&exe)
+            .spawn()
+            .context("新しい yatamux の起動に失敗")?;
+    } else {
+        eprintln!("バイナリ置換完了。");
+    }
 
     Ok(())
 }
