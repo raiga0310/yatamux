@@ -124,6 +124,7 @@ mod app;
 mod cli;
 mod config;
 mod layout_config;
+mod update;
 
 /// デフォルトセッション名（IPC パイプ名のサフィックス）
 pub const DEFAULT_SESSION: &str = "default";
@@ -135,6 +136,13 @@ struct Cli {
     /// 起動時に適用するレイアウト名（%APPDATA%\yatamux\layouts\<NAME>.toml）
     #[arg(long, value_name = "NAME")]
     layout: Option<String>,
+
+    /// 内部ヘルパーモード: 指定 PID の終了を待ってバイナリ置換を行う
+    ///
+    /// 使用法: --apply-update <PID> <NEW_EXE_PATH>
+    /// このオプションはセルフアップデート処理から内部的に使用される。
+    #[arg(long, value_names = ["PID", "NEW_PATH"], num_args = 2, hide = true)]
+    apply_update: Option<Vec<String>>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -211,6 +219,9 @@ enum Commands {
     ///   yatamux layout export my-project
     #[command(verbatim_doc_comment, subcommand)]
     Layout(LayoutCommands),
+
+    /// GitHub Releases から最新バイナリを取得してセルフアップデートする（C-38）
+    Update,
 }
 
 /// `yatamux layout` のサブコマンド
@@ -267,6 +278,15 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // --apply-update <pid> <new_path> モード
+    if let Some(args) = cli.apply_update {
+        let pid: u32 = args[0]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("無効な PID: {}", args[0]))?;
+        let new_path = std::path::PathBuf::from(&args[1]);
+        return apply_update(pid, &new_path).await;
+    }
+
     match cli.command {
         Some(Commands::ListPanes { json }) => cli::list_panes(DEFAULT_SESSION, json).await,
         Some(Commands::SendKeys {
@@ -300,12 +320,96 @@ async fn main() -> Result<()> {
             LayoutCommands::Delete { name } => cli::layout_delete(&name).await,
             LayoutCommands::Export { name } => cli::layout_export(&name).await,
         },
+        Some(Commands::Update) => cli::update(DEFAULT_SESSION).await,
         None => {
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
             app::run(cli.layout, app_config).await
         }
     }
+}
+
+/// `--apply-update <pid> <new_path>` ヘルパーモード
+///
+/// 1. 指定 PID のプロセス終了を待つ
+/// 2. `<exe>` を `<exe>.bak` にリネーム
+/// 3. `<new_path>` を `<exe>` にリネーム
+/// 4. 新しい exe を起動
+async fn apply_update(pid: u32, new_path: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
+    let (_, bak_path) = update::plan_update_paths(&exe);
+
+    eprintln!("PID {} の終了を待機中...", pid);
+
+    // Windows: WaitForSingleObject でプロセス終了を待つ
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        let handle: HANDLE = unsafe {
+            OpenProcess(PROCESS_SYNCHRONIZE, false, pid).context("OpenProcess に失敗")?
+        };
+        // 30秒タイムアウト
+        let result = unsafe { WaitForSingleObject(handle, 30_000) };
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if result != WAIT_OBJECT_0 {
+            anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // 非 Windows: 簡易的にポーリング
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // /proc/<pid> が存在しなければ終了とみなす
+            if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                break;
+            }
+        }
+    }
+
+    eprintln!("PID {} が終了しました。バイナリを置換します。", pid);
+
+    // 既存の .bak を削除（存在する場合）
+    if bak_path.exists() {
+        std::fs::remove_file(&bak_path)
+            .with_context(|| format!("古い .bak の削除に失敗: {}", bak_path.display()))?;
+    }
+
+    // exe → exe.bak
+    std::fs::rename(&exe, &bak_path).with_context(|| {
+        format!(
+            "exe → .bak リネームに失敗: {} → {}",
+            exe.display(),
+            bak_path.display()
+        )
+    })?;
+
+    // new_path → exe
+    std::fs::rename(new_path, &exe).with_context(|| {
+        format!(
+            ".new → exe リネームに失敗: {} → {}",
+            new_path.display(),
+            exe.display()
+        )
+    })?;
+
+    eprintln!("バイナリ置換完了。新しいインスタンスを起動します。");
+
+    // 新しい exe を起動
+    update::build_launch_command(&exe)
+        .spawn()
+        .context("新しい yatamux の起動に失敗")?;
+
+    Ok(())
 }
 
 #[cfg(test)]

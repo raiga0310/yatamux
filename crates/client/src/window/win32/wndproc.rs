@@ -206,8 +206,8 @@ unsafe fn handle_wm_size(state_ptr: *mut ClientState, lparam: LPARAM) -> LRESULT
                 h: content_h,
             });
             state.resize_all_panes(content_w, content_h);
-        // バックバッファを無効化（次の WM_PAINT で再作成される）
-        state.content_bb.set(None);
+            // バックバッファを無効化（次の WM_PAINT で再作成される）
+            state.content_bb.set(None);
         }
     }
     LRESULT(0)
@@ -485,14 +485,8 @@ unsafe fn handle_wm_close(state_ptr: *mut ClientState, hwnd: HWND) -> LRESULT {
     if !state_ptr.is_null() {
         let state = &*state_ptr;
         let store = state.panes.lock().unwrap();
-        let snap = crate::session::LayoutSnapshot {
-            root: crate::session::LayoutNodeDef::from(&store.layout),
-            active: store.active,
-        };
         let path = crate::session::LayoutSnapshot::default_path();
-        if let Err(e) = snap.save(&path) {
-            tracing::warn!("セッション保存に失敗: {}", e);
-        }
+        crate::session::save_session(&store, &path);
     }
     DestroyWindow(hwnd).ok();
     LRESULT(0)

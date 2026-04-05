@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use yatamux_protocol::types::{PaneId, SplitDirection};
 
-use crate::layout::LayoutNode;
+use crate::layout::{LayoutNode, PaneStore};
 
 /// シリアライズ可能なレイアウトノード（グリッドを含まない）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +52,19 @@ impl From<&LayoutNode> for LayoutNodeDef {
                 second: Box::new(LayoutNodeDef::from(second.as_ref())),
             },
         }
+    }
+}
+
+/// `PaneStore` の現在状態を `session.toml` に保存する。
+///
+/// `WM_CLOSE` および `SaveAndQuit` の両方から呼ばれる共通関数。
+pub fn save_session(store: &PaneStore, path: &std::path::Path) {
+    let snap = LayoutSnapshot {
+        root: LayoutNodeDef::from(&store.layout),
+        active: store.active,
+    };
+    if let Err(e) = snap.save(path) {
+        tracing::warn!("セッション保存に失敗: {}", e);
     }
 }
 
@@ -191,6 +204,33 @@ mod tests {
             }
             _ => panic!("Expected Split variant"),
         }
+    }
+
+    // TC-07: save_session 関数のテスト（PaneStore → session.toml）
+    #[test]
+    fn test_save_session_writes_file() {
+        use crate::layout::PaneStore;
+        use std::sync::{Arc, Mutex};
+        use yatamux_protocol::types::PaneId;
+        use yatamux_terminal::CjkWidthConfig;
+
+        // ダミーの PaneStore を作成
+        let grid = Arc::new(Mutex::new(yatamux_terminal::Grid::new(
+            80,
+            24,
+            CjkWidthConfig::default(),
+        )));
+        let store = PaneStore::new(PaneId(1), grid);
+
+        let dir = std::env::temp_dir().join("yatamux_test_save_session");
+        let path = dir.join("session.toml");
+        save_session(&store, &path);
+
+        // ファイルが作成されていること
+        assert!(path.exists(), "session.toml が作成されること");
+        let loaded = LayoutSnapshot::load(&path).expect("読み込みに成功すること");
+        assert_eq!(loaded.active, PaneId(1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // TC-08: save → load ファイルラウンドトリップ

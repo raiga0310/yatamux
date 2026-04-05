@@ -37,6 +37,11 @@ impl Server {
                 plain_text,
             } => self.handle_capture_pane(pane, lines, plain_text).await,
             ClientMessage::ListPanes => self.handle_list_panes().await,
+            ClientMessage::SaveAndQuit => {
+                // SaveAndQuit はブリッジへ転送して GUI 側でセッション保存 + 終了する
+                let _ = self.client_tx.send(ServerMessage::SaveAndQuit).await;
+                Ok(())
+            }
         }
     }
 

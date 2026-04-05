@@ -48,6 +48,12 @@ windows = { version = "0.62", features = [
 # Base64 (OSC 52 クリップボード)
 base64 = "0.22"
 
+# SHA-256 (セルフアップデートのチェックサム検証)
+sha2 = "0.10"
+
+# HTTP クライアント (セルフアップデートのダウンロード)
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
@@ -86,12 +92,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 clap = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
 yatamux-server = { path = "crates/server" }
 
 [target.'cfg(windows)'.dependencies]
 # AttachConsole + CreateFileW("CONOUT$") + SetStdHandle で
 # リリース GUI ビルドでも --help などの出力を親コンソールに届ける
-windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security"] }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security", "Win32_System_Threading"] }
 yatamux-client = { path = "crates/client" }
 yatamux-protocol = { path = "crates/protocol" }
 yatamux-terminal = { path = "crates/terminal" }
