@@ -1,0 +1,45 @@
+name: Bump Version
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump patch version
+    runs-on: ubuntu-latest
+    # バージョンバンプコミット自身や docs/CI のみの変更はスキップ
+    if: |
+      !startsWith(github.event.head_commit.message, 'chore: bump version') &&
+      !startsWith(github.event.head_commit.message, 'docs:') &&
+      !startsWith(github.event.head_commit.message, 'ci:')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump patch version
+        id: version
+        run: |
+          current=$(grep '^version = ' Cargo.toml | head -1 | grep -oP '[\d.]+')
+          IFS='.' read -r major minor patch <<< "$current"
+          new="$major.$minor.$((patch + 1))"
+          sed -i "s/^version = \"$current\"/version = \"$new\"/" Cargo.toml
+          cargo update -p yatamux
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "Bumped: $current → $new"
+
+      - name: Commit and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to ${{ steps.version.outputs.new }}"
+          git tag "v${{ steps.version.outputs.new }}"
+          git push
+          git push origin "v${{ steps.version.outputs.new }}"
