@@ -1,13 +1,13 @@
 //! ターミナルグリッド行からの URL 検出ユーティリティ。
 //!
-//! `https://` / `http://` で始まるURLをセル配列からスキャンし、
+//! `https://` で始まるURLをセル配列からスキャンし、
 //! 指定された列インデックスがURL範囲内かを判定する。
 
 use yatamux_terminal::cell::CellContent;
 use yatamux_terminal::Cell;
 
-/// URL として認識するスキーム
-const URL_PREFIXES: &[&str] = &["https://", "http://"];
+/// URL として認識するスキーム（https のみ）
+const URL_PREFIXES: &[&str] = &["https://"];
 
 /// URL の終端と見なす文字
 fn is_url_terminator(c: char) -> bool {
@@ -135,6 +135,12 @@ mod tests {
         assert!(result.is_some());
         let (_, _, url) = result.unwrap();
         assert_eq!(url, "https://example.com");
+    }
+
+    #[test]
+    fn test_http_url_is_not_detected() {
+        let cells = make_cells("visit http://example.com");
+        assert!(find_url_at_col(&cells, 10).is_none());
     }
 
     #[test]
