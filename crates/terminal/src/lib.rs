@@ -82,3 +82,18 @@ impl TerminalSink {
 }
 
 // 対応 VT シーケンス（更新版）: OSC 52 クリップボード書き込み（feed() の戻り値で通知）
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // TC-05: TerminalSink::new() で生成した Grid は全行 dirty（スタートアップ残像防止）
+    #[test]
+    fn test_terminal_sink_new_all_dirty() {
+        let sink = TerminalSink::new(80, 24);
+        let mut grid = sink.grid.lock().unwrap();
+        assert!(grid.has_dirty_rows(), "新規 TerminalSink の Grid は全行 dirty でなければならない");
+        let dirty = grid.take_dirty_rows();
+        assert_eq!(dirty.len(), 24);
+    }
+}
