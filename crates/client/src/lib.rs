@@ -55,6 +55,7 @@ pub mod layout;
 pub mod notification;
 pub mod session;
 pub mod theme;
+pub mod url;
 pub mod window;
 
 pub use ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr, PreeditSegment};

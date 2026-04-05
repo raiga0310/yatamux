@@ -331,6 +331,31 @@ pub(super) unsafe fn handle_mouse_message(
             let px = (lparam.0 & 0xFFFF) as i32;
             let py = ((lparam.0 >> 16) & 0xFFFF) as i32;
 
+            // Ctrl+クリック: ホバー中の URL をブラウザで開く
+            let ctrl_held = wparam.0 as u32 & 0x0008 != 0; // MK_CONTROL
+            if ctrl_held {
+                let url = state
+                    .panes
+                    .lock()
+                    .unwrap()
+                    .hovered_url
+                    .as_ref()
+                    .map(|(_, _, _, _, u)| u.clone());
+                if let Some(url) = url {
+                    let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+                    let open_wide: Vec<u16> = "open\0".encode_utf16().collect();
+                    windows::Win32::UI::Shell::ShellExecuteW(
+                        Some(hwnd),
+                        PCWSTR(open_wide.as_ptr()),
+                        PCWSTR(url_wide.as_ptr()),
+                        PCWSTR::null(),
+                        PCWSTR::null(),
+                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                    );
+                    return LRESULT(0);
+                }
+            }
+
             state.panes.lock().unwrap().normal_selection = None;
             state.normal_dragging.set(false);
 
@@ -414,6 +439,98 @@ pub(super) unsafe fn handle_mouse_message(
 
         if msg == WM_LBUTTONUP && state.normal_dragging.get() {
             state.normal_dragging.set(false);
+        }
+
+        // ── URL ホバー検出 ────────────────────────────────────────────────────
+        if msg == WM_MOUSEMOVE && state.mode.get() == ClientMode::Normal {
+            let px = (lparam.0 & 0xFFFF) as i32;
+            let py = ((lparam.0 >> 16) & 0xFFFF) as i32;
+            let content = state.content_rect.get();
+
+            // カーソル下のペイン・行・列を特定（+グリッドArcとスクロールオフセットを取得）
+            let hover_data = {
+                let store = state.panes.lock().unwrap();
+                let rects = store.layout.compute_rects(content);
+                #[allow(clippy::type_complexity)]
+                let mut found: Option<(
+                    PaneId,
+                    usize,
+                    usize,
+                    Arc<Mutex<Grid>>,
+                    usize,
+                )> = None;
+                for (id, pr) in &rects {
+                    let cx = px - PADDING_X;
+                    let cy = py - PADDING_Y;
+                    if cx >= pr.x && cx < pr.x + pr.w && cy >= pr.y && cy < pr.y + pr.h {
+                        let col = ((cx - pr.x) / state.cell_width.max(1)) as usize;
+                        let row = ((cy - pr.y) / state.cell_height.max(1)) as usize;
+                        if let Some(g) = store.grids.get(id) {
+                            found = Some((*id, row, col, Arc::clone(g), store.scroll_offset));
+                        }
+                        break;
+                    }
+                }
+                found
+            };
+
+            let new_url = if let Some((pane_id, row, col, grid_arc, scroll_offset)) = hover_data {
+                let grid = grid_arc.lock().unwrap();
+                let sb_len = grid.scrollback_len();
+                let view_start = sb_len.saturating_sub(scroll_offset);
+                let combined_idx = view_start + row;
+                let cells: Option<Vec<Cell>> = if combined_idx < sb_len {
+                    grid.scrollback_row(combined_idx).map(|r| r.to_vec())
+                } else {
+                    let grid_row = (combined_idx - sb_len) as u16;
+                    grid.row(grid_row).map(|r| r.to_vec())
+                };
+                cells.and_then(|c| {
+                    crate::url::find_url_at_col(&c, col)
+                        .map(|(cs, ce, url)| (pane_id, row, cs, ce, url))
+                })
+            } else {
+                None
+            };
+
+            // 変化があれば旧・新の行を dirty にして更新
+            let prev_key = {
+                let store = state.panes.lock().unwrap();
+                store
+                    .hovered_url
+                    .as_ref()
+                    .map(|(p, r, cs, ce, _)| (*p, *r, *cs, *ce))
+            };
+            let new_key = new_url.as_ref().map(|(p, r, cs, ce, _)| (*p, *r, *cs, *ce));
+
+            if prev_key != new_key {
+                // 旧ホバー行を dirty に
+                if let Some((old_pane, old_row, _, _)) = prev_key {
+                    let g = state.panes.lock().unwrap().grids.get(&old_pane).cloned();
+                    if let Some(g) = g {
+                        g.lock().unwrap().mark_dirty(old_row);
+                    }
+                }
+                // 新ホバー行を dirty に
+                if let Some((new_pane, new_row, _, _)) = new_key {
+                    let g = state.panes.lock().unwrap().grids.get(&new_pane).cloned();
+                    if let Some(g) = g {
+                        g.lock().unwrap().mark_dirty(new_row);
+                    }
+                }
+                state.panes.lock().unwrap().hovered_url = new_url.clone();
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+
+            // カーソル形状を切り替える
+            let cursor_id = if new_url.is_some() {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            };
+            if let Ok(hcursor) = LoadCursorW(None, cursor_id) {
+                SetCursor(Some(hcursor));
+            }
         }
 
         let (reporting, sgr) = {

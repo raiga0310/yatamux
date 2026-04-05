@@ -148,6 +148,11 @@ pub struct PaneStore {
     /// `WM_TIMER` で検出し `content_bb` を破棄して全画面再描画をトリガーする。
     /// 残像（旧ペイン領域の描画残り）を防ぐために使用する。
     pub layout_changed: bool,
+    /// マウスホバー中の URL 情報: (pane_id, row, col_start, col_end_exclusive, url)
+    ///
+    /// `WM_MOUSEMOVE` で更新。描画ループでアンダーラインを引くために参照する。
+    /// `None` = ホバー対象なし。
+    pub hovered_url: Option<(PaneId, usize, usize, usize, String)>,
 }
 
 impl PaneStore {
@@ -173,6 +178,7 @@ impl PaneStore {
             pane_cwds: HashMap::new(),
             pane_commands: HashMap::new(),
             layout_changed: false,
+            hovered_url: None,
         }
     }
 
