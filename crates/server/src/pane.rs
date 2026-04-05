@@ -49,6 +49,8 @@ pub struct Pane {
     /// 子プロセス kill ハンドル。Pane が Drop されるときに cmd.exe を終了させる。
     /// 孤児プロセス（テスト後の残留 cmd.exe）を防ぐために保持する。
     child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
+    /// ConPTY 直接子プロセスの PID（プロセスツリー走査に使用）
+    pub child_pid: Option<u32>,
 }
 
 impl Drop for Pane {
@@ -81,6 +83,10 @@ impl Pane {
         // Drop 時に子プロセスを kill するためのハンドルを先に取得する。
         // take_child() の後は child が None になるため、必ず前に呼ぶこと。
         let child_killer = pty.clone_child_killer();
+
+        // PID は take_child() 後も PtySession 内に保持されているが、
+        // pty は write タスクに move されるため、ここで取得しておく。
+        let child_pid = pty.child_pid();
 
         // 子プロセス終了監視タスク（C-9）
         //
@@ -174,6 +180,7 @@ impl Pane {
             title,
             size: pane_size,
             child_killer,
+            child_pid,
         })
     }
 

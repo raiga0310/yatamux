@@ -47,13 +47,44 @@ impl From<&LayoutNode> for LayoutNodeDef {
     }
 }
 
+/// 保存時にコマンドをセッション継続フラグ付きに変換する。
+///
+/// - `claude` → `claude --continue`
+/// - `codex`  → `codex --continue`
+/// - その他 → そのまま
+/// - 既に `--continue` または `--resume` を含む場合は重複させない
+pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
+    const CONTINUE_TOOLS: &[&str] = &["claude", "codex"];
+
+    let trimmed = cmd.trim();
+    let base = trimmed.split_whitespace().next().unwrap_or(trimmed);
+
+    // ツール名から .exe などを除いた基底名を取得（Windows でのフルパスも考慮）
+    let base_name = std::path::Path::new(base)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(base)
+        .to_lowercase();
+
+    if CONTINUE_TOOLS.contains(&base_name.as_str()) {
+        // 既に --continue / --resume が含まれていれば重複させない
+        if trimmed.contains("--continue") || trimmed.contains("--resume") {
+            trimmed.to_string()
+        } else {
+            format!("{} --continue", trimmed)
+        }
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl LayoutNodeDef {
     /// `pane_commands` を参照しながら変換する。各 Leaf にコマンドを埋め込む。
     pub fn from_with_commands(node: &LayoutNode, cmds: &HashMap<PaneId, String>) -> Self {
         match node {
             LayoutNode::Leaf(id) => LayoutNodeDef::Leaf {
                 id: *id,
-                command: cmds.get(id).cloned(),
+                command: cmds.get(id).map(|c| normalize_command_for_restore(c)),
             },
             LayoutNode::Split {
                 direction,
@@ -130,7 +161,10 @@ mod tests {
     // TC-01: Leaf ノードの TOML ラウンドトリップ
     #[test]
     fn test_layout_leaf_roundtrip() {
-        let node = LayoutNodeDef::Leaf { id: PaneId(1), command: None };
+        let node = LayoutNodeDef::Leaf {
+            id: PaneId(1),
+            command: None,
+        };
         let toml = toml::to_string(&node).unwrap();
         let restored: LayoutNodeDef = toml::from_str(&toml).unwrap();
         assert_eq!(node, restored);
@@ -142,8 +176,14 @@ mod tests {
         let node = LayoutNodeDef::Split {
             direction: SplitDirection::Horizontal,
             ratio: 0.5,
-            first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1), command: None }),
-            second: Box::new(LayoutNodeDef::Leaf { id: PaneId(2), command: None }),
+            first: Box::new(LayoutNodeDef::Leaf {
+                id: PaneId(1),
+                command: None,
+            }),
+            second: Box::new(LayoutNodeDef::Leaf {
+                id: PaneId(2),
+                command: None,
+            }),
         };
         let toml = toml::to_string(&node).unwrap();
         let restored: LayoutNodeDef = toml::from_str(&toml).unwrap();
@@ -156,12 +196,21 @@ mod tests {
         let node = LayoutNodeDef::Split {
             direction: SplitDirection::Vertical,
             ratio: 0.5,
-            first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1), command: None }),
+            first: Box::new(LayoutNodeDef::Leaf {
+                id: PaneId(1),
+                command: None,
+            }),
             second: Box::new(LayoutNodeDef::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.6,
-                first: Box::new(LayoutNodeDef::Leaf { id: PaneId(2), command: None }),
-                second: Box::new(LayoutNodeDef::Leaf { id: PaneId(3), command: None }),
+                first: Box::new(LayoutNodeDef::Leaf {
+                    id: PaneId(2),
+                    command: None,
+                }),
+                second: Box::new(LayoutNodeDef::Leaf {
+                    id: PaneId(3),
+                    command: None,
+                }),
             }),
         };
         let toml = toml::to_string(&node).unwrap();
@@ -176,8 +225,14 @@ mod tests {
             root: LayoutNodeDef::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.5,
-                first: Box::new(LayoutNodeDef::Leaf { id: PaneId(1), command: None }),
-                second: Box::new(LayoutNodeDef::Leaf { id: PaneId(2), command: None }),
+                first: Box::new(LayoutNodeDef::Leaf {
+                    id: PaneId(1),
+                    command: None,
+                }),
+                second: Box::new(LayoutNodeDef::Leaf {
+                    id: PaneId(2),
+                    command: None,
+                }),
             },
             active: PaneId(2),
         };
@@ -198,7 +253,13 @@ mod tests {
     fn test_layout_node_to_def_leaf() {
         let node = LayoutNode::Leaf(PaneId(5));
         let def = LayoutNodeDef::from(&node);
-        assert_eq!(def, LayoutNodeDef::Leaf { id: PaneId(5), command: None });
+        assert_eq!(
+            def,
+            LayoutNodeDef::Leaf {
+                id: PaneId(5),
+                command: None
+            }
+        );
     }
 
     // TC-07: LayoutNode::Split → LayoutNodeDef::Split 変換
@@ -253,7 +314,10 @@ mod tests {
     #[test]
     fn test_snapshot_file_roundtrip() {
         let snap = LayoutSnapshot {
-            root: LayoutNodeDef::Leaf { id: PaneId(1), command: None },
+            root: LayoutNodeDef::Leaf {
+                id: PaneId(1),
+                command: None,
+            },
             active: PaneId(1),
         };
         let dir = std::env::temp_dir().join("yatamux_test");
@@ -262,6 +326,40 @@ mod tests {
         let loaded = LayoutSnapshot::load(&path).unwrap();
         assert_eq!(snap, loaded);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // normalize_command_for_restore テスト群
+
+    #[test]
+    fn test_normalize_claude_adds_continue() {
+        assert_eq!(normalize_command_for_restore("claude"), "claude --continue");
+    }
+
+    #[test]
+    fn test_normalize_codex_adds_continue() {
+        assert_eq!(normalize_command_for_restore("codex"), "codex --continue");
+    }
+
+    #[test]
+    fn test_normalize_already_has_continue_no_duplication() {
+        assert_eq!(
+            normalize_command_for_restore("claude --continue"),
+            "claude --continue"
+        );
+    }
+
+    #[test]
+    fn test_normalize_already_has_resume_no_duplication() {
+        assert_eq!(
+            normalize_command_for_restore("claude --resume"),
+            "claude --resume"
+        );
+    }
+
+    #[test]
+    fn test_normalize_unknown_unchanged() {
+        assert_eq!(normalize_command_for_restore("vim"), "vim");
+        assert_eq!(normalize_command_for_restore("cargo test"), "cargo test");
     }
 
     // TC-09: default_path が %APPDATA%\yatamux\session.toml を返す
