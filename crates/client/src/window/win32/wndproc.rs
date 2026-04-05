@@ -279,6 +279,17 @@ pub(super) unsafe fn handle_wm_timer(
             return LRESULT(0);
         }
 
+        // レイアウト変更（split / close）後はバックバッファを破棄して全画面再描画する。
+        // これにより旧ペイン領域の残像（端数ピクセルを含む）が消える（F-5）。
+        {
+            let mut store = state.panes.lock().unwrap();
+            if store.layout_changed {
+                store.layout_changed = false;
+                drop(store);
+                state.content_bb.set(None);
+            }
+        }
+
         // カーソル行を常に dirty に（永続バックバッファ上のカーソル描画を毎フレーム更新）
         {
             let store = state.panes.lock().unwrap();

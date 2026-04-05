@@ -141,6 +141,11 @@ pub struct PaneStore {
     /// レイアウトファイルから適用されたコマンドのみ記録される。
     /// 手動入力したコマンドは含まれない。
     pub pane_commands: HashMap<PaneId, String>,
+    /// レイアウト変更フラグ（split / close 後に `true` にする）
+    ///
+    /// `WM_TIMER` で検出し `content_bb` を破棄して全画面再描画をトリガーする。
+    /// 残像（旧ペイン領域の描画残り）を防ぐために使用する。
+    pub layout_changed: bool,
 }
 
 impl PaneStore {
@@ -164,6 +169,7 @@ impl PaneStore {
             save_prompt: None,
             theme_launcher: None,
             pane_commands: HashMap::new(),
+            layout_changed: false,
         }
     }
 
@@ -208,6 +214,34 @@ mod tests {
 
     use super::{CopyState, PaneStore};
     use crate::layout::PaneRect;
+
+    // TC-01: layout_changed は false で初期化される
+    #[test]
+    fn test_layout_changed_initial_false() {
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        let store = PaneStore::new(PaneId(1), grid);
+        assert!(!store.layout_changed);
+    }
+
+    // TC-02: layout_changed を true にセットできる
+    #[test]
+    fn test_layout_changed_set_true() {
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        let mut store = PaneStore::new(PaneId(1), grid);
+        store.layout_changed = true;
+        assert!(store.layout_changed);
+    }
+
+    // TC-03: layout_changed を true → false にクリアできる
+    #[test]
+    fn test_layout_changed_clear() {
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        let mut store = PaneStore::new(PaneId(1), grid);
+        store.layout_changed = true;
+        assert!(store.layout_changed);
+        store.layout_changed = false;
+        assert!(!store.layout_changed);
+    }
 
     #[test]
     fn test_floating_rect_centered() {

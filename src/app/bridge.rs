@@ -347,6 +347,7 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                     store.grids.insert(new_id, new_grid);
                                     store.layout.split_leaf(parent_id, new_id, direction);
                                     store.active = new_id;
+                                    store.layout_changed = true;
                                 }
                                 let _ = client_tx.send(ClientMessage::Resize {
                                     pane: parent_id,
@@ -362,6 +363,7 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                 store.grids.insert(new_id, new_grid);
                                 store.layout.split_leaf(parent_id, new_id, direction);
                                 store.active = new_id;
+                                store.layout_changed = true;
                             }
                         }
                         BridgeEvent::PaneClosed { pane } => {
@@ -383,6 +385,8 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                     }
                                     if store.grids.is_empty() {
                                         store.should_quit = true;
+                                    } else {
+                                        store.layout_changed = true;
                                     }
                                 }
                             }

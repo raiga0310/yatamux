@@ -509,4 +509,18 @@ mod tests {
             "DECAWM on: 5 文字目以降は row 1 に折り返す"
         );
     }
+
+    // TC-04: resize() 後に dirty フラグが全行セットされる（F-5 回帰確認）
+    #[test]
+    fn test_resize_sets_all_dirty() {
+        let mut g = default_grid(80, 24);
+        // 一度 dirty をクリア
+        let _ = g.take_dirty_rows();
+        assert!(!g.has_dirty_rows());
+        // リサイズで全行 dirty になる
+        g.resize(40, 24);
+        assert!(g.has_dirty_rows());
+        let dirty = g.take_dirty_rows();
+        assert_eq!(dirty.len(), 24);
+    }
 }
