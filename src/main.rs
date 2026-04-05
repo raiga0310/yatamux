@@ -343,7 +343,6 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
     use anyhow::Context;
 
     let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
-    let (_, bak_path) = update::plan_update_paths(&exe);
 
     if pid != 0 {
         eprintln!("PID {} の終了を待機中...", pid);
@@ -387,29 +386,7 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
         eprintln!("PID {} が終了しました。バイナリを置換します。", pid);
     }
 
-    // 既存の .bak を削除（存在する場合）
-    if bak_path.exists() {
-        std::fs::remove_file(&bak_path)
-            .with_context(|| format!("古い .bak の削除に失敗: {}", bak_path.display()))?;
-    }
-
-    // exe → exe.bak
-    std::fs::rename(&exe, &bak_path).with_context(|| {
-        format!(
-            "exe → .bak リネームに失敗: {} → {}",
-            exe.display(),
-            bak_path.display()
-        )
-    })?;
-
-    // new_path → exe
-    std::fs::rename(new_path, &exe).with_context(|| {
-        format!(
-            ".new → exe リネームに失敗: {} → {}",
-            new_path.display(),
-            exe.display()
-        )
-    })?;
+    update::replace_executable(&exe, new_path)?;
 
     if launch {
         eprintln!("バイナリ置換完了。新しいインスタンスを起動します。");
@@ -426,6 +403,7 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toml::Value;
 
     #[test]
     fn parse_send_keys_wait_for_prompt() {
@@ -479,6 +457,46 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn workspace_and_member_crates_share_workspace_version() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifests = [
+            root.join("Cargo.toml"),
+            root.join("crates/client/Cargo.toml"),
+            root.join("crates/server/Cargo.toml"),
+            root.join("crates/protocol/Cargo.toml"),
+            root.join("crates/terminal/Cargo.toml"),
+            root.join("crates/renderer/Cargo.toml"),
+        ];
+
+        for manifest_path in manifests {
+            let text = std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", manifest_path.display()));
+            let value: Value = text
+                .parse()
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", manifest_path.display()));
+            let package = value
+                .get("package")
+                .and_then(Value::as_table)
+                .unwrap_or_else(|| panic!("missing [package] in {}", manifest_path.display()));
+            let version = package
+                .get("version")
+                .and_then(Value::as_table)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "package.version should be a table in {}",
+                        manifest_path.display()
+                    )
+                });
+            assert_eq!(
+                version.get("workspace").and_then(Value::as_bool),
+                Some(true),
+                "{} should use package.version.workspace = true",
+                manifest_path.display()
+            );
         }
     }
 }

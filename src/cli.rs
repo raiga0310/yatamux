@@ -349,14 +349,15 @@ pub async fn layout_export(name: &str) -> Result<()> {
 /// 7. `--apply-update <pid> <new_path>` ヘルパーを起動して処理を委譲
 pub async fn update(session: &str) -> anyhow::Result<()> {
     use crate::update::{
-        extract_checksum, need_update, parse_release_info, plan_update_paths, verify_checksum,
+        download_and_verify_release_binary, fetch_latest_release, need_update, plan_update_paths,
+        release_api_url,
     };
 
-    const GITHUB_API_URL: &str = "https://api.github.com/repos/raiga0310/yatamux/releases/latest";
     const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+    let release_api_url = release_api_url();
 
     eprintln!("現在のバージョン: v{}", CURRENT_VERSION);
-    eprintln!("GitHub Releases を確認中...");
+    eprintln!("更新 API を確認中: {}", release_api_url);
 
     // GitHub API で最新リリース情報を取得（async reqwest: tokio ランタイム内で使用）
     let client = reqwest::Client::builder()
@@ -364,29 +365,13 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
         .build()
         .context("HTTP クライアントの初期化に失敗")?;
 
-    let resp = client
-        .get(GITHUB_API_URL)
-        .send()
-        .await
-        .context("GitHub API への接続に失敗")?;
-
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    let Some(release) = fetch_latest_release(&client, &release_api_url).await? else {
         eprintln!(
-            "リリースが見つかりません。GitHub にまだリリースが公開されていない可能性があります。"
+            "更新 API に最新リリースが見つかりません: {}",
+            release_api_url
         );
         return Ok(());
-    }
-    if !resp.status().is_success() {
-        anyhow::bail!("GitHub API エラー: {}", resp.status());
-    }
-
-    let json = resp
-        .text()
-        .await
-        .context("GitHub API レスポンスの読み取りに失敗")?;
-    let release = parse_release_info(&json).ok_or_else(|| {
-        anyhow::anyhow!("リリース情報のパースに失敗（yatamux.exe が見つかりません）")
-    })?;
+    };
 
     // 日時を "2026-04-05T09:12:25Z" → "2026-04-05 09:12 UTC" に整形
     let published = release
@@ -403,32 +388,8 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
 
     eprintln!("アップデートを開始します...");
 
-    // checksums.txt をダウンロード
-    let checksums_text = client
-        .get(&release.checksum_url)
-        .send()
-        .await
-        .context("checksums.txt のダウンロードに失敗")?
-        .text()
-        .await
-        .context("checksums.txt の読み取りに失敗")?;
-
-    // yatamux.exe をダウンロード
     eprintln!("バイナリをダウンロード中: {}", release.asset_url);
-    let binary = client
-        .get(&release.asset_url)
-        .send()
-        .await
-        .context("バイナリのダウンロードに失敗")?
-        .bytes()
-        .await
-        .context("バイナリの読み取りに失敗")?;
-
-    // SHA256 検証
-    let expected_hash = extract_checksum(&checksums_text, "yatamux.exe").ok_or_else(|| {
-        anyhow::anyhow!("checksums.txt に yatamux.exe のエントリが見つかりません")
-    })?;
-    verify_checksum(&binary, expected_hash).context("SHA256 チェックサム検証に失敗")?;
+    let binary = download_and_verify_release_binary(&client, &release).await?;
     eprintln!("チェックサム OK");
 
     // <exe>.new に保存
@@ -465,9 +426,13 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
                 .context("アップデートヘルパーの起動に失敗")?;
             eprintln!("アップデートヘルパーを起動しました。このプロセスを終了します。");
         }
-        Err(_) => {
+        Err(err) => {
             // GUI が起動していない → ヘルパーを起動して自プロセス終了後に rename させる
             // （Windows では実行中の exe を rename できないため self PID を渡して待機）
+            eprintln!(
+                "セッション '{}' の IPC に接続できませんでした: {:#}",
+                session, err
+            );
             eprintln!(
                 "実行中の yatamux インスタンスが見つかりません。ヘルパーでバイナリを置換します。"
             );

@@ -27,10 +27,18 @@ jobs:
       - name: Bump patch version
         id: version
         run: |
-          current=$(grep '^version = ' Cargo.toml | head -1 | grep -oP '[\d.]+')
+          current=$(awk '
+            $0 == "[workspace.package]" { in_workspace_package=1; next }
+            /^\[/ && $0 != "[workspace.package]" { in_workspace_package=0 }
+            in_workspace_package && /^version = / {
+              match($0, /"[0-9.]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' Cargo.toml)
           IFS='.' read -r major minor patch <<< "$current"
           new="$major.$minor.$((patch + 1))"
-          sed -i "s/^version = \"$current\"/version = \"$new\"/" Cargo.toml
+          sed -i '/^\[workspace\.package\]/,/^\[/{s/^version = "'"$current"'"/version = "'"$new"'"/}' Cargo.toml
           cargo update -p yatamux
           echo "new=$new" >> "$GITHUB_OUTPUT"
           echo "Bumped: $current -> $new"
