@@ -25,6 +25,32 @@ use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::ClientMessage;
 use yatamux_terminal::TerminalSink;
 
+/// RSS フィードから見出しを取得して ` ◆ ` で連結した文字列を返す
+async fn fetch_rss_headlines(url: &str) -> anyhow::Result<String> {
+    let body = reqwest::get(url).await?.text().await?;
+    let titles: Vec<String> = body
+        .split("<title>")
+        .skip(2) // 最初の <title> はフィード全体のタイトル
+        .filter_map(|s| {
+            let end = s.find("</title>")?;
+            let raw = &s[..end];
+            // CDATA アンラップ
+            let inner = raw
+                .trim()
+                .strip_prefix("<![CDATA[")
+                .and_then(|s| s.strip_suffix("]]>"))
+                .unwrap_or(raw)
+                .trim();
+            if inner.is_empty() {
+                None
+            } else {
+                Some(inner.to_string())
+            }
+        })
+        .collect();
+    Ok(titles.join("  ◆  "))
+}
+
 use crate::app::{
     bootstrap::bootstrap_runtime,
     bridge::{spawn_bridge_fanout, spawn_server_bridge, BridgeChannels, ServerBridge},
@@ -147,6 +173,22 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
         },
     );
 
+    let news_scroll_px_per_tick = app_config.status_bar.news_scroll_px_per_tick;
+
+    // ── ニュースティッカー取得タスク ────────────────────────────────────
+    if let Some(rss_url) = app_config.status_bar.news_rss.clone() {
+        let interval_secs = app_config.status_bar.news_interval_secs;
+        let store_for_news = Arc::clone(&pane_store);
+        tokio::spawn(async move {
+            loop {
+                if let Ok(text) = fetch_rss_headlines(&rss_url).await {
+                    store_for_news.lock().unwrap().news_text = text;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+            }
+        });
+    }
+
     // ── Win32 ウィンドウ（spawn_blocking でメッセージループ実行）────────
     tokio::task::spawn_blocking(move || {
         run_window(
@@ -159,6 +201,7 @@ pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<(
             float_tx,
             layout_tx,
             theme,
+            news_scroll_px_per_tick,
         )
     })
     .await??;

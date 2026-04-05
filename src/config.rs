@@ -41,6 +41,44 @@ pub struct AppConfig {
     /// 外観設定
     #[serde(default)]
     pub appearance: AppearanceConfig,
+    /// ステータスバー設定
+    #[serde(default)]
+    pub status_bar: StatusBarConfig,
+}
+
+/// ステータスバー設定
+///
+/// ```toml
+/// [status_bar]
+/// news_rss = "https://www.sankei.com/rss/news/flash/home-flash.xml"
+/// news_interval_secs = 120
+/// news_scroll_px_per_tick = 2
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct StatusBarConfig {
+    /// ニュースティッカーに使う RSS フィード URL（省略時: ティッカーなし）
+    pub news_rss: Option<String>,
+    /// RSS 再取得間隔（秒、デフォルト: 120）
+    #[serde(default = "StatusBarConfig::default_interval")]
+    pub news_interval_secs: u64,
+    /// WM_TIMER 1 ティック（≈16ms）あたりのスクロール量（px、デフォルト: 2）
+    #[serde(default = "StatusBarConfig::default_scroll_px")]
+    pub news_scroll_px_per_tick: i32,
+}
+
+impl StatusBarConfig {
+    fn default_interval() -> u64 { 120 }
+    fn default_scroll_px() -> i32 { 2 }
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            news_rss: None,
+            news_interval_secs: Self::default_interval(),
+            news_scroll_px_per_tick: Self::default_scroll_px(),
+        }
+    }
 }
 
 /// 外観設定（フォント・カラーテーマ）
