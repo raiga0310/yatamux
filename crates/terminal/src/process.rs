@@ -116,12 +116,7 @@ pub fn find_process_cwd(pid: u32) -> Option<String> {
     };
 
     unsafe {
-        let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            false,
-            pid,
-        )
-        .ok()?;
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
 
         let result = read_process_cwd_inner(handle);
         let _ = CloseHandle(handle);
@@ -131,12 +126,10 @@ pub fn find_process_cwd(pid: u32) -> Option<String> {
 
 /// ハンドルを受け取り cwd を読み取る内部実装（ハンドルのクローズは呼び出し元が行う）
 #[cfg(windows)]
-unsafe fn read_process_cwd_inner(
-    handle: windows::Win32::Foundation::HANDLE,
-) -> Option<String> {
+unsafe fn read_process_cwd_inner(handle: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::core::s;
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-    use windows::core::s;
 
     type FnNtQueryInformationProcess = unsafe extern "system" fn(
         process_handle: windows::Win32::Foundation::HANDLE,

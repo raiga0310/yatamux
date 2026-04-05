@@ -1173,15 +1173,8 @@ mod win32 {
         };
         let cpu = state.cpu_usage.get();
         let mem = state.mem_usage.get();
-        let right_text = format!(
-            " {} C:{:.0}% M:{:.0}% v{} pane {}/{} ",
-            truncate_path_middle(&cwd_str, 30),
-            cpu,
-            mem,
-            state.app_version,
-            active_idx,
-            total,
-        );
+        let right_text =
+            format_status_bar_right_text(&cwd_str, cpu, mem, state.app_version, active_idx, total);
         let right_wide: Vec<u16> = right_text.encode_utf16().collect();
         let mut right_size = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &right_wide, &mut right_size);
@@ -1294,6 +1287,34 @@ mod win32 {
         let prefix_budget = max_chars.saturating_sub(suffix.len() + 5); // 5 = "…" + sep + margin
         let prefix: String = path.chars().take(prefix_budget.max(1)).collect();
         format!("{prefix}…{suffix}")
+    }
+
+    fn format_status_bar_right_text(
+        cwd: &str,
+        cpu: f32,
+        mem: f32,
+        app_version: &str,
+        active_idx: usize,
+        total: usize,
+    ) -> String {
+        format!(
+            " {} C:{} M:{} v{} pane {}/{} ",
+            truncate_path_middle(cwd, 30),
+            format_usage_percent(cpu),
+            format_usage_percent(mem),
+            app_version,
+            active_idx,
+            total,
+        )
+    }
+
+    fn format_usage_percent(value: f32) -> String {
+        let percent = value.round().clamp(0.0, 999.0) as u32;
+        if percent < 10 {
+            format!("0{}%", percent)
+        } else {
+            format!("{}%", percent)
+        }
     }
 
     unsafe fn paint_toasts(hdc: HDC, win_w: i32, win_h: i32, state: &ClientState) {
@@ -1830,7 +1851,7 @@ mod win32 {
             + ch / 4               // 余白
             + content_h            // コンテンツ（入力+プレビュー）
             + ch / 4               // 余白
-            + ch; // ヒント行
+            + ch * 2; // ヒント2行
         let popup_h = popup_h.min(win_h - ch * 2);
         let popup_x = (win_w - popup_w) / 2;
         let popup_y = (win_h - popup_h) / 2;
@@ -1920,7 +1941,9 @@ mod win32 {
         SetBkColor(hdc, COLOR_INPUT_BG);
         SetTextColor(hdc, COLOR_TEXT);
         let display = format!(" {}", render_state.prompt);
+        let prefix = format!(" {}", &render_state.prompt[..render_state.cursor]);
         let display_w: Vec<u16> = display.encode_utf16().collect();
+        let prefix_w: Vec<u16> = prefix.encode_utf16().collect();
         let _ = ExtTextOutW(
             hdc,
             input_rect.left,
@@ -1932,9 +1955,9 @@ mod win32 {
             None,
         );
 
-        // カーソル（テキスト末尾にブロック）
+        // カーソル（現在位置にブロック）
         let mut text_size = SIZE::default();
-        let _ = GetTextExtentPoint32W(hdc, &display_w, &mut text_size);
+        let _ = GetTextExtentPoint32W(hdc, &prefix_w, &mut text_size);
         let cursor_x = (input_rect.left + text_size.cx).min(input_rect.right - cw / 4);
         let cursor_rect = RECT {
             left: cursor_x,
@@ -1957,7 +1980,7 @@ mod win32 {
 
         // ── 右パネル: 現在のレイアウトプレビュー ────────────────────
         let preview_top = sep_y + ch / 4;
-        let preview_bottom = popup_y + popup_h - ch - ch / 4;
+        let preview_bottom = popup_y + popup_h - ch * 2 - ch / 4;
         let preview_left = vsep_x + preview_margin;
         let preview_right = (popup_x + popup_w - preview_margin).max(preview_left + cw);
         if preview_right > preview_left && preview_bottom > preview_top {
@@ -2000,19 +2023,32 @@ mod win32 {
         }
 
         // ヒント行
-        let hint_y = popup_y + popup_h - ch;
-        let hint = "  Enter: 保存  Esc: キャンセル";
-        let hint_w: Vec<u16> = hint.encode_utf16().collect();
+        let hint1_y = popup_y + popup_h - ch * 2;
+        let hint2_y = popup_y + popup_h - ch;
+        let hint1 = "  Enter: 保存  Esc: キャンセル  Up/Down: 履歴";
+        let hint2 = "  Ctrl+A/E: 行頭/末尾  Ctrl+B/F: 左/右  Ctrl+K/U/W/Y: kill/yank";
+        let hint1_w: Vec<u16> = hint1.encode_utf16().collect();
+        let hint2_w: Vec<u16> = hint2.encode_utf16().collect();
         SetBkColor(hdc, COLOR_POPUP_BG);
         SetTextColor(hdc, COLOR_HINT_FG);
         let _ = ExtTextOutW(
             hdc,
             popup_x + cw / 2,
-            hint_y,
+            hint1_y,
             ETO_OPAQUE,
             None,
-            PCWSTR(hint_w.as_ptr()),
-            hint_w.len() as u32,
+            PCWSTR(hint1_w.as_ptr()),
+            hint1_w.len() as u32,
+            None,
+        );
+        let _ = ExtTextOutW(
+            hdc,
+            popup_x + cw / 2,
+            hint2_y,
+            ETO_OPAQUE,
+            None,
+            PCWSTR(hint2_w.as_ptr()),
+            hint2_w.len() as u32,
             None,
         );
     }
@@ -2929,6 +2965,26 @@ mod win32 {
             skip.set(false);
             assert!(was);
             assert!(!skip.get());
+        }
+
+        #[test]
+        fn test_format_usage_percent_zero_pads_single_digits() {
+            assert_eq!(format_usage_percent(9.0), "09%");
+            assert_eq!(format_usage_percent(8.4), "08%");
+        }
+
+        #[test]
+        fn test_format_status_bar_right_text_keeps_integer_percent_layout() {
+            let text = format_status_bar_right_text(
+                "C:\\Users\\raiga\\dev\\yatamux",
+                12.4,
+                100.0,
+                "0.1.14",
+                2,
+                3,
+            );
+            assert!(text.contains("C:12% M:100%"));
+            assert!(text.contains("pane 2/3"));
         }
 
         // ── B-7: スクロールオフセットのクランプ / リセット ──────────────────

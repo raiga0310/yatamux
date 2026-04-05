@@ -8,7 +8,7 @@ use super::super::render::WinTheme;
 use super::{read_clipboard_text, ClientMode, ClientState};
 use crate::layout::{
     layout_to_toml, list_available_layouts, list_available_themes, load_theme_from_file,
-    save_layout_file, CopyState, Direction, LauncherState, ThemeLauncherState,
+    save_layout_file, CopyState, Direction, LauncherState, PromptState, ThemeLauncherState,
 };
 
 pub(super) struct KeyInput {
@@ -39,12 +39,17 @@ impl ClientState {
         let result = if vk == VK_RETURN.0 {
             let (name, layout_toml) = {
                 let mut store = state.panes.lock().unwrap();
-                let name = store.save_prompt.take().unwrap_or_default();
+                let name = store.save_prompt.take().unwrap_or_default().text;
                 let toml = layout_to_toml(&store.layout, &store.pane_commands);
                 (name, toml)
             };
             let name = name.trim().to_string();
             if !name.is_empty() {
+                state
+                    .panes
+                    .lock()
+                    .unwrap()
+                    .push_save_prompt_history(name.clone());
                 match save_layout_file(&name, &layout_toml) {
                     Ok(()) => {
                         let mut store = state.panes.lock().unwrap();
@@ -70,10 +75,89 @@ impl ClientState {
         } else if vk == VK_ESCAPE.0 {
             state.panes.lock().unwrap().save_prompt = None;
             KeyConsumed::Yes
+        } else if key.ctrl {
+            let mut store = state.panes.lock().unwrap();
+            let yank = if vk == b'Y' as u16 {
+                Some(store.save_prompt_yank.clone())
+            } else {
+                None
+            };
+            let mut new_yank = None;
+            let result = {
+                let prompt = match &mut store.save_prompt {
+                    Some(prompt) => prompt,
+                    None => return KeyConsumed::No,
+                };
+                match vk {
+                    k if k == b'A' as u16 => {
+                        prompt.move_start();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'E' as u16 => {
+                        prompt.move_end();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'B' as u16 => {
+                        prompt.move_left();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'F' as u16 => {
+                        prompt.move_right();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'K' as u16 => {
+                        new_yank = prompt.kill_to_end();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'U' as u16 => {
+                        new_yank = prompt.kill_to_start();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'W' as u16 => {
+                        new_yank = prompt.kill_prev_word();
+                        KeyConsumed::Yes
+                    }
+                    k if k == b'Y' as u16 => {
+                        if let Some(yank) = &yank {
+                            prompt.insert_str(yank);
+                        }
+                        KeyConsumed::Yes
+                    }
+                    _ => KeyConsumed::YesPassChar,
+                }
+            };
+            if let Some(new_yank) = new_yank {
+                store.save_prompt_yank = new_yank;
+            }
+            result
         } else if vk == VK_BACK.0 {
             let mut store = state.panes.lock().unwrap();
-            if let Some(s) = &mut store.save_prompt {
-                s.pop();
+            if let Some(prompt) = &mut store.save_prompt {
+                prompt.backspace();
+            }
+            KeyConsumed::Yes
+        } else if vk == VK_LEFT.0 {
+            if let Some(prompt) = &mut state.panes.lock().unwrap().save_prompt {
+                prompt.move_left();
+            }
+            KeyConsumed::Yes
+        } else if vk == VK_RIGHT.0 {
+            if let Some(prompt) = &mut state.panes.lock().unwrap().save_prompt {
+                prompt.move_right();
+            }
+            KeyConsumed::Yes
+        } else if vk == VK_UP.0 {
+            let mut store = state.panes.lock().unwrap();
+            let history = store.save_prompt_history.clone();
+            if let Some(prompt) = &mut store.save_prompt {
+                let _ = prompt.history_prev(&history);
+            }
+            KeyConsumed::Yes
+        } else if vk == VK_DOWN.0 {
+            let mut store = state.panes.lock().unwrap();
+            let history = store.save_prompt_history.clone();
+            if let Some(prompt) = &mut store.save_prompt {
+                let _ = prompt.history_next(&history);
             }
             KeyConsumed::Yes
         } else {
@@ -294,7 +378,7 @@ impl ClientState {
                 state.panes.lock().unwrap().copy_mode = Some(CopyState::new(0, 0));
             }
             k if k == b'S' as u16 => {
-                state.panes.lock().unwrap().save_prompt = Some(String::new());
+                state.panes.lock().unwrap().save_prompt = Some(PromptState::new());
             }
             _ => {
                 state.mode.set(ClientMode::Normal);

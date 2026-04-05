@@ -159,6 +159,27 @@ yatamux layout delete work
 
 These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-default`.
 
+`capture-pane --plain-text` keeps the legacy text dump behavior for scripts and copy/paste. `capture-pane --json` returns the same `content` plus structured metadata:
+
+```json
+{
+  "pane": 1,
+  "content": "prompt\ncurrent screen",
+  "title": "pwsh",
+  "cols": 80,
+  "rows": 24,
+  "lines_requested": 200,
+  "scrollback_len": 512,
+  "cursor": { "col": 12, "row": 23, "visible": true },
+  "visible_text": ["current screen"],
+  "scrollback_tail": ["prompt"]
+}
+```
+
+- `content`: scrollback tail plus the current visible screen, joined as plain text
+- `scrollback_tail`: only the scrollback portion
+- `visible_text`: one string per currently visible row
+
 ### Toast Notifications
 
 yatamux uses a focus-aware notification backend:
@@ -386,6 +407,27 @@ yatamux layout delete work
 ```
 
 接続先: `\\.\pipe\yatamux-default`
+
+`capture-pane --plain-text` は従来どおりスクリプト向けのプレーンテキストダンプを返します。`capture-pane --json` は同じ `content` に加えて、次のような構造化メタデータを返します。
+
+```json
+{
+  "pane": 1,
+  "content": "prompt\ncurrent screen",
+  "title": "pwsh",
+  "cols": 80,
+  "rows": 24,
+  "lines_requested": 200,
+  "scrollback_len": 512,
+  "cursor": { "col": 12, "row": 23, "visible": true },
+  "visible_text": ["current screen"],
+  "scrollback_tail": ["prompt"]
+}
+```
+
+- `content`: スクロールバック末尾と現在画面を連結したプレーンテキスト
+- `scrollback_tail`: そのうちスクロールバック側だけの行配列
+- `visible_text`: 現在画面の各行を 1 要素ずつ持つ配列
 
 ### トースト通知
 

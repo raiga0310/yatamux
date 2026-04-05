@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use portable_pty::CommandBuilder;
 use tokio::sync::mpsc;
 use yatamux_protocol::types::TermSize;
 use yatamux_terminal::PtySession;
@@ -233,4 +234,33 @@ async fn test_large_output_does_not_stall() {
     .expect("Large output should complete within 5 seconds");
 
     assert!(bytes_received > 0, "Should have received some output");
+}
+
+// A-6: PTY 子プロセスに yatamux 環境変数が伝搬される
+#[tokio::test]
+async fn test_pty_propagates_yatamux_env_vars() {
+    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(64);
+    let mut cmd = CommandBuilder::new("cmd.exe");
+    cmd.args(["/C", "echo %YATAMUX% %TERM_PROGRAM% %YATAMUX_SESSION%"]);
+
+    let _session = PtySession::spawn(default_size(), Some(cmd), output_tx, None).unwrap();
+
+    let output = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut all = Vec::new();
+        while let Some(data) = output_rx.recv().await {
+            all.extend_from_slice(&data);
+            let text = String::from_utf8_lossy(&all);
+            if text.contains("1 yatamux default") {
+                return text.into_owned();
+            }
+        }
+        String::from_utf8_lossy(&all).into_owned()
+    })
+    .await
+    .expect("timeout waiting for env var output");
+
+    assert!(
+        output.contains("1 yatamux default"),
+        "PTY child should receive yatamux env vars, got: {output:?}"
+    );
 }

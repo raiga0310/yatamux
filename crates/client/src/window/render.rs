@@ -194,13 +194,16 @@ impl ThemeLauncherRenderState {
 
 pub(crate) struct SavePromptRenderState {
     pub(crate) prompt: String,
+    pub(crate) cursor: usize,
     pub(crate) preview: PreviewRenderNode,
 }
 
 impl SavePromptRenderState {
     pub(crate) fn from_store(store: &PaneStore) -> Option<Self> {
+        let prompt = store.save_prompt.as_ref()?;
         Some(Self {
-            prompt: store.save_prompt.clone()?,
+            prompt: prompt.text.clone(),
+            cursor: prompt.cursor,
             preview: PreviewRenderNode::from_live_layout(&store.layout, &store.pane_commands),
         })
     }

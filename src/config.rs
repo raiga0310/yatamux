@@ -67,8 +67,12 @@ pub struct StatusBarConfig {
 }
 
 impl StatusBarConfig {
-    fn default_interval() -> u64 { 120 }
-    fn default_scroll_px() -> i32 { 2 }
+    fn default_interval() -> u64 {
+        120
+    }
+    fn default_scroll_px() -> i32 {
+        2
+    }
 }
 
 impl Default for StatusBarConfig {

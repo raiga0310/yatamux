@@ -61,7 +61,7 @@ pub mod window;
 pub use ime::{CellPixelPos, ImeHandler, ImeState, PreeditAttr, PreeditSegment};
 pub use layout::{
     CopyState, Direction, LauncherState, LayoutNode, LayoutPreview, PaneRect, PaneStore,
-    ThemeLauncherState, Toast,
+    PromptState, ThemeLauncherState, Toast,
 };
 pub use notification::{FocusAwareBackend, NotificationBackend};
 pub use session::{LayoutNodeDef, LayoutSnapshot};
