@@ -41,11 +41,14 @@ jobs:
           git checkout -b "$branch"
           git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to ${{ steps.version.outputs.new }}"
-          git push origin "$branch"
+          # 前回の失敗で同名ブランチが残っていても上書きできるよう --force
+          git push origin "$branch" --force
+          # PR がすでに存在する場合は作成をスキップ
           gh pr create \
             --title "chore: bump version to ${{ steps.version.outputs.new }}" \
             --body "自動バージョンバンプ PR。マージすると v${{ steps.version.outputs.new }} タグが作成され Release が起動します。" \
             --base master \
-            --head "$branch"
+            --head "$branch" \
+          || echo "PR already exists, skipping."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
