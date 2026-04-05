@@ -587,6 +587,7 @@ mod win32 {
             has_theme_launcher,
             has_save_prompt,
             floating_visible,
+            hovered_url,
         ) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
@@ -602,6 +603,7 @@ mod win32 {
             let htl = store.theme_launcher.is_some();
             let hsp = store.save_prompt.is_some();
             let fv = store.floating_visible;
+            let hu = store.hovered_url.clone();
             (
                 store.active,
                 store.scroll_offset,
@@ -614,6 +616,7 @@ mod win32 {
                 htl,
                 hsp,
                 fv,
+                hu,
             )
         };
 
@@ -811,6 +814,23 @@ mod win32 {
                         }
                     }
                     run.flush(mem_dc);
+                }
+
+                // ── URL ホバーアンダーライン ──────────────────────────────────
+                if let Some((url_pane, url_row, url_cs, url_ce, _)) = &hovered_url {
+                    if *url_pane == *pane_id && dirty_rows.contains(&(*url_row as u16)) {
+                        let ux = off_x + (*url_cs as i32) * state.cell_width;
+                        let uy =
+                            off_y + (*url_row as i32) * state.cell_height + state.cell_height - 2;
+                        let uw = (*url_ce as i32 - *url_cs as i32) * state.cell_width;
+                        // 水色アンダーライン
+                        let pen = CreatePen(PS_SOLID, 1, COLORREF(0x00_FF_D7_5F));
+                        let old_pen = SelectObject(mem_dc, pen.into());
+                        let _ = MoveToEx(mem_dc, ux, uy, None);
+                        let _ = LineTo(mem_dc, ux + uw, uy);
+                        SelectObject(mem_dc, old_pen);
+                        let _ = DeleteObject(pen.into());
+                    }
                 }
 
                 // プリエディット（アクティブペインのみ）
