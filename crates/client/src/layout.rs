@@ -456,7 +456,7 @@ mod tests {
 
     // TC-C19-R03: ネスト構造 Vertical(1, Horizontal(2, 3)) で方向ごとに別の Split が動く
     //
-    // `<`/`>` (Vertical) を Pane2 に適用 → 外側 Vertical ratio が変化、内側 Horizontal は不変
+    // `<`/`>` (Vertical) を Pane2 に適用 → 外側 Vertical ratio が変化（フォーカス位置によらず delta の符号が境界方向を決める）
     // `+`/`-` (Horizontal) を Pane2 に適用 → 内側 Horizontal ratio が変化、外側 Vertical は不変
     #[test]
     fn test_adjust_ratio_for_dir_vertical_changes_outer_not_inner() {
@@ -472,7 +472,7 @@ mod tests {
             }),
         };
 
-        // Vertical 調整 → 外側 Vertical ratio が変化（Pane2 は second 側なので減少）
+        // Vertical 調整 → 外側 Vertical ratio が増加（delta=+0.05 は常に ratio を増加させる）
         // 内側 Horizontal ratio は不変
         let mut layout = make_layout();
         let changed = layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Vertical);
@@ -487,8 +487,8 @@ mod tests {
         } = &layout
         {
             assert!(
-                (*outer - 0.45).abs() < 1e-6,
-                "outer Vertical ratio decreased: {outer}"
+                (*outer - 0.55).abs() < 1e-6,
+                "outer Vertical ratio increased: {outer}"
             );
             if let LayoutNode::Split { ratio: inner, .. } = second.as_ref() {
                 assert!(
@@ -537,6 +537,169 @@ mod tests {
         layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Vertical);
         if let LayoutNode::Split { ratio, .. } = layout {
             assert!((ratio - 0.9).abs() < 1e-6, "ratio clamped at 0.9");
+        }
+    }
+
+    // ── adjust_ratio_for_dir 方向一貫性テスト (F-6) ──────────────────────────
+
+    // TC-F6-01: Vertical 分割・first フォーカスで delta=+0.05 → ratio 増加（境界右に移動）
+    #[test]
+    fn test_f6_vertical_first_focus_positive_delta() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.55).abs() < 1e-6,
+                "first-focus >: ratio should be 0.55, got {ratio}"
+            );
+        }
+    }
+
+    // TC-F6-02: Vertical 分割・second フォーカスで delta=+0.05 → ratio 増加（境界右に移動、second が縮小）
+    #[test]
+    fn test_f6_vertical_second_focus_positive_delta() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.55).abs() < 1e-6,
+                "second-focus >: ratio should be 0.55 (same as first-focus), got {ratio}"
+            );
+        }
+    }
+
+    // TC-F6-03: Vertical 分割・first フォーカスで delta=-0.05 → ratio 減少（境界左に移動）
+    #[test]
+    fn test_f6_vertical_first_focus_negative_delta() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(1), -0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.45).abs() < 1e-6,
+                "first-focus <: ratio should be 0.45, got {ratio}"
+            );
+        }
+    }
+
+    // TC-F6-04: Vertical 分割・second フォーカスで delta=-0.05 → ratio 減少（境界左に移動、first が縮小）
+    #[test]
+    fn test_f6_vertical_second_focus_negative_delta() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(2), -0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.45).abs() < 1e-6,
+                "second-focus <: ratio should be 0.45 (same as first-focus), got {ratio}"
+            );
+        }
+    }
+
+    // TC-F6-05: Horizontal 分割・first フォーカスで delta=+0.05 → ratio 増加（境界下に移動）
+    #[test]
+    fn test_f6_horizontal_first_focus_positive_delta() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(1), 0.05, SplitDirection::Horizontal);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.55).abs() < 1e-6,
+                "first-focus +: ratio should be 0.55, got {ratio}"
+            );
+        }
+    }
+
+    // TC-F6-06: Horizontal 分割・second フォーカスで delta=+0.05 → ratio 増加（境界下に移動、second が縮小）
+    #[test]
+    fn test_f6_horizontal_second_focus_positive_delta() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Horizontal);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.55).abs() < 1e-6,
+                "second-focus +: ratio should be 0.55 (same as first-focus), got {ratio}"
+            );
+        }
+    }
+
+    // TC-F6-07: ネスト Split で second フォーカスでも内側の ratio が正しく動く
+    #[test]
+    fn test_f6_nested_second_focus_inner_adjust() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(1))),
+                second: Box::new(LayoutNode::Leaf(PaneId(2))),
+            }),
+            second: Box::new(LayoutNode::Leaf(PaneId(3))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Vertical);
+        // 内側 Split の ratio が増加（first-focus と同じ動作）し、外側は変わらない
+        if let LayoutNode::Split {
+            ratio: outer,
+            first,
+            ..
+        } = &layout
+        {
+            assert!(
+                (*outer - 0.5).abs() < 1e-6,
+                "outer ratio unchanged: {outer}"
+            );
+            if let LayoutNode::Split { ratio: inner, .. } = first.as_ref() {
+                assert!(
+                    (*inner - 0.55).abs() < 1e-6,
+                    "inner ratio increased: {inner}"
+                );
+            }
+        }
+    }
+
+    // TC-F6-08: second フォーカスでもクランプが機能する
+    #[test]
+    fn test_f6_clamp_with_second_focus() {
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.88,
+            first: Box::new(LayoutNode::Leaf(PaneId(1))),
+            second: Box::new(LayoutNode::Leaf(PaneId(2))),
+        };
+        layout.adjust_ratio_for_dir(PaneId(2), 0.05, SplitDirection::Vertical);
+        if let LayoutNode::Split { ratio, .. } = layout {
+            assert!(
+                (ratio - 0.9).abs() < 1e-6,
+                "ratio clamped at 0.9 with second focus: {ratio}"
+            );
         }
     }
 
