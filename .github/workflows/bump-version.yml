@@ -46,6 +46,9 @@ jobs:
           # 前回の失敗で同名ブランチ・タグが残っていても上書き
           git push origin "$branch" --force
           git push origin "v${{ steps.version.outputs.new }}" --force
+          # GITHUB_TOKEN で push したタグは他のワークフローをトリガーしないため、手動で呼び出す
+          gh workflow run release.yml --ref "v${{ steps.version.outputs.new }}" \
+            --field tag="v${{ steps.version.outputs.new }}"
           # PR が既存の場合はスキップ
           gh pr create \
             --title "chore: bump version to ${{ steps.version.outputs.new }}" \
