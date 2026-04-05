@@ -136,6 +136,8 @@ pub struct PaneStore {
     pub save_prompt: Option<String>,
     /// テーマランチャー UI の状態（Some = 表示中）
     pub theme_launcher: Option<ThemeLauncherState>,
+    /// ペイン ID → セッション保存時の作業ディレクトリ（SaveAndQuit 時に収集）
+    pub pane_cwds: HashMap<PaneId, String>,
     /// ペイン ID → 起動コマンド文字列（レイアウト適用時に記録、C-23）
     ///
     /// レイアウトファイルから適用されたコマンドのみ記録される。
@@ -168,6 +170,7 @@ impl PaneStore {
             normal_selection: None,
             save_prompt: None,
             theme_launcher: None,
+            pane_cwds: HashMap::new(),
             pane_commands: HashMap::new(),
             layout_changed: false,
         }

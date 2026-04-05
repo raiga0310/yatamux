@@ -144,12 +144,15 @@ pub enum ServerMessage {
     /// SaveAndQuit の通知（IPC 経由で SaveAndQuit を受信したときにブリッジへ転送）
     SaveAndQuit,
 
-    /// QueryAllPaneProcesses への応答。各ペインで動いているコマンド名（None = 不明）
+    /// QueryAllPaneProcesses への応答。各ペインで動いているコマンド名と作業ディレクトリ（None = 不明）
     ///
     /// JSON シリアライズで HashMap のキーは文字列になるため、
     /// ペイン ID の raw 値（u32）を文字列キーとして使う。
     AllPaneProcesses {
         commands: HashMap<String, Option<String>>,
+        /// 各ペインの現在の作業ディレクトリ（None = 取得不可）
+        #[serde(default)]
+        cwds: HashMap<String, Option<String>>,
     },
 }
 
@@ -190,12 +193,15 @@ mod tests {
         let mut commands = HashMap::new();
         commands.insert("1".to_string(), Some("claude".to_string()));
         commands.insert("2".to_string(), None);
-        let msg = ServerMessage::AllPaneProcesses { commands };
+        let msg = ServerMessage::AllPaneProcesses {
+            commands,
+            cwds: HashMap::new(),
+        };
         let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
         let restored: ServerMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         match restored {
-            ServerMessage::AllPaneProcesses { commands } => {
+            ServerMessage::AllPaneProcesses { commands, .. } => {
                 assert_eq!(commands.get("1"), Some(&Some("claude".to_string())));
                 assert_eq!(commands.get("2"), Some(&None));
             }
