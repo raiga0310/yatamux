@@ -56,6 +56,7 @@ pub(super) enum BridgeEvent {
         pane: PaneId,
         exit_code: Option<i32>,
     },
+    SaveAndQuit,
 }
 
 impl BridgeEvent {
@@ -84,6 +85,7 @@ impl BridgeEvent {
                 pane: *pane,
                 exit_code: *exit_code,
             }),
+            ServerMessage::SaveAndQuit => Some(Self::SaveAndQuit),
             _ => None,
         }
     }
@@ -376,6 +378,16 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                 None => "Command finished".to_string(),
                             };
                             notify_if_inactive(&pane_store, &notif_backend, pane, body);
+                        }
+                        BridgeEvent::SaveAndQuit => {
+                            // セッションを保存してから should_quit フラグを立てる
+                            // WM_TIMER が should_quit を検出して DestroyWindow を呼ぶ
+                            let path = yatamux_client::session::LayoutSnapshot::default_path();
+                            {
+                                let store = pane_store.lock().unwrap();
+                                yatamux_client::session::save_session(&store, &path);
+                            }
+                            pane_store.lock().unwrap().should_quit = true;
                         }
                     }
                 }

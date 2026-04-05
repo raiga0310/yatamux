@@ -337,6 +337,123 @@ pub async fn layout_export(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `yatamux update` — GitHub Releases から最新バイナリを取得してセルフアップデートする（C-38）
+///
+/// フロー:
+/// 1. GitHub API で最新バージョンを確認
+/// 2. 最新バージョンが現在より新しい場合のみ続行
+/// 3. `yatamux.exe` と `checksums.txt` をダウンロード
+/// 4. SHA256 を検証
+/// 5. `<exe>.new` に保存
+/// 6. IPC 経由で `SaveAndQuit` を送信
+/// 7. `--apply-update <pid> <new_path>` ヘルパーを起動して処理を委譲
+pub async fn update(session: &str) -> anyhow::Result<()> {
+    use crate::update::{
+        extract_checksum, need_update, parse_release_info, plan_update_paths, verify_checksum,
+    };
+
+    const GITHUB_API_URL: &str = "https://api.github.com/repos/raiga0310/cmux-win/releases/latest";
+    const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    eprintln!("現在のバージョン: v{}", CURRENT_VERSION);
+    eprintln!("GitHub Releases を確認中...");
+
+    // GitHub API で最新リリース情報を取得
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("yatamux/{}", CURRENT_VERSION))
+        .build()
+        .context("HTTP クライアントの初期化に失敗")?;
+
+    let resp = client
+        .get(GITHUB_API_URL)
+        .send()
+        .context("GitHub API への接続に失敗")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub API エラー: {}", resp.status());
+    }
+
+    let json = resp
+        .text()
+        .context("GitHub API レスポンスの読み取りに失敗")?;
+    let release = parse_release_info(&json).ok_or_else(|| {
+        anyhow::anyhow!("リリース情報のパースに失敗（yatamux.exe が見つかりません）")
+    })?;
+
+    eprintln!("最新バージョン: {}", release.tag_name);
+
+    if !need_update(CURRENT_VERSION, &release.tag_name) {
+        eprintln!("すでに最新バージョンです。");
+        return Ok(());
+    }
+
+    eprintln!("アップデートを開始します...");
+
+    // checksums.txt をダウンロード
+    let checksums_text = client
+        .get(&release.checksum_url)
+        .send()
+        .context("checksums.txt のダウンロードに失敗")?
+        .text()
+        .context("checksums.txt の読み取りに失敗")?;
+
+    // yatamux.exe をダウンロード
+    eprintln!("バイナリをダウンロード中: {}", release.asset_url);
+    let binary = client
+        .get(&release.asset_url)
+        .send()
+        .context("バイナリのダウンロードに失敗")?
+        .bytes()
+        .context("バイナリの読み取りに失敗")?;
+
+    // SHA256 検証
+    let expected_hash = extract_checksum(&checksums_text, "yatamux.exe").ok_or_else(|| {
+        anyhow::anyhow!("checksums.txt に yatamux.exe のエントリが見つかりません")
+    })?;
+    verify_checksum(&binary, expected_hash).context("SHA256 チェックサム検証に失敗")?;
+    eprintln!("チェックサム OK");
+
+    // <exe>.new に保存
+    let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
+    let (new_path, _) = plan_update_paths(&exe);
+    std::fs::write(&new_path, &binary)
+        .with_context(|| format!("バイナリの書き込みに失敗: {}", new_path.display()))?;
+    eprintln!("バイナリを書き込みました: {}", new_path.display());
+
+    // 現在のプロセス ID を取得
+    let current_pid = std::process::id();
+
+    // IPC 経由で SaveAndQuit を送信（yatamux GUI が起動中の場合）
+    match yatamux_client::connection::ServerConnection::connect(session).await {
+        Ok(conn) => {
+            eprintln!("yatamux インスタンスに SaveAndQuit を送信中...");
+            let _ = conn
+                .tx
+                .send(yatamux_protocol::ClientMessage::SaveAndQuit)
+                .await;
+            // 接続が切れるまで少し待つ
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err(_) => {
+            eprintln!("実行中の yatamux インスタンスが見つかりません（直接置換します）");
+        }
+    }
+
+    // --apply-update ヘルパーを起動
+    eprintln!("アップデートヘルパーを起動中...");
+    std::process::Command::new(&exe)
+        .args([
+            "--apply-update",
+            &current_pid.to_string(),
+            &new_path.to_string_lossy(),
+        ])
+        .spawn()
+        .context("アップデートヘルパーの起動に失敗")?;
+
+    eprintln!("アップデートヘルパーを起動しました。このプロセスを終了します。");
+    Ok(())
+}
+
 /// `\n` → LF、`\r` → CR、`\t` → TAB のエスケープ展開
 fn unescape(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());

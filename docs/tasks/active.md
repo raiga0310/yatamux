@@ -26,6 +26,46 @@
 - プロセス終了自動通知（F-4a）の実装により、OSC 133;D を設定しなくても
   プロセス終了時には通知が出るようになった
 
+### F-5: ペイン分割・リサイズ時の描画崩れ 【優先度: 高】
+
+ペインを分割したとき、またはペインをリサイズしたときに描画が正しく更新されない。
+
+- **症状**:
+  - ペイン分割直後に旧ペイン領域が残像として残る
+  - リサイズ後にセル・カーソル・罫線がずれる
+- **調査ポイント**:
+  - `compute_rects()` → `InvalidateRect` のタイミングが split/resize 後に呼ばれているか
+  - `Grid::resize()` で `dirty` フラグが全行セットされているか
+  - ConPTY への `Resize` メッセージと GUI 側 `Grid` のサイズが一致しているか（`WM_SIZE` → `ClientMessage::Resize` フロー）
+  - 分割後に新旧ペイン両方の `dirty` がクリアされずに残っていないか
+
+#### サブタスク
+
+- [ ] `docs/test-plan-pane-render-split-resize.md` を作成してテストケースを列挙する
+- [ ] `Grid::resize()` で dirty フラグが全行セットされることを単体テストで確認する
+- [ ] split/resize 後の `InvalidateRect` 呼び出しパスをトレースして抜け漏れを修正する
+- [ ] 修正後に Clippy・全テスト・rustfmt を通す
+
+### F-6: ペインによってリサイズの方向が反転して見える 【優先度: 高】
+
+`<`/`>` または `+`/`-` でペイン境界を動かしたとき、どのペインにフォーカスがあるかによって
+操作方向と実際に動く向きが逆になる。
+
+- **症状**:
+  - 同じキー操作でも、左ペインにフォーカスがある場合と右ペインにある場合で境界の移動方向が逆
+  - 上下分割でも同様に、上ペイン / 下ペインでキーの効きが入れ替わって見える
+- **調査ポイント**:
+  - `PaneTree` の split 比調整ロジックで「どちら側を基準に delta を加減算しているか」を確認
+  - `compute_rects()` がアクティブペインの位置に応じて delta の符号を反転させていないか
+  - `<`/`>` / `+`/`-` のハンドラ（`handle_pane_mode` 内）で渡す delta の符号が一方向に固定されているか
+
+#### サブタスク
+
+- [ ] `docs/test-plan-pane-resize-direction.md` を作成してテストケースを列挙する
+- [ ] split 比調整ロジックを単体テストで検証し、左右・上下それぞれで期待方向に動くことを確認する
+- [ ] delta 符号の計算を修正し、フォーカスペインに関わらず一貫した方向で動くようにする
+- [ ] 修正後に Clippy・全テスト・rustfmt を通す
+
 ## 機能
 
 
@@ -162,6 +202,46 @@ Agent 運用では `pane 3` のような数値 ID よりも、`tests` `server` `
 - [ ] regex マッチの対象範囲（screen のみ / scrollback 含む）を決める
 - [ ] タイムアウト・キャンセルとの組み合わせ仕様を定義する
 - [ ] `exec` / `subscribe` と共有できる内部待機基盤に寄せる
+
+### C-37: エージェント向け環境変数伝搬 + AGENTS.md 整備 【優先度: 中】
+
+Claude Code / Codex が yatamux 上で動作していることを検出し、ペイン操作 CLI の使い方を
+自動的に知れるようにする。
+
+- **概要**:
+  1. `PtySession::spawn` で `YATAMUX=1` / `TERM_PROGRAM=yatamux` を `CommandBuilder` に設定し、
+     子プロセス（シェル・エージェント）に伝搬する。
+  2. `AGENTS.md` を整備し、Codex が自動読み込みできる yatamux 操作ガイドを記述する。
+     （Claude Code は既存の `CLAUDE.md` が対応）
+- **狙い**: エージェントが「yatamux 上にいる」を環境変数で検出し、
+  `yatamux list-panes` / `send-keys` / `capture-pane` / `split-pane` などを
+  プロンプト注入なしに利用できるようにする。
+
+#### サブタスク
+
+- [x] `docs/test-plan-agent-env.md` を作成する
+- [x] `crates/terminal/tests/pty_integration.rs` に A-6 テストを追加（env var 伝搬確認）
+- [x] `crates/terminal/src/pty.rs` に `cmd.env()` 2行を追加
+- [x] `AGENTS.md` に Codex 向け操作ガイドを記述する
+
+### C-38: セルフアップデート機能（`yatamux update`） 【優先度: 中】
+
+エージェントが呼び出せる `yatamux update` サブコマンドを追加する。
+GitHub Releases からバイナリを取得し、実行中インスタンスのセッションを保持したままアップデートする。
+
+- **フロー**: GitHub Releases API で最新バージョン確認 → バイナリ + checksums.txt ダウンロード → SHA256 検証 → IPC 経由で実行中インスタンスに `SaveAndQuit` 送信 → `--apply-update` ヘルパーモードでバイナリ置換 → 新インスタンス起動 → `session.toml` から自動復元
+- **テスト計画**: `docs/test-plan-self-update.md`（Codex と壁打ちして策定）
+
+#### サブタスク
+
+- [x] `WM_CLOSE` 内の保存処理を `save_session(store, path)` に切り出す（`session.rs` に `pub fn save_session` として追加）
+- [x] `ClientMessage::SaveAndQuit` を `crates/protocol/src/message.rs` に追加する
+- [x] `SaveAndQuit` ハンドラをサーバー・app 側に実装する（`server/handlers/mod.rs` + `app/bridge.rs`）
+- [x] `yatamux --apply-update <pid> <new_path>` の内部ヘルパーモードを `src/main.rs` に追加する
+- [x] `yatamux update` サブコマンドを `src/cli.rs` に実装する（バージョン確認・ダウンロード・SHA256・IPC 連携）
+- [x] `.github/workflows/release.yml` を追加する（タグ push → ビルド → checksums.txt 付き Release 自動作成）
+- [x] unit test（TC-01〜08）を実装する（`src/update.rs`・`crates/protocol/src/message.rs`・`crates/client/src/session.rs`）
+- [ ] integration test（TC-09〜14）を実装する
 
 ## ドキュメント
 

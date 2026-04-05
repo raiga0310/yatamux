@@ -66,6 +66,9 @@ pub enum ClientMessage {
         #[serde(default)]
         plain_text: bool,
     },
+
+    /// セッションを保存してから終了する（セルフアップデート用）
+    SaveAndQuit,
 }
 
 /// サーバー → クライアント メッセージ
@@ -133,4 +136,33 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capture: Option<PaneCapture>,
     },
+
+    /// SaveAndQuit の通知（IPC 経由で SaveAndQuit を受信したときにブリッジへ転送）
+    SaveAndQuit,
+}
+
+// ── テスト ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // TC-06: SaveAndQuit の serde ラウンドトリップ
+    #[test]
+    fn test_save_and_quit_client_message_roundtrip() {
+        let msg = ClientMessage::SaveAndQuit;
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        assert!(matches!(restored, ClientMessage::SaveAndQuit));
+    }
+
+    #[test]
+    fn test_save_and_quit_server_message_roundtrip() {
+        let msg = ServerMessage::SaveAndQuit;
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ServerMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        assert!(matches!(restored, ServerMessage::SaveAndQuit));
+    }
 }
