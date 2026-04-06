@@ -4,7 +4,9 @@
 //! `list-panes` / `send-keys` を実行する。
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::Serialize;
+use std::time::Duration;
 use yatamux_client::connection::ServerConnection;
 use yatamux_protocol::types::{PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
@@ -15,6 +17,182 @@ struct CapturePaneJsonOutput {
     content: String,
     #[serde(flatten)]
     capture: PaneCapture,
+}
+
+#[derive(Debug)]
+enum WaitCondition {
+    Exit,
+    Silence(Duration),
+    OutputRegex { regex: Regex, lines: usize },
+}
+
+struct WaitResult {
+    exit_code: Option<i32>,
+}
+
+pub struct WaitOptions {
+    pub wait_for: crate::WaitForArg,
+    pub timeout_secs: u64,
+    pub output_regex: Option<String>,
+    pub silence_ms: u64,
+    pub lines: usize,
+}
+
+fn build_wait_condition(
+    wait_for: crate::WaitForArg,
+    output_regex: Option<&str>,
+    silence_ms: u64,
+    lines: usize,
+) -> Result<WaitCondition> {
+    match wait_for {
+        crate::WaitForArg::Exit => {
+            if output_regex.is_some() {
+                anyhow::bail!("--output-regex can only be used with --wait-for output-regex");
+            }
+            Ok(WaitCondition::Exit)
+        }
+        crate::WaitForArg::Silence => {
+            if output_regex.is_some() {
+                anyhow::bail!("--output-regex can only be used with --wait-for output-regex");
+            }
+            Ok(WaitCondition::Silence(Duration::from_millis(silence_ms)))
+        }
+        crate::WaitForArg::OutputRegex => {
+            let pattern =
+                output_regex.ok_or_else(|| anyhow::anyhow!("--output-regex is required"))?;
+            let regex = Regex::new(pattern)
+                .with_context(|| format!("invalid --output-regex pattern: {}", pattern))?;
+            Ok(WaitCondition::OutputRegex { regex, lines })
+        }
+    }
+}
+
+fn join_command(command: &[String]) -> String {
+    command.join(" ")
+}
+
+fn maybe_exit_with_code(result: WaitResult) {
+    if let Some(code) = result.exit_code {
+        if code != 0 {
+            eprintln!("Command exited with status {}", code);
+            std::process::exit(code);
+        }
+    }
+}
+
+async fn wait_for_condition(
+    conn: &mut ServerConnection,
+    pane_id: u32,
+    condition: &WaitCondition,
+    timeout: Duration,
+) -> Result<WaitResult> {
+    let pane = PaneId(pane_id);
+    let started = tokio::time::Instant::now();
+    let mut last_activity = tokio::time::Instant::now();
+    let mut next_capture_at = tokio::time::Instant::now();
+    let mut last_exit_code = None;
+
+    loop {
+        if started.elapsed() >= timeout {
+            anyhow::bail!("timeout waiting for pane {}", pane_id);
+        }
+
+        if let WaitCondition::Silence(duration) = condition {
+            if last_activity.elapsed() >= *duration {
+                return Ok(WaitResult {
+                    exit_code: last_exit_code,
+                });
+            }
+        }
+
+        if let WaitCondition::OutputRegex { lines, .. } = condition {
+            if tokio::time::Instant::now() >= next_capture_at {
+                conn.tx
+                    .send(ClientMessage::CapturePane {
+                        pane,
+                        lines: *lines,
+                        plain_text: true,
+                    })
+                    .await?;
+                next_capture_at = tokio::time::Instant::now() + Duration::from_millis(200);
+            }
+        }
+
+        let mut next_wait = Duration::from_millis(100);
+        let timeout_left = timeout.saturating_sub(started.elapsed());
+        if timeout_left < next_wait {
+            next_wait = timeout_left;
+        }
+        if let WaitCondition::Silence(duration) = condition {
+            let silence_left = duration.saturating_sub(last_activity.elapsed());
+            if silence_left < next_wait {
+                next_wait = silence_left;
+            }
+        }
+        if let WaitCondition::OutputRegex { .. } = condition {
+            let capture_left =
+                next_capture_at.saturating_duration_since(tokio::time::Instant::now());
+            if capture_left < next_wait {
+                next_wait = capture_left;
+            }
+        }
+        if next_wait.is_zero() {
+            next_wait = Duration::from_millis(1);
+        }
+
+        match tokio::time::timeout(next_wait, conn.rx.recv()).await {
+            Ok(Some(ServerMessage::Output {
+                pane: output_pane, ..
+            })) if output_pane == pane => {
+                last_activity = tokio::time::Instant::now();
+            }
+            Ok(Some(ServerMessage::CommandFinished {
+                pane: finished_pane,
+                exit_code,
+            })) if finished_pane == pane => {
+                last_activity = tokio::time::Instant::now();
+                last_exit_code = exit_code;
+                if matches!(condition, WaitCondition::Exit) {
+                    return Ok(WaitResult { exit_code });
+                }
+            }
+            Ok(Some(ServerMessage::PaneClosed { pane: closed_pane })) if closed_pane == pane => {
+                return match condition {
+                    WaitCondition::OutputRegex { .. } => Err(anyhow::anyhow!(
+                        "pane {} closed before regex matched",
+                        pane_id
+                    )),
+                    _ => Ok(WaitResult {
+                        exit_code: last_exit_code,
+                    }),
+                };
+            }
+            Ok(Some(ServerMessage::PaneContent {
+                pane: content_pane,
+                content,
+                ..
+            })) if content_pane == pane => {
+                if let WaitCondition::OutputRegex { regex, .. } = condition {
+                    if regex.is_match(&content) {
+                        return Ok(WaitResult {
+                            exit_code: last_exit_code,
+                        });
+                    }
+                }
+            }
+            Ok(Some(ServerMessage::Error { message })) => {
+                return Err(anyhow::anyhow!("{}", message));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                anyhow::bail!(
+                    "server closed connection while waiting for pane {}",
+                    pane_id
+                );
+            }
+            Err(_) => {}
+        }
+    }
 }
 
 async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
@@ -282,6 +460,83 @@ pub async fn send_keys(
     Ok(())
 }
 
+/// `yatamux wait-pane --pane <id> ...` — 指定ペインが条件を満たすまで待機する
+pub async fn wait_pane(session: &str, pane_id: u32, options: WaitOptions) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    if !pane_exists(&panes, pane_id) {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
+
+    let condition = build_wait_condition(
+        options.wait_for,
+        options.output_regex.as_deref(),
+        options.silence_ms,
+        options.lines,
+    )?;
+    let result = wait_for_condition(
+        &mut conn,
+        pane_id,
+        &condition,
+        Duration::from_secs(options.timeout_secs),
+    )
+    .await?;
+    maybe_exit_with_code(result);
+    Ok(())
+}
+
+/// `yatamux exec --pane <id> -- <command>` — コマンド送信と待機をまとめて行う
+pub async fn exec_command(
+    session: &str,
+    pane_id: u32,
+    command: Vec<String>,
+    raw: bool,
+    options: WaitOptions,
+) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    if !pane_exists(&panes, pane_id) {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
+
+    let condition = build_wait_condition(
+        options.wait_for,
+        options.output_regex.as_deref(),
+        options.silence_ms,
+        options.lines,
+    )?;
+    let command_text = join_command(&command);
+    let mut data = if raw {
+        command_text.into_bytes()
+    } else {
+        unescape(&command_text)
+    };
+    data.push(b'\r');
+
+    conn.tx
+        .send(ClientMessage::Input {
+            pane: PaneId(pane_id),
+            data,
+        })
+        .await?;
+
+    let result = wait_for_condition(
+        &mut conn,
+        pane_id,
+        &condition,
+        Duration::from_secs(options.timeout_secs),
+    )
+    .await?;
+    maybe_exit_with_code(result);
+    Ok(())
+}
+
 /// `yatamux interrupt-pane --pane <id>` — 指定ペインに Ctrl+C を送信する
 pub async fn interrupt_pane(session: &str, pane_id: u32) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
@@ -523,7 +778,8 @@ fn unescape(s: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::unescape;
+    use super::{build_wait_condition, join_command, unescape, WaitCondition};
+    use std::time::Duration;
 
     #[test]
     fn unescape_newline() {
@@ -543,5 +799,46 @@ mod tests {
     #[test]
     fn unescape_cjk() {
         assert_eq!(unescape("こんにちは"), "こんにちは".as_bytes());
+    }
+
+    #[test]
+    fn build_wait_condition_for_silence() {
+        let condition = build_wait_condition(crate::WaitForArg::Silence, None, 1500, 200)
+            .expect("wait condition should build");
+        match condition {
+            WaitCondition::Silence(duration) => {
+                assert_eq!(duration, Duration::from_millis(1500));
+            }
+            _ => panic!("unexpected wait condition"),
+        }
+    }
+
+    #[test]
+    fn build_wait_condition_for_output_regex() {
+        let condition =
+            build_wait_condition(crate::WaitForArg::OutputRegex, Some("passed"), 1500, 300)
+                .expect("wait condition should build");
+        match condition {
+            WaitCondition::OutputRegex { regex, lines } => {
+                assert!(regex.is_match("test passed"));
+                assert_eq!(lines, 300);
+            }
+            _ => panic!("unexpected wait condition"),
+        }
+    }
+
+    #[test]
+    fn build_wait_condition_rejects_invalid_regex() {
+        let err = build_wait_condition(crate::WaitForArg::OutputRegex, Some("("), 1500, 200)
+            .expect_err("invalid regex should fail");
+        assert!(err.to_string().contains("invalid --output-regex pattern"));
+    }
+
+    #[test]
+    fn join_command_with_spaces() {
+        assert_eq!(
+            join_command(&["cargo".to_string(), "test".to_string(), "-q".to_string()]),
+            "cargo test -q"
+        );
     }
 }

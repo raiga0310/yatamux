@@ -37,7 +37,7 @@ yatamux addresses these on Windows by using native APIs directly: ConPTY for PTY
 | **Copy mode** | `V` in Pane mode → Copy mode. `hjkl`/arrows to move cursor, `v` to start selection, `y`/Enter to yank to clipboard |
 | **Mouse selection** | Left-drag to select text; releases to clipboard automatically |
 | **External IPC** | Named pipe `\\.\pipe\yatamux-<session>` for CLI / agent integration |
-| **CLI tools** | `list-panes --json`, `send-keys --raw/--enter/--wait-for-prompt`, `interrupt-pane`, `close-pane`, `capture-pane --plain-text/--json`, `split-pane`, `layout list/export/delete` |
+| **CLI tools** | `list-panes --json`, `send-keys --raw/--enter/--wait-for-prompt`, `wait-pane`, `exec`, `interrupt-pane`, `close-pane`, `capture-pane --plain-text/--json`, `split-pane`, `layout list/export/delete` |
 | **Scrollback buffer** | Up to 50,000 lines; mouse-wheel scroll; open in `$EDITOR` via Pane mode `X` |
 | **Floating pane** | Overlay pane on top of the tiled layout (`Ctrl+F` to toggle) |
 | **Pane mode** | `Ctrl+B` enters Pane mode — status bar shows context-sensitive keybind hints |
@@ -142,6 +142,12 @@ yatamux list-panes --json
 # Send a command and wait for OSC 133;D command completion
 yatamux send-keys --pane 1 --enter --wait-for-prompt "cargo test"
 
+# Wait until a pane becomes quiet for 2 seconds
+yatamux wait-pane --pane 1 --wait-for silence --silence-ms 2000
+
+# Run a command and wait for a regex to appear in capture-pane output
+yatamux exec --pane 1 --wait-for output-regex --output-regex "test result: ok" -- cargo test
+
 # Interrupt a running job with Ctrl+C
 yatamux interrupt-pane --pane 1
 
@@ -171,6 +177,14 @@ These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-d
 - `command`: active child command when one is running outside the shell
 - `busy`: coarse job-running flag that flips true after input and false on command-finished notification
 - `last_output_unix_ms`: last observed pane output time in Unix epoch milliseconds
+
+`wait-pane` supports three conditions:
+
+- `--wait-for exit`: wait for `CommandFinished` or `PaneClosed`
+- `--wait-for silence --silence-ms <ms>`: wait until no new pane output is observed for the given duration
+- `--wait-for output-regex --output-regex <pattern>`: poll `capture-pane --plain-text` and match the regex against captured content
+
+`exec` sends the given command with an automatic Enter and then reuses the same wait conditions.
 
 `capture-pane --plain-text` keeps the legacy text dump behavior for scripts and copy/paste. `capture-pane --json` returns the same `content` plus structured metadata:
 
@@ -299,7 +313,7 @@ yatamux は ConPTY・Win32 GDI・IMM32 を直接使い、Windows ネイティブ
 | **コピーモード** | ペインモード `V` でコピーモードへ。`hjkl`/矢印でカーソル移動、`v` で選択開始、`y`/Enter でヤンク |
 | **マウス選択** | 左ドラッグでテキスト選択。離した瞬間にクリップボードへコピー |
 | **外部 IPC** | `\\.\pipe\yatamux-<session>` で CLI・エージェントからの操作を受け付け |
-| **CLI ツール** | `list-panes --json`、`send-keys --raw/--enter/--wait-for-prompt`、`interrupt-pane`、`close-pane`、`capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete` |
+| **CLI ツール** | `list-panes --json`、`send-keys --raw/--enter/--wait-for-prompt`、`wait-pane`、`exec`、`interrupt-pane`、`close-pane`、`capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete` |
 | **スクロールバック** | 最大 50,000 行。マウスホイールでスクロール。ペインモード `X` で `$EDITOR` 起動 |
 | **フローティングペイン** | タイルレイアウトの上に重なるオーバーレイペイン（`Ctrl+F` でトグル） |
 | **ペインモード** | `Ctrl+B` でペインモードへ。ステータスバーにキーバインドヒントを表示 |
@@ -404,6 +418,12 @@ yatamux list-panes --json
 # 指定ペインにコマンドを送信し、OSC 133;D まで待機
 yatamux send-keys --pane 1 --enter --wait-for-prompt "cargo test"
 
+# 2 秒間出力が止まるまで待機
+yatamux wait-pane --pane 1 --wait-for silence --silence-ms 2000
+
+# コマンドを送って、capture-pane 上で正規表現に一致するまで待機
+yatamux exec --pane 1 --wait-for output-regex --output-regex "test result: ok" -- cargo test
+
 # 実行中ジョブへ Ctrl+C を送る
 yatamux interrupt-pane --pane 1
 
@@ -433,6 +453,14 @@ yatamux layout delete work
 - `command`: シェル以外で実行中の子コマンド名
 - `busy`: 入力送信後からコマンド完了通知までを表す粗めの実行中フラグ
 - `last_output_unix_ms`: 最後にそのペインから出力を観測した Unix epoch ミリ秒
+
+`wait-pane` は次の待機条件に対応します。
+
+- `--wait-for exit`: `CommandFinished` または `PaneClosed` を待つ
+- `--wait-for silence --silence-ms <ms>`: 指定時間だけ新しい出力が来ない状態を待つ
+- `--wait-for output-regex --output-regex <pattern>`: `capture-pane --plain-text` の内容に正規表現が一致するまで待つ
+
+`exec` はコマンド送信時に自動で Enter を付け、同じ待機条件をそのまま使えます。
 
 `capture-pane --plain-text` は従来どおりスクリプト向けのプレーンテキストダンプを返します。`capture-pane --json` は同じ `content` に加えて、次のような構造化メタデータを返します。
 
