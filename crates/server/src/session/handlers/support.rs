@@ -49,6 +49,8 @@ pub(super) fn pane_info(
         title,
         cols,
         rows,
+        alias: pane.alias(),
+        role: pane.role(),
         cwd,
         command,
         busy: pane.busy(),

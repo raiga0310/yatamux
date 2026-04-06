@@ -173,9 +173,9 @@ enum Commands {
     ///   yatamux send-keys --pane 1 --raw --enter "C:\Users\raiga\dev"
     #[command(verbatim_doc_comment)]
     SendKeys {
-        /// 送信先ペイン ID
-        #[arg(long, value_name = "ID")]
-        pane: u32,
+        /// 送信先ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
         /// 送信するテキスト（エスケープ変換あり: \n=LF \r=CR \t=TAB \\=バックスラッシュ）
         text: String,
         /// 末尾に CR（Enter）を自動付加する
@@ -190,9 +190,9 @@ enum Commands {
     },
     /// 指定ペインが条件を満たすまで待機する
     WaitPane {
-        /// 対象ペイン ID
-        #[arg(long, value_name = "ID")]
-        pane: u32,
+        /// 対象ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
         /// 待機条件
         #[arg(long, value_enum, default_value = "exit")]
         wait_for: WaitForArg,
@@ -211,9 +211,9 @@ enum Commands {
     },
     /// 指定ペインでコマンドを実行し、条件を満たすまで待機する
     Exec {
-        /// 対象ペイン ID
-        #[arg(long, value_name = "ID")]
-        pane: u32,
+        /// 対象ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
         /// 待機条件
         #[arg(long, value_enum, default_value = "exit")]
         wait_for: WaitForArg,
@@ -242,29 +242,50 @@ enum Commands {
         )]
         command: Vec<String>,
     },
+    /// 指定ペインの出力ストリームを購読する
+    SubscribePane {
+        /// 対象ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
+        /// JSON Lines でイベントを出力する
+        #[arg(long)]
+        json: bool,
+    },
     /// 指定ペインに Ctrl+C を送信する
     InterruptPane {
-        /// 送信先ペイン ID
-        #[arg(long, value_name = "ID")]
-        pane: u32,
+        /// 送信先ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
     },
     /// 指定ペインの子プロセスを強制終了する
     TerminatePane {
-        /// 対象ペイン ID
-        #[arg(long, value_name = "ID")]
-        pane: u32,
+        /// 対象ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
     },
     /// 指定ペインを閉じる
     ClosePane {
-        /// 対象ペイン ID
-        #[arg(long, value_name = "ID")]
-        pane: u32,
+        /// 対象ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
+    },
+    /// ペインの alias / role メタデータを更新する
+    SetPaneMeta {
+        /// 対象ペイン ID または alias
+        #[arg(long, value_name = "ID|ALIAS")]
+        pane: String,
+        /// 論理名（alias）
+        #[arg(long)]
+        alias: Option<String>,
+        /// 役割ラベル（role）
+        #[arg(long)]
+        role: Option<String>,
     },
     /// 指定ペインの内容を表示（スクロールバック末尾 N 行 + 現在画面）
     CapturePane {
-        /// 対象ペイン ID
+        /// 対象ペイン ID または alias
         #[arg(long, default_value = "0")]
-        target: u32,
+        target: String,
         /// 取得する行数
         #[arg(long, default_value = "100")]
         lines: usize,
@@ -285,7 +306,7 @@ enum Commands {
         direction: SplitDirectionArg,
         /// 分割元ペイン ID（省略時は 0）
         #[arg(long)]
-        target: Option<u32>,
+        target: Option<String>,
     },
     /// レイアウトファイルを管理する（C-22）
     ///
@@ -378,7 +399,7 @@ async fn main() -> Result<()> {
             enter,
             raw,
             wait_for_prompt,
-        }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw, wait_for_prompt).await,
+        }) => cli::send_keys(DEFAULT_SESSION, &pane, &text, enter, raw, wait_for_prompt).await,
         Some(Commands::WaitPane {
             pane,
             wait_for,
@@ -389,7 +410,7 @@ async fn main() -> Result<()> {
         }) => {
             cli::wait_pane(
                 DEFAULT_SESSION,
-                pane,
+                &pane,
                 cli::WaitOptions {
                     wait_for,
                     timeout_secs: timeout,
@@ -412,7 +433,7 @@ async fn main() -> Result<()> {
         }) => {
             cli::exec_command(
                 DEFAULT_SESSION,
-                pane,
+                &pane,
                 command,
                 raw,
                 cli::WaitOptions {
@@ -425,15 +446,21 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, pane).await,
-        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(DEFAULT_SESSION, pane).await,
-        Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, pane).await,
+        Some(Commands::SubscribePane { pane, json }) => {
+            cli::subscribe_pane(DEFAULT_SESSION, &pane, json).await
+        }
+        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, &pane).await,
+        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(DEFAULT_SESSION, &pane).await,
+        Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, &pane).await,
+        Some(Commands::SetPaneMeta { pane, alias, role }) => {
+            cli::set_pane_meta(DEFAULT_SESSION, &pane, alias, role).await
+        }
         Some(Commands::CapturePane {
             target,
             lines,
             plain_text,
             json,
-        }) => cli::capture_pane(DEFAULT_SESSION, target, lines, plain_text, json).await,
+        }) => cli::capture_pane(DEFAULT_SESSION, &target, lines, plain_text, json).await,
         Some(Commands::SplitPane {
             dir,
             direction,
@@ -445,7 +472,7 @@ async fn main() -> Result<()> {
                     yatamux_protocol::types::SplitDirection::Horizontal
                 }
             };
-            cli::split_pane(DEFAULT_SESSION, target.unwrap_or(0), split_dir, dir).await
+            cli::split_pane(DEFAULT_SESSION, target.as_deref(), split_dir, dir).await
         }
         Some(Commands::Layout(sub)) => match sub {
             LayoutCommands::List => cli::layout_list().await,
@@ -524,7 +551,7 @@ mod tests {
                 wait_for_prompt,
                 ..
             }) => {
-                assert_eq!(pane, 1);
+                assert_eq!(pane, "1");
                 assert_eq!(text, "echo hi");
                 assert!(wait_for_prompt);
             }
@@ -552,7 +579,7 @@ mod tests {
                 json,
                 ..
             }) => {
-                assert_eq!(target, 1);
+                assert_eq!(target, "1");
                 assert_eq!(lines, 20);
                 assert!(json);
             }
@@ -567,7 +594,7 @@ mod tests {
 
         match cli.command {
             Some(Commands::InterruptPane { pane }) => {
-                assert_eq!(pane, 7);
+                assert_eq!(pane, "7");
             }
             _ => panic!("unexpected command"),
         }
@@ -581,7 +608,7 @@ mod tests {
 
         match cli.command {
             Some(Commands::WaitPane { pane, wait_for, .. }) => {
-                assert_eq!(pane, 3);
+                assert_eq!(pane, "3");
                 assert_eq!(wait_for, WaitForArg::Exit);
             }
             _ => panic!("unexpected command"),
@@ -612,7 +639,7 @@ mod tests {
                 lines,
                 ..
             }) => {
-                assert_eq!(pane, 2);
+                assert_eq!(pane, "2");
                 assert_eq!(wait_for, WaitForArg::OutputRegex);
                 assert_eq!(output_regex.as_deref(), Some("passed"));
                 assert_eq!(lines, 300);
@@ -644,7 +671,7 @@ mod tests {
                 command,
                 ..
             }) => {
-                assert_eq!(pane, 1);
+                assert_eq!(pane, "1");
                 assert_eq!(timeout, 30);
                 assert_eq!(command, vec!["cargo", "test", "-q"]);
             }
@@ -659,7 +686,7 @@ mod tests {
 
         match cli.command {
             Some(Commands::ClosePane { pane }) => {
-                assert_eq!(pane, 9);
+                assert_eq!(pane, "9");
             }
             _ => panic!("unexpected command"),
         }
@@ -672,7 +699,45 @@ mod tests {
 
         match cli.command {
             Some(Commands::TerminatePane { pane }) => {
-                assert_eq!(pane, 11);
+                assert_eq!(pane, "11");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_subscribe_pane() {
+        let cli = Cli::try_parse_from(["yatamux", "subscribe-pane", "--pane", "tests", "--json"])
+            .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::SubscribePane { pane, json }) => {
+                assert_eq!(pane, "tests");
+                assert!(json);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_set_pane_meta() {
+        let cli = Cli::try_parse_from([
+            "yatamux",
+            "set-pane-meta",
+            "--pane",
+            "tests",
+            "--alias",
+            "tests",
+            "--role",
+            "verifier",
+        ])
+        .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::SetPaneMeta { pane, alias, role }) => {
+                assert_eq!(pane, "tests");
+                assert_eq!(alias.as_deref(), Some("tests"));
+                assert_eq!(role.as_deref(), Some("verifier"));
             }
             _ => panic!("unexpected command"),
         }

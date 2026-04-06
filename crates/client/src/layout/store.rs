@@ -328,6 +328,10 @@ pub struct PaneStore {
     pub pane_commands: HashMap<PaneId, String>,
     /// ペイン ID → セッション保存時の作業ディレクトリ（SaveAndQuit 時に収集）
     pub pane_cwds: HashMap<PaneId, String>,
+    /// ペイン ID → 論理名（alias）
+    pub pane_aliases: HashMap<PaneId, String>,
+    /// ペイン ID → 役割ラベル（role）
+    pub pane_roles: HashMap<PaneId, String>,
     /// レイアウト変更フラグ（split / close 後に `true` にする）
     ///
     /// `WM_TIMER` で検出し `content_bb` を破棄して全画面再描画をトリガーする。
@@ -367,6 +371,8 @@ impl PaneStore {
             theme_launcher: None,
             pane_commands: HashMap::new(),
             pane_cwds: HashMap::new(),
+            pane_aliases: HashMap::new(),
+            pane_roles: HashMap::new(),
             layout_changed: false,
             hovered_url: None,
             news_text: String::new(),

@@ -4,10 +4,12 @@
 //! パイプ名: \\.\pipe\yatamux-{session_name}
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
+use yatamux_protocol::types::PaneId;
 use yatamux_protocol::{ClientMessage, ServerMessage};
 
 /// 名前付きパイプのベース名
@@ -119,6 +121,37 @@ pub async fn run_ipc_server(
 /// - パイプ読み取り: クライアントメッセージ → server_tx
 /// - パイプ書き込み: bcast_rx からの ServerMessage → クライアント
 #[cfg(windows)]
+fn should_forward_message(msg: &ServerMessage, subscriptions: &HashSet<PaneId>) -> bool {
+    if subscriptions.is_empty() {
+        return true;
+    }
+
+    match msg {
+        ServerMessage::Output { pane, .. }
+        | ServerMessage::TitleChanged { pane, .. }
+        | ServerMessage::Notification { pane, .. }
+        | ServerMessage::ClipboardWrite { pane, .. }
+        | ServerMessage::PaneClosed { pane }
+        | ServerMessage::CommandFinished { pane, .. }
+        | ServerMessage::PaneContent { pane, .. }
+        | ServerMessage::PaneMetaUpdated { pane, .. } => subscriptions.contains(pane),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+async fn write_server_message(
+    writer: &mut tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>,
+    msg: &ServerMessage,
+) -> std::io::Result<()> {
+    let json = serde_json::to_string(msg).map_err(|err| {
+        std::io::Error::other(format!("failed to serialize server message: {}", err))
+    })?;
+    let line = format!("{}\n", json);
+    writer.write_all(line.as_bytes()).await
+}
+
+#[cfg(windows)]
 async fn handle_client(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
     server_tx: mpsc::Sender<ClientMessage>,
@@ -126,6 +159,7 @@ async fn handle_client(
 ) {
     let (reader, mut writer) = tokio::io::split(pipe);
     let mut lines = BufReader::new(reader).lines();
+    let mut subscriptions = HashSet::<PaneId>::new();
 
     loop {
         tokio::select! {
@@ -135,8 +169,18 @@ async fn handle_client(
                         match serde_json::from_str::<ClientMessage>(&line) {
                             Ok(msg) => {
                                 debug!("IPC recv: {:?}", msg);
-                                if server_tx.send(msg).await.is_err() {
-                                    break;
+                                match msg {
+                                    ClientMessage::SubscribePane { pane } => {
+                                        subscriptions.insert(pane);
+                                    }
+                                    ClientMessage::UnsubscribePane { pane } => {
+                                        subscriptions.remove(&pane);
+                                    }
+                                    other => {
+                                        if server_tx.send(other).await.is_err() {
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => warn!("Failed to parse client message: {}", e),
@@ -148,15 +192,25 @@ async fn handle_client(
             result = bcast_rx.recv() => {
                 match result {
                     Ok(msg) => {
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let line = format!("{}\n", json);
-                            if writer.write_all(line.as_bytes()).await.is_err() {
-                                break;
-                            }
+                        if should_forward_message(&msg, &subscriptions)
+                            && write_server_message(&mut writer, &msg).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("IPC broadcast lagged by {} messages", n);
+                        if !subscriptions.is_empty() {
+                            let lag_msg = ServerMessage::Error {
+                                message: format!(
+                                    "subscription lagged by {} messages; stream output may be incomplete",
+                                    n
+                                ),
+                            };
+                            if write_server_message(&mut writer, &lag_msg).await.is_err() {
+                                break;
+                            }
+                        }
                     }
                     Err(_) => break,
                 }
@@ -165,4 +219,58 @@ async fn handle_client(
     }
 
     info!("Client disconnected");
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::should_forward_message;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use yatamux_protocol::types::{PaneId, SurfaceId};
+    use yatamux_protocol::ServerMessage;
+
+    #[test]
+    fn subscribed_client_only_receives_target_pane_stream_events() {
+        let mut subscriptions = HashSet::new();
+        subscriptions.insert(PaneId(3));
+
+        assert!(should_forward_message(
+            &ServerMessage::Output {
+                pane: PaneId(3),
+                data: Arc::from(&b"ok"[..]),
+            },
+            &subscriptions,
+        ));
+        assert!(!should_forward_message(
+            &ServerMessage::Output {
+                pane: PaneId(4),
+                data: Arc::from(&b"ng"[..]),
+            },
+            &subscriptions,
+        ));
+        assert!(!should_forward_message(
+            &ServerMessage::PanesListed { panes: Vec::new() },
+            &subscriptions,
+        ));
+        assert!(!should_forward_message(
+            &ServerMessage::SurfaceCreated {
+                id: SurfaceId(1),
+                workspace: yatamux_protocol::types::WorkspaceId(1),
+            },
+            &subscriptions,
+        ));
+    }
+
+    #[test]
+    fn unsubscribed_client_keeps_receiving_broadcast_messages() {
+        let subscriptions = HashSet::new();
+        assert!(should_forward_message(
+            &ServerMessage::PanesListed { panes: Vec::new() },
+            &subscriptions,
+        ));
+        assert!(should_forward_message(
+            &ServerMessage::PaneClosed { pane: PaneId(9) },
+            &subscriptions,
+        ));
+    }
 }

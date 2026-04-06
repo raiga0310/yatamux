@@ -37,6 +37,12 @@ pub(crate) enum PaneEvent {
     CommandFinished(Option<i32>),
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PaneMeta {
+    pub alias: Option<String>,
+    pub role: Option<String>,
+}
+
 /// ペインの状態
 pub struct Pane {
     pub id: PaneId,
@@ -52,6 +58,10 @@ pub struct Pane {
     child_killer: std::sync::Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     /// ConPTY 直接子プロセスの PID（プロセスツリー走査に使用）
     pub child_pid: Option<u32>,
+    /// ペインの論理名（CLI から ID の代わりに参照できる）
+    alias: Arc<std::sync::Mutex<Option<String>>>,
+    /// ペインの役割ラベル
+    role: Arc<std::sync::Mutex<Option<String>>>,
     /// 入力送信後から完了通知までのざっくりした busy フラグ
     busy: Arc<std::sync::Mutex<bool>>,
     /// 最後に出力を受け取った時刻（Unix epoch ms）
@@ -75,10 +85,13 @@ impl Pane {
         client_output_tx: mpsc::Sender<(PaneId, Arc<[u8]>)>,
         client_event_tx: mpsc::Sender<(PaneId, PaneEvent)>,
         working_dir: Option<String>,
+        meta: PaneMeta,
     ) -> Result<Self> {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
         let title = Arc::new(std::sync::Mutex::new(Arc::<str>::from("")));
         let pane_size = Arc::new(std::sync::Mutex::new(size));
+        let alias = Arc::new(std::sync::Mutex::new(meta.alias));
+        let role = Arc::new(std::sync::Mutex::new(meta.role));
         let busy = Arc::new(std::sync::Mutex::new(false));
         let last_output_unix_ms = Arc::new(std::sync::Mutex::new(None));
 
@@ -188,6 +201,8 @@ impl Pane {
             size: pane_size,
             child_killer: std::sync::Mutex::new(child_killer),
             child_pid,
+            alias,
+            role,
             busy,
             last_output_unix_ms,
         })
@@ -213,6 +228,19 @@ impl Pane {
 
     pub fn mark_busy(&self, busy: bool) {
         *self.busy.lock().unwrap() = busy;
+    }
+
+    pub fn alias(&self) -> Option<String> {
+        self.alias.lock().unwrap().clone()
+    }
+
+    pub fn role(&self) -> Option<String> {
+        self.role.lock().unwrap().clone()
+    }
+
+    pub fn set_meta(&self, alias: Option<String>, role: Option<String>) {
+        *self.alias.lock().unwrap() = alias;
+        *self.role.lock().unwrap() = role;
     }
 
     pub fn busy(&self) -> bool {
