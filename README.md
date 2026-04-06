@@ -196,11 +196,35 @@ These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-d
 - `--wait-for silence --silence-ms <ms>`: wait until no new pane output is observed for the given duration
 - `--wait-for output-regex --output-regex <pattern>`: poll `capture-pane --plain-text` and match the regex against captured content
 
-`exec` sends the given command with an automatic Enter and then reuses the same wait conditions. `send-keys --wait-for-prompt`, `close-pane`, and `terminate-pane` also use the same internal pane wait substrate, so timeout and event handling stay aligned.
+`exec` sends the given command with an automatic Enter and uses the same wait conditions as `wait-pane`, but it now runs as a single IPC request with `request_id` correlation. `send-keys --wait-for-prompt`, `close-pane`, and `terminate-pane` also use the same internal pane wait substrate, so timeout and event handling stay aligned.
 
 `subscribe-pane` provides a live event stream without `capture-pane` polling. The default mode writes raw output chunks to stdout. `--json` switches to JSON Lines events such as `output`, `notification`, `command_finished`, `pane_closed`, and `lagged`.
 
 `--pane` / `--target` accept either a numeric pane ID or an alias set by `set-pane-meta`. `list-panes --json` also includes optional `alias` / `role` fields so agents can pick panes by logical name instead of ephemeral IDs.
+
+### Claude Code Orchestration
+
+The repository includes a Claude Code oriented orchestration bundle under `integrations/claude-code/`.
+
+- `integrations/claude-code/SKILL.md`: the core pane orchestration workflow
+- `integrations/claude-code/scripts/new-worker-pane.ps1`: create a pane, assign alias / role, and optionally bootstrap it
+- `integrations/claude-code/scripts/watch-pane.ps1`: stream live output with `subscribe-pane` or take a snapshot with `capture-pane`
+
+Example flow:
+
+```powershell
+pwsh -File integrations/claude-code/scripts/new-worker-pane.ps1 `
+  -Alias tests `
+  -Role verifier `
+  -Dir C:\src\repo `
+  -BootstrapCommand "claude --continue"
+
+yatamux send-keys --pane tests --enter --raw "Run the focused test suite and summarize failures."
+
+pwsh -File integrations/claude-code/scripts/watch-pane.ps1 -Pane tests -Json
+```
+
+This keeps the main pane clean while the worker runs in a labeled pane that can be monitored, interrupted, or closed independently.
 
 The pane control commands are intentionally distinct:
 
@@ -281,7 +305,7 @@ An IPC server (`\\.\pipe\yatamux-<session>`) also starts automatically for exter
 ### Roadmap
 
 - [ ] Remote monitoring via WebSocket bridge (read-only preview from browser / mobile)
-- [ ] Claude Code integration skill (MCP server or prompt scaffolding for AI orchestration)
+- [x] Claude Code integration skill (prompt scaffolding + wrapper scripts for AI orchestration)
 - [x] Copy mode — keyboard text selection + clipboard yank (`V` in Pane mode)
 - [x] `capture-pane` CLI — AI-readable pane content dump
 - [x] `split-pane --dir` CLI — open a new pane in any working directory
@@ -494,11 +518,35 @@ yatamux layout delete work
 - `--wait-for silence --silence-ms <ms>`: 指定時間だけ新しい出力が来ない状態を待つ
 - `--wait-for output-regex --output-regex <pattern>`: `capture-pane --plain-text` の内容に正規表現が一致するまで待つ
 
-`exec` はコマンド送信時に自動で Enter を付け、同じ待機条件をそのまま使えます。`send-keys --wait-for-prompt`、`close-pane`、`terminate-pane` も同じ内部待機基盤を使うので、タイムアウトやイベント解釈の挙動がそろいます。
+`exec` はコマンド送信時に自動で Enter を付け、`wait-pane` と同じ待機条件を使えます。内部的には `request_id` 付きの単一 IPC request として処理されるため、複数の `exec` を同時に流しても結果を相関できます。`send-keys --wait-for-prompt`、`close-pane`、`terminate-pane` も同じ内部待機基盤を使うので、タイムアウトやイベント解釈の挙動がそろいます。
 
 `subscribe-pane` は `capture-pane` のポーリングなしでライブ監視できる購読コマンドです。既定では生の出力チャンクを stdout に流し、`--json` を付けると `output` / `notification` / `command_finished` / `pane_closed` / `lagged` の JSON Lines を出力します。
 
 `--pane` / `--target` には数値 ID だけでなく、`set-pane-meta` で付けた alias も使えます。`list-panes --json` には `alias` / `role` も含まれるので、エージェントは変動しやすい pane ID ではなく論理名で対象を選べます。
+
+### Claude Code 連携
+
+`integrations/claude-code/` に、Claude Code が yatamux を worker pane オーケストレーションに使うための素材を同梱しています。
+
+- `integrations/claude-code/SKILL.md`: 基本フローと運用ルール
+- `integrations/claude-code/scripts/new-worker-pane.ps1`: 新しい worker pane の作成、alias / role 付与、初期コマンド送信
+- `integrations/claude-code/scripts/watch-pane.ps1`: `subscribe-pane` によるライブ監視、または `capture-pane` によるスナップショット取得
+
+例:
+
+```powershell
+pwsh -File integrations/claude-code/scripts/new-worker-pane.ps1 `
+  -Alias tests `
+  -Role verifier `
+  -Dir C:\src\repo `
+  -BootstrapCommand "claude --continue"
+
+yatamux send-keys --pane tests --enter --raw "対象のテストだけ実行して、失敗時は要因をまとめてください。"
+
+pwsh -File integrations/claude-code/scripts/watch-pane.ps1 -Pane tests -Json
+```
+
+この流れなら、メイン pane を汚さずに worker を分離し、進捗の監視・割り込み・終了判断を alias ベースで扱えます。
 
 ペイン制御コマンドの役割分担は次の通りです。
 
@@ -579,7 +627,7 @@ yatamux (bin)
 ### ロードマップ
 
 - [ ] WebSocket ブリッジ（ブラウザ / スマホからの読み取り専用リモート監視）
-- [ ] Claude Code 統合スキル（AI オーケストレーション向け MCP サーバーまたはプロンプト定義）
+- [x] Claude Code 統合スキル（AI オーケストレーション向けプロンプト定義 + wrapper script）
 - [x] コピーモード — キーボードによるテキスト選択 + クリップボードヤンク（ペインモード `V`）
 - [x] `capture-pane` CLI — AI が読みやすいペイン内容ダンプ
 - [x] `split-pane --dir` CLI — 任意の作業ディレクトリで新ペインを作成

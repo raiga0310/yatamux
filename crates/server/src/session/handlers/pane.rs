@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use tracing::info;
-use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId, TermSize};
+use yatamux_protocol::types::{
+    ExecStatus, ExecWaitCondition, PaneId, SplitDirection, SurfaceId, TermSize,
+};
 use yatamux_protocol::ServerMessage;
 
 use super::super::tree::split_pane_tree;
@@ -71,6 +73,57 @@ impl Server {
         Ok(())
     }
 
+    pub(super) async fn handle_exec_request(
+        &mut self,
+        request_id: String,
+        pane: PaneId,
+        data: Vec<u8>,
+        wait: ExecWaitCondition,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        let pending =
+            match super::super::PendingExec::new(request_id.clone(), pane, wait, timeout_ms) {
+                Ok(pending) => pending,
+                Err(err) => {
+                    self.send_exec_result(
+                        request_id,
+                        pane,
+                        ExecStatus::Error,
+                        None,
+                        Some(err.to_string()),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+        if let Some(p) = self.panes.get(&pane) {
+            p.mark_busy(true);
+            if let Err(err) = p.send_input(data).await {
+                self.send_exec_result(
+                    request_id,
+                    pane,
+                    ExecStatus::Error,
+                    None,
+                    Some(err.to_string()),
+                )
+                .await?;
+                return Ok(());
+            }
+            self.pending_execs.push(pending);
+        } else {
+            self.send_exec_result(
+                request_id,
+                pane,
+                ExecStatus::Error,
+                None,
+                Some(format!("pane {} not found", pane.0)),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn handle_resize(&mut self, pane: PaneId, size: TermSize) -> Result<()> {
         if let Some(p) = self.panes.get(&pane) {
             p.resize(size).await?;
@@ -89,6 +142,7 @@ impl Server {
         self.client_tx
             .send(ServerMessage::PaneClosed { pane })
             .await?;
+        self.finish_execs_for_closed_pane(pane).await;
         Ok(())
     }
 

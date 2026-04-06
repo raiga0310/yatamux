@@ -1,6 +1,6 @@
 mod pane;
 mod query;
-mod support;
+pub(crate) mod support;
 mod workspace;
 
 use anyhow::{Context, Result};
@@ -27,6 +27,16 @@ impl Server {
                     .await
             }
             ClientMessage::Input { pane, data } => self.handle_input(pane, data).await,
+            ClientMessage::Exec {
+                request_id,
+                pane,
+                data,
+                wait,
+                timeout_ms,
+            } => {
+                self.handle_exec_request(request_id, pane, data, wait, timeout_ms)
+                    .await
+            }
             ClientMessage::Resize { pane, size } => self.handle_resize(pane, size).await,
             ClientMessage::ClosePane { pane } => self.handle_close_pane(pane).await,
             ClientMessage::InterruptPane { pane } => self.handle_interrupt_pane(pane).await,

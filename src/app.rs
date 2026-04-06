@@ -84,6 +84,14 @@ fn build_theme(appearance: &AppearanceConfig) -> Theme {
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 
+#[cfg(test)]
+pub(crate) fn appdata_env_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 /// アプリを起動する
 ///
 /// `layout_name` が `Some` の場合、`%APPDATA%\yatamux\layouts\<name>.toml` を読み込み

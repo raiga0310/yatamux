@@ -44,3 +44,13 @@
 - **前提**: prompt 待機が `wait-pane --wait-for exit` と同じ内部待機経路に寄っている
 - **操作**: `CommandFinished { exit_code: Some(0) }` と `CommandFinished { exit_code: Some(2) }` を評価する
 - **期待結果**: 0 は成功、非 0 は exit code を保持した結果になる
+
+### TC-10: `exec` request / result の serde が request_id を保持する
+- **前提**: `yatamux-protocol` に `Exec` / `ExecResult` を追加する
+- **操作**: request / result を JSON roundtrip する
+- **期待結果**: `request_id`、待機条件、status、exit code が失われない
+
+### TC-11: 同一接続で複数の `exec` を流しても request_id で結果を相関できる
+- **前提**: IPC / server 側で `request_id` を持つ `ExecResult` を返す
+- **操作**: 異なる `request_id` の結果を順不同で受け取る
+- **期待結果**: 呼び出し側は対象 `request_id` の結果だけを採用できる

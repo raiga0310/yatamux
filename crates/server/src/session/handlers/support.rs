@@ -2,7 +2,7 @@ use yatamux_protocol::types::{CursorInfo, PaneCapture, PaneId, PaneInfo, Surface
 
 use crate::pane::Pane;
 
-pub(super) async fn build_capture_response(pane: &Pane, lines: usize) -> (String, PaneCapture) {
+pub(crate) async fn build_capture_response(pane: &Pane, lines: usize) -> (String, PaneCapture) {
     let grid = pane.grid.lock().await;
     let visible_text = visible_text(&grid);
     let scrollback_tail = scrollback_tail(&grid, lines);
