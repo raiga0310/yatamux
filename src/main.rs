@@ -356,6 +356,70 @@ enum WaitForArg {
     OutputRegex,
 }
 
+fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::ListPanes { .. } => "list-panes",
+        Commands::SendKeys { .. } => "send-keys",
+        Commands::WaitPane { .. } => "wait-pane",
+        Commands::Exec { .. } => "exec",
+        Commands::SubscribePane { .. } => "subscribe-pane",
+        Commands::InterruptPane { .. } => "interrupt-pane",
+        Commands::TerminatePane { .. } => "terminate-pane",
+        Commands::ClosePane { .. } => "close-pane",
+        Commands::SetPaneMeta { .. } => "set-pane-meta",
+        Commands::CapturePane { .. } => "capture-pane",
+        Commands::SplitPane { .. } => "split-pane",
+        Commands::Layout(_) => "layout",
+        Commands::Update => "update",
+    }
+}
+
+fn is_truthy_env(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
+fn maybe_write_startup_probe(cli: &Cli) -> Result<bool> {
+    use anyhow::Context;
+    use std::io::Write;
+
+    let Ok(probe_path) = std::env::var("YATAMUX_STARTUP_PROBE_FILE") else {
+        return Ok(false);
+    };
+
+    let payload = serde_json::json!({
+        "pid": std::process::id(),
+        "session": cli.session,
+        "appdata": std::env::var("APPDATA").ok(),
+        "exe": std::env::current_exe().ok(),
+        "command": cli.command.as_ref().map(command_name),
+        "apply_update": cli.apply_update.is_some(),
+        "launch": cli.launch,
+        "layout": cli.layout.as_deref(),
+        "args": std::env::args().collect::<Vec<_>>(),
+    });
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&probe_path)
+        .with_context(|| format!("startup probe ファイルを開けませんでした: {}", probe_path))?;
+    serde_json::to_writer(&mut file, &payload).with_context(|| {
+        format!(
+            "startup probe JSON の書き込みに失敗しました: {}",
+            probe_path
+        )
+    })?;
+    writeln!(file)
+        .with_context(|| format!("startup probe 改行の書き込みに失敗しました: {}", probe_path))?;
+
+    Ok(is_truthy_env("YATAMUX_STARTUP_PROBE_EXIT")
+        && cli.command.is_none()
+        && cli.apply_update.is_none())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
@@ -385,6 +449,10 @@ async fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    std::env::set_var("YATAMUX_SESSION", &cli.session);
+    if maybe_write_startup_probe(&cli)? {
+        return Ok(());
+    }
 
     // --apply-update <pid> <new_path> [--launch] モード
     if let Some(args) = cli.apply_update {
@@ -502,6 +570,22 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
     use anyhow::Context;
 
     let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
+    if let Ok(probe_path) = std::env::var("YATAMUX_UPDATE_HELPER_PROBE_FILE") {
+        let payload = serde_json::json!({
+            "pid": pid,
+            "new_path": new_path,
+            "launch": launch,
+            "session": std::env::var("YATAMUX_SESSION").ok(),
+            "exe": exe,
+        });
+        std::fs::write(&probe_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
+            format!(
+                "ヘルパー probe ファイルの書き込みに失敗しました: {}",
+                probe_path
+            )
+        })?;
+        return Ok(());
+    }
 
     if pid != 0 {
         eprintln!("PID {} の終了を待機中...", pid);
@@ -527,7 +611,6 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
     } else {
         eprintln!("バイナリ置換完了。");
     }
-
     Ok(())
 }
 

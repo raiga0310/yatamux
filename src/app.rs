@@ -53,7 +53,9 @@ async fn fetch_rss_headlines(url: &str) -> anyhow::Result<String> {
 
 use crate::app::{
     bootstrap::bootstrap_runtime,
-    bridge::{spawn_bridge_fanout, spawn_server_bridge, BridgeChannels, ServerBridge},
+    bridge::{
+        spawn_bridge_fanout, spawn_server_bridge, sync_pane_state, BridgeChannels, ServerBridge,
+    },
     layout_restore::load_initial_layout,
 };
 use crate::config::{parse_hex_color, AppConfig, AppearanceConfig};
@@ -178,6 +180,7 @@ pub async fn run(
     let hooks = app_config.hooks;
     let theme = build_theme(&app_config.appearance);
     let bridge_rx = spawn_bridge_fanout(server_rx, ipc_out_tx);
+    let state_sync_tx = client_tx.clone();
     spawn_server_bridge(
         ServerBridge {
             server_rx: bridge_rx,
@@ -195,6 +198,7 @@ pub async fn run(
             layout_rx,
         },
     );
+    sync_pane_state(&state_sync_tx, &pane_store).await;
 
     let news_scroll_px_per_tick = app_config.status_bar.news_scroll_px_per_tick;
 

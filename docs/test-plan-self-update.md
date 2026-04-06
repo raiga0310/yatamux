@@ -87,6 +87,26 @@ Codex との壁打ち（2026-04-05）を経て策定。
 - **期待結果**: `old → .bak`、`new → yatamux.exe`、新 exe が起動できる
 - **注意**: 待機は `sleep` ではなく process handle / PID wait で行うこと
 
+#### TC-15: `--apply-update` ヘルパーモードが probe 環境変数で即時起動確認できる
+- **前提**: `YATAMUX_UPDATE_HELPER_PROBE_FILE` を指定する
+- **操作**: 実バイナリに `--apply-update <pid> <new_path> [--launch]` を渡して起動する
+- **期待結果**: 実際の rename / launch に入る前に probe ファイルが書かれ、`pid` / `new_path` / `launch` / `session` が記録されて即時終了する
+
+#### TC-16: `yatamux update` の fallback 経路が helper を spawn して親プロセスが戻る
+- **前提**: IPC 接続先のセッションが存在しない、mock HTTP で release / checksums / binary を返す、`YATAMUX_UPDATE_HELPER_PROBE_FILE` を指定する
+- **操作**: temp dir にコピーした実バイナリへ `yatamux update` を実行する
+- **期待結果**: `.new` への staging 後に helper が起動され、親プロセスはタイムアウトせず終了し、probe ファイルから helper 引数を確認できる
+
+#### TC-17: `yatamux update` の GUI 経路が helper を detached spawn して親プロセスが戻る
+- **前提**: 実 GUI セッションを起動して IPC 接続できる、mock HTTP で release / checksums / binary を返す、`YATAMUX_UPDATE_HELPER_PROBE_FILE` を指定する
+- **操作**: 起動中セッションに対して `yatamux update` を実行する
+- **期待結果**: `SaveAndQuit` 送信後に helper が `launch=true` で起動され、親の `yatamux update` は stdout/stderr の EOF 待ちで詰まらず終了する
+
+#### TC-18: helper 後に relaunch された本体が同じ session / APPDATA で起動する
+- **前提**: 実 GUI セッションを起動して IPC 接続できる、mock HTTP で release / checksums / binary を返す、`YATAMUX_STARTUP_PROBE_FILE` と `YATAMUX_STARTUP_PROBE_EXIT=1` を指定する
+- **操作**: 起動中セッションに対して `yatamux update` を実行し、元 GUI の終了後に relaunch 側の startup probe を待つ
+- **期待結果**: relaunch された `yatamux` が元と同じ `session` / `APPDATA` を引き継いで起動し、`.bak` 作成と `.new` 消費まで完了する
+
 ---
 
 ### モック境界

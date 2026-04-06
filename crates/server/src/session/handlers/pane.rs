@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 use yatamux_protocol::types::{
     ExecStatus, ExecWaitCondition, PaneId, SplitDirection, SurfaceId, TermSize,
 };
@@ -157,11 +157,21 @@ impl Server {
     }
 
     pub(super) async fn handle_terminate_pane(&mut self, pane: PaneId) -> Result<()> {
-        if let Some(p) = self.panes.get(&pane) {
-            p.terminate()?;
+        let terminate_err = if let Some(p) = self.panes.get(&pane) {
+            p.terminate().err()
         } else {
             self.send_pane_not_found_error(pane).await?;
+            return Ok(());
+        };
+
+        if let Some(err) = terminate_err {
+            warn!(
+                ?pane,
+                error = %err,
+                "terminate-pane kill path failed; closing pane anyway"
+            );
         }
+        self.handle_close_pane(pane).await?;
         Ok(())
     }
 

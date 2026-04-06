@@ -34,6 +34,7 @@ jobs:
     timeout-minutes: 20
     env:
       CARGO_TERM_COLOR: always
+      YATAMUX_E2E_TIMEOUT_SECS: 90
     steps:
       # actions/checkout v5.0.1
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -57,4 +58,4 @@ jobs:
             ${{ runner.os }}-e2e-cargo-
 
       - name: Run ignored Windows E2E smoke
-        run: cargo test --test e2e_smoke -- --ignored
+        run: cargo test --test e2e_smoke -- --ignored --test-threads=1

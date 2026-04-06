@@ -476,7 +476,23 @@ fn build_apply_update_command(
     new_path: &Path,
     launch: bool,
 ) -> std::process::Command {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+
+    #[cfg(windows)]
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    #[cfg(windows)]
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let mut command = std::process::Command::new(exe);
+    if let Ok(session) = std::env::var("YATAMUX_SESSION") {
+        let session = session.trim();
+        if !session.is_empty() {
+            command.arg("--session").arg(session);
+        }
+    }
     command.args([
         "--apply-update",
         &wait_pid.to_string(),
@@ -485,6 +501,14 @@ fn build_apply_update_command(
     if launch {
         command.arg("--launch");
     }
+    // Keep the helper detached from the caller's stdio so `yatamux update`
+    // can finish promptly even when the helper relaunches a new GUI process.
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     command
 }
 
@@ -1305,6 +1329,9 @@ mod tests {
     fn build_apply_update_command_includes_launch_when_requested() {
         let exe = Path::new(r"C:\tmp\yatamux.exe");
         let new_path = Path::new(r"C:\tmp\yatamux.exe.new");
+        unsafe {
+            std::env::remove_var("YATAMUX_SESSION");
+        }
         let command = build_apply_update_command(exe, 1234, new_path, true);
 
         let program = command.get_program().to_string_lossy().into_owned();
@@ -1323,6 +1350,35 @@ mod tests {
                 "--launch".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn build_apply_update_command_preserves_session_argument() {
+        let exe = Path::new(r"C:\tmp\yatamux.exe");
+        let new_path = Path::new(r"C:\tmp\yatamux.exe.new");
+        unsafe {
+            std::env::set_var("YATAMUX_SESSION", "helper-session");
+        }
+        let command = build_apply_update_command(exe, 42, new_path, false);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "--session".to_string(),
+                "helper-session".to_string(),
+                "--apply-update".to_string(),
+                "42".to_string(),
+                r"C:\tmp\yatamux.exe.new".to_string(),
+            ]
+        );
+
+        unsafe {
+            std::env::remove_var("YATAMUX_SESSION");
+        }
     }
 
     #[test]
