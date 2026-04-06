@@ -28,6 +28,12 @@ pub enum LayoutNodeDef {
         /// セッション保存時の作業ディレクトリ（復元時に CD してから command を実行する）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// ペインの論理名（CLI から ID の代わりに参照できる）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        /// ペインの役割ラベル（一覧・保存用メタデータ）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
     },
     Split {
         direction: SplitDirection,
@@ -46,7 +52,13 @@ pub struct LayoutSnapshot {
 
 impl From<&LayoutNode> for LayoutNodeDef {
     fn from(node: &LayoutNode) -> Self {
-        Self::from_with_commands(node, &HashMap::new(), &HashMap::new())
+        Self::from_with_metadata(
+            node,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
     }
 }
 
@@ -93,17 +105,21 @@ pub(crate) fn normalize_command_for_restore(cmd: &str) -> String {
 }
 
 impl LayoutNodeDef {
-    /// `pane_commands` / `pane_cwds` を参照しながら変換する。各 Leaf にコマンドと cwd を埋め込む。
-    pub fn from_with_commands(
+    /// `pane_*` メタデータを参照しながら変換する。各 Leaf に保存対象の属性を埋め込む。
+    pub fn from_with_metadata(
         node: &LayoutNode,
         cmds: &HashMap<PaneId, String>,
         cwds: &HashMap<PaneId, String>,
+        aliases: &HashMap<PaneId, String>,
+        roles: &HashMap<PaneId, String>,
     ) -> Self {
         match node {
             LayoutNode::Leaf(id) => LayoutNodeDef::Leaf {
                 id: *id,
                 command: cmds.get(id).map(|c| normalize_command_for_restore(c)),
                 cwd: cwds.get(id).cloned(),
+                alias: aliases.get(id).cloned(),
+                role: roles.get(id).cloned(),
             },
             LayoutNode::Split {
                 direction,
@@ -113,8 +129,8 @@ impl LayoutNodeDef {
             } => LayoutNodeDef::Split {
                 direction: *direction,
                 ratio: *ratio,
-                first: Box::new(Self::from_with_commands(first, cmds, cwds)),
-                second: Box::new(Self::from_with_commands(second, cmds, cwds)),
+                first: Box::new(Self::from_with_metadata(first, cmds, cwds, aliases, roles)),
+                second: Box::new(Self::from_with_metadata(second, cmds, cwds, aliases, roles)),
             },
         }
     }
@@ -123,13 +139,15 @@ impl LayoutNodeDef {
 /// `PaneStore` の現在状態を `session.toml` に保存する。
 ///
 /// `WM_CLOSE` および `SaveAndQuit` の両方から呼ばれる共通関数。
-/// `pane_commands` を Leaf ノードに埋め込んで保存するため、次回起動時に復元できる。
+/// `pane_commands` / `pane_aliases` / `pane_roles` を Leaf ノードに埋め込んで保存する。
 pub fn save_session(store: &PaneStore, path: &std::path::Path) {
     let snap = LayoutSnapshot {
-        root: LayoutNodeDef::from_with_commands(
+        root: LayoutNodeDef::from_with_metadata(
             &store.layout,
             &store.pane_commands,
             &store.pane_cwds,
+            &store.pane_aliases,
+            &store.pane_roles,
         ),
         active: store.active,
     };
@@ -188,6 +206,8 @@ mod tests {
             id: PaneId(1),
             command: None,
             cwd: None,
+            alias: None,
+            role: None,
         };
         let toml = toml::to_string(&node).unwrap();
         let restored: LayoutNodeDef = toml::from_str(&toml).unwrap();
@@ -204,11 +224,15 @@ mod tests {
                 id: PaneId(1),
                 command: None,
                 cwd: None,
+                alias: None,
+                role: None,
             }),
             second: Box::new(LayoutNodeDef::Leaf {
                 id: PaneId(2),
                 command: None,
                 cwd: None,
+                alias: None,
+                role: None,
             }),
         };
         let toml = toml::to_string(&node).unwrap();
@@ -226,6 +250,8 @@ mod tests {
                 id: PaneId(1),
                 command: None,
                 cwd: None,
+                alias: None,
+                role: None,
             }),
             second: Box::new(LayoutNodeDef::Split {
                 direction: SplitDirection::Horizontal,
@@ -234,11 +260,15 @@ mod tests {
                     id: PaneId(2),
                     command: None,
                     cwd: None,
+                    alias: None,
+                    role: None,
                 }),
                 second: Box::new(LayoutNodeDef::Leaf {
                     id: PaneId(3),
                     command: None,
                     cwd: None,
+                    alias: None,
+                    role: None,
                 }),
             }),
         };
@@ -258,11 +288,15 @@ mod tests {
                     id: PaneId(1),
                     command: None,
                     cwd: None,
+                    alias: None,
+                    role: None,
                 }),
                 second: Box::new(LayoutNodeDef::Leaf {
                     id: PaneId(2),
                     command: None,
                     cwd: None,
+                    alias: None,
+                    role: None,
                 }),
             },
             active: PaneId(2),
@@ -290,6 +324,8 @@ mod tests {
                 id: PaneId(5),
                 command: None,
                 cwd: None,
+                alias: None,
+                role: None,
             }
         );
     }
@@ -329,7 +365,9 @@ mod tests {
             24,
             CjkWidthConfig::default(),
         )));
-        let store = PaneStore::new(PaneId(1), grid);
+        let mut store = PaneStore::new(PaneId(1), grid);
+        store.pane_aliases.insert(PaneId(1), "tests".to_string());
+        store.pane_roles.insert(PaneId(1), "verifier".to_string());
 
         let dir = std::env::temp_dir().join("yatamux_test_save_session");
         let path = dir.join("session.toml");
@@ -339,6 +377,13 @@ mod tests {
         assert!(path.exists(), "session.toml が作成されること");
         let loaded = LayoutSnapshot::load(&path).expect("読み込みに成功すること");
         assert_eq!(loaded.active, PaneId(1));
+        match loaded.root {
+            LayoutNodeDef::Leaf { alias, role, .. } => {
+                assert_eq!(alias.as_deref(), Some("tests"));
+                assert_eq!(role.as_deref(), Some("verifier"));
+            }
+            _ => panic!("expected leaf snapshot"),
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -350,6 +395,8 @@ mod tests {
                 id: PaneId(1),
                 command: None,
                 cwd: None,
+                alias: None,
+                role: None,
             },
             active: PaneId(1),
         };

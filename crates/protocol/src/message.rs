@@ -44,6 +44,16 @@ pub enum ClientMessage {
     /// ペインにキー入力を送信
     Input { pane: PaneId, data: Vec<u8> },
 
+    /// IPC クライアントに対して、指定ペインのストリームイベント購読を開始する
+    ///
+    /// 既存の in-process サーバー処理では no-op で、IPC 層が解釈する。
+    SubscribePane { pane: PaneId },
+
+    /// IPC クライアントに対して、指定ペインのストリームイベント購読を解除する
+    ///
+    /// 既存の in-process サーバー処理では no-op で、IPC 層が解釈する。
+    UnsubscribePane { pane: PaneId },
+
     /// ペインをリサイズ
     Resize { pane: PaneId, size: TermSize },
 
@@ -55,6 +65,15 @@ pub enum ClientMessage {
 
     /// ペインの子プロセスを強制終了する
     TerminatePane { pane: PaneId },
+
+    /// ペインの alias / role メタデータを更新する
+    SetPaneMeta {
+        pane: PaneId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+    },
 
     /// GUI 側の active / floating 状態を server に同期する
     SyncPaneState {
@@ -157,6 +176,15 @@ pub enum ServerMessage {
 
     /// SaveAndQuit の通知（IPC 経由で SaveAndQuit を受信したときにブリッジへ転送）
     SaveAndQuit,
+
+    /// ペインの alias / role が更新された
+    PaneMetaUpdated {
+        pane: PaneId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+    },
 
     /// QueryAllPaneProcesses への応答。各ペインで動いているコマンド名と作業ディレクトリ（None = 不明）
     ///
@@ -271,6 +299,78 @@ mod tests {
             ServerMessage::AllPaneProcesses { commands, .. } => {
                 assert_eq!(commands.get("1"), Some(&Some("claude".to_string())));
                 assert_eq!(commands.get("2"), Some(&None));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_subscribe_pane_roundtrip() {
+        let msg = ClientMessage::SubscribePane {
+            pane: crate::types::PaneId(12),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::SubscribePane { pane } => {
+                assert_eq!(pane, crate::types::PaneId(12));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_unsubscribe_pane_roundtrip() {
+        let msg = ClientMessage::UnsubscribePane {
+            pane: crate::types::PaneId(13),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::UnsubscribePane { pane } => {
+                assert_eq!(pane, crate::types::PaneId(13));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_set_pane_meta_roundtrip() {
+        let msg = ClientMessage::SetPaneMeta {
+            pane: crate::types::PaneId(5),
+            alias: Some("tests".to_string()),
+            role: Some("verifier".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::SetPaneMeta { pane, alias, role } => {
+                assert_eq!(pane, crate::types::PaneId(5));
+                assert_eq!(alias.as_deref(), Some("tests"));
+                assert_eq!(role.as_deref(), Some("verifier"));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_pane_meta_updated_roundtrip() {
+        let msg = ServerMessage::PaneMetaUpdated {
+            pane: crate::types::PaneId(6),
+            alias: Some("server".to_string()),
+            role: Some("worker".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ServerMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ServerMessage::PaneMetaUpdated { pane, alias, role } => {
+                assert_eq!(pane, crate::types::PaneId(6));
+                assert_eq!(alias.as_deref(), Some("server"));
+                assert_eq!(role.as_deref(), Some("worker"));
             }
             _ => panic!("期待する variant でない"),
         }

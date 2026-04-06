@@ -12,6 +12,8 @@ use crate::layout_config::{LayoutConfig, SplitDir};
 
 /// ペインコマンドのマップ（PaneId → コマンド文字列）
 type PaneCommands = HashMap<PaneId, String>;
+type PaneAliases = HashMap<PaneId, String>;
+type PaneRoles = HashMap<PaneId, String>;
 
 /// 起動時のレイアウトを決定し、初期ペイン群を構築する。
 ///
@@ -29,6 +31,8 @@ pub(super) async fn load_initial_layout(
     Vec<(PaneId, TerminalSink)>,
     PaneId,
     PaneCommands,
+    PaneAliases,
+    PaneRoles,
 )> {
     let session_path = LayoutSnapshot::default_path();
     if let Some(name) = layout_name {
@@ -50,6 +54,8 @@ pub(super) async fn load_initial_layout(
                     vec![(pane_id, sink)],
                     pane_id,
                     PaneCommands::new(),
+                    PaneAliases::new(),
+                    PaneRoles::new(),
                 ))
             }
         }
@@ -57,6 +63,8 @@ pub(super) async fn load_initial_layout(
         tracing::info!("セッションを復元します");
         let mut old_to_new: HashMap<PaneId, PaneId> = HashMap::new();
         let mut pane_commands = PaneCommands::new();
+        let mut pane_aliases = PaneAliases::new();
+        let mut pane_roles = PaneRoles::new();
         let (layout, sinks) = restore_node(
             &snapshot.root,
             pane_id,
@@ -66,10 +74,19 @@ pub(super) async fn load_initial_layout(
             server_rx,
             &mut old_to_new,
             &mut pane_commands,
+            &mut pane_aliases,
+            &mut pane_roles,
         )
         .await?;
         let active = old_to_new.get(&snapshot.active).copied().unwrap_or(pane_id);
-        Ok((layout, sinks, active, pane_commands))
+        Ok((
+            layout,
+            sinks,
+            active,
+            pane_commands,
+            pane_aliases,
+            pane_roles,
+        ))
     } else {
         let sink = TerminalSink::new(size.cols, size.rows);
         Ok((
@@ -77,6 +94,8 @@ pub(super) async fn load_initial_layout(
             vec![(pane_id, sink)],
             pane_id,
             PaneCommands::new(),
+            PaneAliases::new(),
+            PaneRoles::new(),
         ))
     }
 }
@@ -96,6 +115,8 @@ pub(super) async fn apply_layout_config(
     Vec<(PaneId, TerminalSink)>,
     PaneId,
     PaneCommands,
+    PaneAliases,
+    PaneRoles,
 )> {
     let mut layout = LayoutNode::Leaf(first_pane);
     let mut sinks: Vec<(PaneId, TerminalSink)> =
@@ -135,7 +156,14 @@ pub(super) async fn apply_layout_config(
         send_command_input(client_tx, new_id, pane_cfg.command.as_deref()).await;
     }
 
-    Ok((layout, sinks, active, pane_commands))
+    Ok((
+        layout,
+        sinks,
+        active,
+        pane_commands,
+        PaneAliases::new(),
+        PaneRoles::new(),
+    ))
 }
 
 /// 保存済みレイアウトを再帰的に再構築する。
@@ -151,12 +179,16 @@ pub(super) async fn restore_node(
     server_rx: &mut mpsc::Receiver<ServerMessage>,
     old_to_new: &mut HashMap<PaneId, PaneId>,
     pane_commands: &mut PaneCommands,
+    pane_aliases: &mut PaneAliases,
+    pane_roles: &mut PaneRoles,
 ) -> Result<(LayoutNode, Vec<(PaneId, TerminalSink)>)> {
     match def {
         LayoutNodeDef::Leaf {
             id: old_id,
             command,
             cwd,
+            alias,
+            role,
         } => {
             old_to_new.insert(*old_id, current_pane);
             let sink = TerminalSink::new(size.cols, size.rows);
@@ -169,6 +201,21 @@ pub(super) async fn restore_node(
             if let Some(cmd) = command {
                 pane_commands.insert(current_pane, cmd.clone());
                 send_command_input(client_tx, current_pane, Some(cmd.as_str())).await;
+            }
+            if let Some(alias) = alias {
+                pane_aliases.insert(current_pane, alias.clone());
+            }
+            if let Some(role) = role {
+                pane_roles.insert(current_pane, role.clone());
+            }
+            if alias.is_some() || role.is_some() {
+                let _ = client_tx
+                    .send(ClientMessage::SetPaneMeta {
+                        pane: current_pane,
+                        alias: alias.clone(),
+                        role: role.clone(),
+                    })
+                    .await;
             }
             Ok((LayoutNode::Leaf(current_pane), vec![(current_pane, sink)]))
         }
@@ -198,6 +245,8 @@ pub(super) async fn restore_node(
                 server_rx,
                 old_to_new,
                 pane_commands,
+                pane_aliases,
+                pane_roles,
             ))
             .await?;
             let (second_layout, second_sinks) = Box::pin(restore_node(
@@ -209,6 +258,8 @@ pub(super) async fn restore_node(
                 server_rx,
                 old_to_new,
                 pane_commands,
+                pane_aliases,
+                pane_roles,
             ))
             .await?;
             all_sinks.extend(second_sinks);

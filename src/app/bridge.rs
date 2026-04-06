@@ -56,6 +56,11 @@ pub(super) enum BridgeEvent {
         pane: PaneId,
         exit_code: Option<i32>,
     },
+    PaneMetaUpdated {
+        pane: PaneId,
+        alias: Option<String>,
+        role: Option<String>,
+    },
     SaveAndQuit,
     AllPaneProcesses {
         commands: std::collections::HashMap<PaneId, Option<String>>,
@@ -88,6 +93,11 @@ impl BridgeEvent {
             ServerMessage::CommandFinished { pane, exit_code } => Some(Self::CommandFinished {
                 pane: *pane,
                 exit_code: *exit_code,
+            }),
+            ServerMessage::PaneMetaUpdated { pane, alias, role } => Some(Self::PaneMetaUpdated {
+                pane: *pane,
+                alias: alias.clone(),
+                role: role.clone(),
             }),
             ServerMessage::SaveAndQuit => Some(Self::SaveAndQuit),
             ServerMessage::AllPaneProcesses { commands, cwds } => {
@@ -404,6 +414,8 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                             {
                                 let mut store = pane_store.lock().unwrap();
                                 store.grids.remove(&pane);
+                                store.pane_aliases.remove(&pane);
+                                store.pane_roles.remove(&pane);
                                 if store.floating == Some(pane) {
                                     store.floating = None;
                                     store.floating_visible = false;
@@ -450,6 +462,19 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                 None => "Command finished".to_string(),
                             };
                             notify_if_inactive(&pane_store, &notif_backend, pane, body);
+                        }
+                        BridgeEvent::PaneMetaUpdated { pane, alias, role } => {
+                            let mut store = pane_store.lock().unwrap();
+                            if let Some(alias) = alias {
+                                store.pane_aliases.insert(pane, alias);
+                            } else {
+                                store.pane_aliases.remove(&pane);
+                            }
+                            if let Some(role) = role {
+                                store.pane_roles.insert(pane, role);
+                            } else {
+                                store.pane_roles.remove(&pane);
+                            }
                         }
                         BridgeEvent::SaveAndQuit => {
                             // プロセス名クエリを送信して AllPaneProcesses を待つ

@@ -286,6 +286,132 @@ async fn test_ipc_send_keys_routes_to_pane() {
     );
 }
 
+// C-32: SubscribePane を送ると対象ペインの Output だけを受け取る
+#[tokio::test]
+async fn test_ipc_subscribe_pane_filters_output_to_target_pane() {
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut conn = ServerConnection::connect(&session).await.unwrap();
+
+    conn.tx
+        .send(ClientMessage::CreateWorkspace { name: None })
+        .await
+        .unwrap();
+    let ws_id = loop {
+        if let ServerMessage::WorkspaceCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+
+    conn.tx
+        .send(ClientMessage::CreateSurface { workspace: ws_id })
+        .await
+        .unwrap();
+    let surf_id = loop {
+        if let ServerMessage::SurfaceCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+
+    use yatamux_protocol::types::TermSize;
+    conn.tx
+        .send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: None,
+            direction: None,
+            size: TermSize { cols: 80, rows: 24 },
+            working_dir: None,
+        })
+        .await
+        .unwrap();
+    let pane1 = loop {
+        if let ServerMessage::PaneCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+
+    conn.tx
+        .send(ClientMessage::CreatePane {
+            surface: surf_id,
+            split_from: Some(pane1),
+            direction: Some(yatamux_protocol::types::SplitDirection::Vertical),
+            size: TermSize { cols: 80, rows: 24 },
+            working_dir: None,
+        })
+        .await
+        .unwrap();
+    let pane2 = loop {
+        if let ServerMessage::PaneCreated { id, .. } = conn.rx.recv().await.unwrap() {
+            break id;
+        }
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    while let Ok(Some(_)) =
+        tokio::time::timeout(std::time::Duration::from_millis(10), conn.rx.recv()).await
+    {}
+
+    conn.tx
+        .send(ClientMessage::SubscribePane { pane: pane1 })
+        .await
+        .unwrap();
+
+    conn.tx
+        .send(ClientMessage::Input {
+            pane: pane2,
+            data: b"echo second\r".to_vec(),
+        })
+        .await
+        .unwrap();
+
+    let pane2_visible = tokio::time::timeout(std::time::Duration::from_millis(700), async {
+        loop {
+            match conn.rx.recv().await.unwrap() {
+                ServerMessage::Output { pane, .. } if pane == pane2 => return true,
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        pane2_visible.is_err(),
+        "subscribed client should not receive output from non-target pane"
+    );
+
+    conn.tx
+        .send(ClientMessage::Input {
+            pane: pane1,
+            data: b"echo first\r".to_vec(),
+        })
+        .await
+        .unwrap();
+
+    let pane1_visible = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match conn.rx.recv().await.unwrap() {
+                ServerMessage::Output { pane, .. } if pane == pane1 => return true,
+                ServerMessage::Error { message } => panic!("server error: {}", message),
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        pane1_visible.is_ok(),
+        "subscribed client should receive output from target pane"
+    );
+}
+
 // C-25: 存在しない PaneId に Input を送ると Error が返る
 #[tokio::test]
 async fn test_ipc_send_keys_to_unknown_pane_returns_error() {

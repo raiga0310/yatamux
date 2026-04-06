@@ -35,6 +35,10 @@ pub struct PaneInfo {
     pub cols: u16,
     pub rows: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -81,6 +85,8 @@ mod tests {
             title: "shell".to_string(),
             cols: 80,
             rows: 24,
+            alias: Some("tests".to_string()),
+            role: Some("verifier".to_string()),
             cwd: Some("C:\\Users".to_string()),
             command: Some("pwsh".to_string()),
             busy: true,
@@ -103,6 +109,8 @@ mod tests {
             "rows": 24
         }"#;
         let restored: PaneInfo = serde_json::from_str(json).expect("deserialize legacy PaneInfo");
+        assert_eq!(restored.alias, None);
+        assert_eq!(restored.role, None);
         assert!(!restored.active);
         assert!(!restored.floating);
         assert!(!restored.busy);

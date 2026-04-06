@@ -26,6 +26,7 @@ impl Server {
             self.pane_output_tx.clone(),
             self.pane_event_tx.clone(),
             working_dir,
+            PaneMeta::default(),
         )?;
         self.panes.insert(id, pane);
 
@@ -104,6 +105,24 @@ impl Server {
     pub(super) async fn handle_terminate_pane(&mut self, pane: PaneId) -> Result<()> {
         if let Some(p) = self.panes.get(&pane) {
             p.terminate()?;
+        } else {
+            self.send_pane_not_found_error(pane).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn handle_set_pane_meta(
+        &mut self,
+        pane: PaneId,
+        alias: Option<String>,
+        role: Option<String>,
+    ) -> Result<()> {
+        if let Some(p) = self.panes.get(&pane) {
+            p.set_meta(alias.clone(), role.clone());
+            self.client_tx
+                .send(ServerMessage::PaneMetaUpdated { pane, alias, role })
+                .await
+                .context("Failed to send PaneMetaUpdated")?;
         } else {
             self.send_pane_not_found_error(pane).await?;
         }

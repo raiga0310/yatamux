@@ -37,7 +37,7 @@ yatamux addresses these on Windows by using native APIs directly: ConPTY for PTY
 | **Copy mode** | `V` in Pane mode → Copy mode. `hjkl`/arrows to move cursor, `v` to start selection, `y`/Enter to yank to clipboard |
 | **Mouse selection** | Left-drag to select text; releases to clipboard automatically |
 | **External IPC** | Named pipe `\\.\pipe\yatamux-<session>` for CLI / agent integration |
-| **CLI tools** | `list-panes --json`, `send-keys --raw/--enter/--wait-for-prompt`, `wait-pane`, `exec`, `interrupt-pane`, `terminate-pane`, `close-pane`, `capture-pane --plain-text/--json`, `split-pane`, `layout list/export/delete` |
+| **CLI tools** | `list-panes --json`, `set-pane-meta`, `send-keys --raw/--enter/--wait-for-prompt`, `wait-pane`, `exec`, `subscribe-pane`, `interrupt-pane`, `terminate-pane`, `close-pane`, `capture-pane --plain-text/--json`, `split-pane`, `layout list/export/delete` |
 | **Scrollback buffer** | Up to 50,000 lines; mouse-wheel scroll; open in `$EDITOR` via Pane mode `X` |
 | **Floating pane** | Overlay pane on top of the tiled layout (`Ctrl+F` to toggle) |
 | **Pane mode** | `Ctrl+B` enters Pane mode — status bar shows context-sensitive keybind hints |
@@ -148,6 +148,13 @@ yatamux wait-pane --pane 1 --wait-for silence --silence-ms 2000
 # Run a command and wait for a regex to appear in capture-pane output
 yatamux exec --pane 1 --wait-for output-regex --output-regex "test result: ok" -- cargo test
 
+# Stream live output updates from a pane as JSON Lines
+yatamux subscribe-pane --pane tests --json
+
+# Assign an alias / role and then use the alias instead of the numeric pane ID
+yatamux set-pane-meta --pane 1 --alias tests --role verifier
+yatamux send-keys --pane tests --enter "cargo test -q"
+
 # Interrupt a running job with Ctrl+C
 yatamux interrupt-pane --pane 1
 
@@ -190,6 +197,10 @@ These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-d
 - `--wait-for output-regex --output-regex <pattern>`: poll `capture-pane --plain-text` and match the regex against captured content
 
 `exec` sends the given command with an automatic Enter and then reuses the same wait conditions. `send-keys --wait-for-prompt`, `close-pane`, and `terminate-pane` also use the same internal pane wait substrate, so timeout and event handling stay aligned.
+
+`subscribe-pane` provides a live event stream without `capture-pane` polling. The default mode writes raw output chunks to stdout. `--json` switches to JSON Lines events such as `output`, `notification`, `command_finished`, `pane_closed`, and `lagged`.
+
+`--pane` / `--target` accept either a numeric pane ID or an alias set by `set-pane-meta`. `list-panes --json` also includes optional `alias` / `role` fields so agents can pick panes by logical name instead of ephemeral IDs.
 
 The pane control commands are intentionally distinct:
 
@@ -324,7 +335,7 @@ yatamux は ConPTY・Win32 GDI・IMM32 を直接使い、Windows ネイティブ
 | **コピーモード** | ペインモード `V` でコピーモードへ。`hjkl`/矢印でカーソル移動、`v` で選択開始、`y`/Enter でヤンク |
 | **マウス選択** | 左ドラッグでテキスト選択。離した瞬間にクリップボードへコピー |
 | **外部 IPC** | `\\.\pipe\yatamux-<session>` で CLI・エージェントからの操作を受け付け |
-| **CLI ツール** | `list-panes --json`、`send-keys --raw/--enter/--wait-for-prompt`、`wait-pane`、`exec`、`interrupt-pane`、`terminate-pane`、`close-pane`、`capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete` |
+| **CLI ツール** | `list-panes --json`、`set-pane-meta`、`send-keys --raw/--enter/--wait-for-prompt`、`wait-pane`、`exec`、`subscribe-pane`、`interrupt-pane`、`terminate-pane`、`close-pane`、`capture-pane --plain-text/--json`、`split-pane`、`layout list/export/delete` |
 | **スクロールバック** | 最大 50,000 行。マウスホイールでスクロール。ペインモード `X` で `$EDITOR` 起動 |
 | **フローティングペイン** | タイルレイアウトの上に重なるオーバーレイペイン（`Ctrl+F` でトグル） |
 | **ペインモード** | `Ctrl+B` でペインモードへ。ステータスバーにキーバインドヒントを表示 |
@@ -435,6 +446,13 @@ yatamux wait-pane --pane 1 --wait-for silence --silence-ms 2000
 # コマンドを送って、capture-pane 上で正規表現に一致するまで待機
 yatamux exec --pane 1 --wait-for output-regex --output-regex "test result: ok" -- cargo test
 
+# ペインのライブ出力を JSON Lines で購読
+yatamux subscribe-pane --pane tests --json
+
+# alias / role を付けてから、数値 ID の代わりに alias で操作
+yatamux set-pane-meta --pane 1 --alias tests --role verifier
+yatamux send-keys --pane tests --enter "cargo test -q"
+
 # 実行中ジョブへ Ctrl+C を送る
 yatamux interrupt-pane --pane 1
 
@@ -477,6 +495,10 @@ yatamux layout delete work
 - `--wait-for output-regex --output-regex <pattern>`: `capture-pane --plain-text` の内容に正規表現が一致するまで待つ
 
 `exec` はコマンド送信時に自動で Enter を付け、同じ待機条件をそのまま使えます。`send-keys --wait-for-prompt`、`close-pane`、`terminate-pane` も同じ内部待機基盤を使うので、タイムアウトやイベント解釈の挙動がそろいます。
+
+`subscribe-pane` は `capture-pane` のポーリングなしでライブ監視できる購読コマンドです。既定では生の出力チャンクを stdout に流し、`--json` を付けると `output` / `notification` / `command_finished` / `pane_closed` / `lagged` の JSON Lines を出力します。
+
+`--pane` / `--target` には数値 ID だけでなく、`set-pane-meta` で付けた alias も使えます。`list-panes --json` には `alias` / `role` も含まれるので、エージェントは変動しやすい pane ID ではなく論理名で対象を選べます。
 
 ペイン制御コマンドの役割分担は次の通りです。
 

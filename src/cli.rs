@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Serialize;
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 use yatamux_client::connection::ServerConnection;
@@ -18,6 +19,30 @@ struct CapturePaneJsonOutput {
     content: String,
     #[serde(flatten)]
     capture: PaneCapture,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum SubscribePaneJsonEvent {
+    Output {
+        pane: PaneId,
+        text: String,
+    },
+    Notification {
+        pane: PaneId,
+        body: String,
+    },
+    CommandFinished {
+        pane: PaneId,
+        exit_code: Option<i32>,
+    },
+    PaneClosed {
+        pane: PaneId,
+    },
+    Lagged {
+        pane: PaneId,
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -268,8 +293,78 @@ async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
     .context("timeout waiting for pane list")?
 }
 
-fn pane_exists(panes: &[PaneInfo], pane_id: u32) -> bool {
-    panes.iter().any(|p| p.id == PaneId(pane_id))
+fn find_pane_by_selector<'a>(panes: &'a [PaneInfo], selector: &str) -> Option<&'a PaneInfo> {
+    if let Ok(id) = selector.parse::<u32>() {
+        panes.iter().find(|p| p.id == PaneId(id))
+    } else {
+        panes
+            .iter()
+            .find(|p| p.alias.as_deref() == Some(selector.trim()))
+    }
+}
+
+fn resolve_existing_pane(panes: &[PaneInfo], selector: &str) -> Result<PaneInfo> {
+    find_pane_by_selector(panes, selector)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("pane '{}' not found", selector))
+}
+
+fn resolve_pane_for_request(panes: &[PaneInfo], selector: &str) -> Result<PaneId> {
+    if let Ok(id) = selector.parse::<u32>() {
+        Ok(PaneId(id))
+    } else {
+        resolve_existing_pane(panes, selector).map(|pane| pane.id)
+    }
+}
+
+fn normalize_meta_value(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn subscription_event_from_message(
+    pane: PaneId,
+    msg: ServerMessage,
+) -> Result<Option<SubscribePaneJsonEvent>> {
+    match msg {
+        ServerMessage::Output {
+            pane: output_pane,
+            data,
+        } if output_pane == pane => Ok(Some(SubscribePaneJsonEvent::Output {
+            pane: output_pane,
+            text: String::from_utf8_lossy(&data).into_owned(),
+        })),
+        ServerMessage::Notification {
+            pane: notify_pane,
+            body,
+        } if notify_pane == pane => Ok(Some(SubscribePaneJsonEvent::Notification {
+            pane: notify_pane,
+            body,
+        })),
+        ServerMessage::CommandFinished {
+            pane: finished_pane,
+            exit_code,
+        } if finished_pane == pane => Ok(Some(SubscribePaneJsonEvent::CommandFinished {
+            pane: finished_pane,
+            exit_code,
+        })),
+        ServerMessage::PaneClosed { pane: closed_pane } if closed_pane == pane => {
+            Ok(Some(SubscribePaneJsonEvent::PaneClosed {
+                pane: closed_pane,
+            }))
+        }
+        ServerMessage::Error { message } if message.contains("subscription lagged by") => {
+            Ok(Some(SubscribePaneJsonEvent::Lagged { pane, message }))
+        }
+        ServerMessage::Error { message } => Err(anyhow::anyhow!("{}", message)),
+        _ => Ok(None),
+    }
 }
 
 fn is_running_inside_yatamux() -> bool {
@@ -333,14 +428,20 @@ pub async fn list_panes(session: &str, json: bool) -> Result<()> {
         println!("(no panes)");
     } else {
         println!(
-            "{:<6} {:<8} {:<6} {:<6} title",
-            "pane", "surface", "cols", "rows"
+            "{:<6} {:<8} {:<14} {:<14} {:<6} {:<6} title",
+            "pane", "surface", "alias", "role", "cols", "rows"
         );
-        println!("{}", "-".repeat(40));
+        println!("{}", "-".repeat(72));
         for p in &panes {
             println!(
-                "{:<6} {:<8} {:<6} {:<6} {}",
-                p.id.0, p.surface.0, p.cols, p.rows, p.title
+                "{:<6} {:<8} {:<14} {:<14} {:<6} {:<6} {}",
+                p.id.0,
+                p.surface.0,
+                p.alias.as_deref().unwrap_or("-"),
+                p.role.as_deref().unwrap_or("-"),
+                p.cols,
+                p.rows,
+                p.title
             );
         }
     }
@@ -353,7 +454,7 @@ pub async fn list_panes(session: &str, json: bool) -> Result<()> {
 /// `--plain-text` を付けると ANSI エスケープを除去したプレーンテキストで出力する（C-26）。
 pub async fn capture_pane(
     session: &str,
-    pane_id: u32,
+    selector: &str,
     lines: usize,
     plain_text: bool,
     json: bool,
@@ -361,10 +462,12 @@ pub async fn capture_pane(
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    let pane_id = resolve_pane_for_request(&panes, selector)?;
 
     conn.tx
         .send(ClientMessage::CapturePane {
-            pane: PaneId(pane_id),
+            pane: pane_id,
             lines,
             plain_text,
         })
@@ -408,13 +511,69 @@ pub async fn capture_pane(
     Ok(())
 }
 
+/// `yatamux subscribe-pane --pane <id>` — 指定ペインの出力ストリームを購読する
+pub async fn subscribe_pane(session: &str, selector: &str, json: bool) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    let pane = resolve_existing_pane(&panes, selector)?;
+
+    conn.tx
+        .send(ClientMessage::SubscribePane { pane: pane.id })
+        .await?;
+
+    loop {
+        let msg = conn.rx.recv().await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "server closed connection while streaming pane {}",
+                pane.id.0
+            )
+        })?;
+
+        let Some(event) = subscription_event_from_message(pane.id, msg)? else {
+            continue;
+        };
+
+        if json {
+            println!("{}", serde_json::to_string(&event)?);
+            if matches!(event, SubscribePaneJsonEvent::PaneClosed { .. }) {
+                return Ok(());
+            }
+            continue;
+        }
+
+        match event {
+            SubscribePaneJsonEvent::Output { text, .. } => {
+                let mut stdout = io::stdout();
+                stdout.write_all(text.as_bytes())?;
+                stdout.flush()?;
+            }
+            SubscribePaneJsonEvent::Notification { body, .. } => {
+                eprintln!("notification: {}", body);
+            }
+            SubscribePaneJsonEvent::CommandFinished { exit_code, .. } => match exit_code {
+                Some(code) => eprintln!("command finished: {}", code),
+                None => eprintln!("command finished"),
+            },
+            SubscribePaneJsonEvent::PaneClosed { pane } => {
+                eprintln!("pane {} closed", pane.0);
+                return Ok(());
+            }
+            SubscribePaneJsonEvent::Lagged { message, .. } => {
+                eprintln!("{}", message);
+            }
+        }
+    }
+}
+
 /// `yatamux split-pane --target <id> --direction <v|h> --dir <path>` — ペインを分割する
 ///
 /// 指定ペインを分割して新しいペインを作成する。
 /// `--dir` で作業ディレクトリを指定できる。
 pub async fn split_pane(
     session: &str,
-    pane_id: u32,
+    target_selector: Option<&str>,
     direction: SplitDirection,
     working_dir: Option<String>,
 ) -> Result<()> {
@@ -426,22 +585,20 @@ pub async fn split_pane(
     let panes = request_panes(&mut conn).await?;
 
     // 対象ペインを探す（C-25: 見つからない場合はエラー終了）
-    let target_pane = if pane_id == 0 {
-        panes.first()
-    } else {
-        panes.iter().find(|p| p.id == PaneId(pane_id))
+    let target_pane = match target_selector {
+        None | Some("0") => panes.first(),
+        Some(selector) => Some(
+            find_pane_by_selector(&panes, selector)
+                .ok_or_else(|| anyhow::anyhow!("pane '{}' not found", selector))?,
+        ),
     };
-    if pane_id != 0 && target_pane.is_none() {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
-    }
 
     let surface = target_pane.map(|p| p.surface).unwrap_or(SurfaceId(1));
 
     // split_from には実際に存在するペイン ID を使う
     // デフォルトの --target 0 は存在しないため、フォールバック後の ID を使わないと
     // split_pane_tree がツリー内で対象 Leaf を見つけられず、新ペインがツリーに入らない
-    let split_from_id = target_pane.map(|p| p.id).unwrap_or(PaneId(pane_id));
+    let split_from_id = target_pane.map(|p| p.id).unwrap_or(PaneId(0));
 
     let size = target_pane
         .map(|p| yatamux_protocol::types::TermSize {
@@ -491,7 +648,7 @@ pub async fn split_pane(
 /// - デフォルト（オプションなし）: `\n`=LF、`\r`=CR、`\t`=TAB、`\\`=バックスラッシュ に変換。
 pub async fn send_keys(
     session: &str,
-    pane_id: u32,
+    selector: &str,
     text: &str,
     enter: bool,
     raw: bool,
@@ -504,10 +661,7 @@ pub async fn send_keys(
     // ペイン存在チェック（C-25: 存在しないペインへの操作でエラー終了）
     let panes = request_panes(&mut conn).await?;
 
-    if !pane_exists(&panes, pane_id) {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
-    }
+    let pane = resolve_existing_pane(&panes, selector)?;
 
     let mut data = if raw {
         text.as_bytes().to_vec()
@@ -519,7 +673,7 @@ pub async fn send_keys(
     }
     conn.tx
         .send(ClientMessage::Input {
-            pane: PaneId(pane_id),
+            pane: pane.id,
             data,
         })
         .await?;
@@ -528,7 +682,7 @@ pub async fn send_keys(
     if wait_for_prompt {
         let result = wait_for_pane(
             &mut conn,
-            pane_id,
+            pane.id.0,
             &PaneWaitKind::Condition(WaitCondition::Exit),
             Duration::from_secs(60),
         )
@@ -541,15 +695,12 @@ pub async fn send_keys(
 }
 
 /// `yatamux wait-pane --pane <id> ...` — 指定ペインが条件を満たすまで待機する
-pub async fn wait_pane(session: &str, pane_id: u32, options: WaitOptions) -> Result<()> {
+pub async fn wait_pane(session: &str, selector: &str, options: WaitOptions) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
     let panes = request_panes(&mut conn).await?;
-    if !pane_exists(&panes, pane_id) {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
-    }
+    let pane = resolve_existing_pane(&panes, selector)?;
 
     let condition = build_wait_condition(
         options.wait_for,
@@ -559,7 +710,7 @@ pub async fn wait_pane(session: &str, pane_id: u32, options: WaitOptions) -> Res
     )?;
     let result = wait_for_pane(
         &mut conn,
-        pane_id,
+        pane.id.0,
         &PaneWaitKind::Condition(condition),
         Duration::from_secs(options.timeout_secs),
     )
@@ -571,7 +722,7 @@ pub async fn wait_pane(session: &str, pane_id: u32, options: WaitOptions) -> Res
 /// `yatamux exec --pane <id> -- <command>` — コマンド送信と待機をまとめて行う
 pub async fn exec_command(
     session: &str,
-    pane_id: u32,
+    selector: &str,
     command: Vec<String>,
     raw: bool,
     options: WaitOptions,
@@ -580,10 +731,7 @@ pub async fn exec_command(
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
     let panes = request_panes(&mut conn).await?;
-    if !pane_exists(&panes, pane_id) {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
-    }
+    let pane = resolve_existing_pane(&panes, selector)?;
 
     let condition = build_wait_condition(
         options.wait_for,
@@ -601,14 +749,14 @@ pub async fn exec_command(
 
     conn.tx
         .send(ClientMessage::Input {
-            pane: PaneId(pane_id),
+            pane: pane.id,
             data,
         })
         .await?;
 
     let result = wait_for_pane(
         &mut conn,
-        pane_id,
+        pane.id.0,
         &PaneWaitKind::Condition(condition),
         Duration::from_secs(options.timeout_secs),
     )
@@ -618,68 +766,87 @@ pub async fn exec_command(
 }
 
 /// `yatamux interrupt-pane --pane <id>` — 指定ペインに Ctrl+C を送信する
-pub async fn interrupt_pane(session: &str, pane_id: u32) -> Result<()> {
+pub async fn interrupt_pane(session: &str, selector: &str) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
     let panes = request_panes(&mut conn).await?;
-    if !pane_exists(&panes, pane_id) {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
-    }
+    let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::InterruptPane {
-            pane: PaneId(pane_id),
-        })
+        .send(ClientMessage::InterruptPane { pane: pane.id })
         .await?;
-    println!("Interrupted pane {}", pane_id);
+    println!("Interrupted pane {}", pane.id.0);
     Ok(())
 }
 
 /// `yatamux close-pane --pane <id>` — 指定ペインを閉じる
-pub async fn close_pane(session: &str, pane_id: u32) -> Result<()> {
+pub async fn close_pane(session: &str, selector: &str) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
     let panes = request_panes(&mut conn).await?;
-    if !pane_exists(&panes, pane_id) {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
-    }
+    let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::ClosePane {
-            pane: PaneId(pane_id),
-        })
+        .send(ClientMessage::ClosePane { pane: pane.id })
         .await?;
 
-    wait_for_pane_closed(&mut conn, pane_id).await?;
+    wait_for_pane_closed(&mut conn, pane.id.0).await?;
 
-    println!("Closed pane {}", pane_id);
+    println!("Closed pane {}", pane.id.0);
     Ok(())
 }
 
 /// `yatamux terminate-pane --pane <id>` — 指定ペインの子プロセスを強制終了する
-pub async fn terminate_pane(session: &str, pane_id: u32) -> Result<()> {
+pub async fn terminate_pane(session: &str, selector: &str) -> Result<()> {
     let mut conn = ServerConnection::connect(session)
         .await
         .context("yatamux is not running (could not connect to IPC pipe)")?;
     let panes = request_panes(&mut conn).await?;
-    if !pane_exists(&panes, pane_id) {
-        eprintln!("Error: pane {} not found", pane_id);
-        std::process::exit(1);
+    let pane = resolve_existing_pane(&panes, selector)?;
+
+    conn.tx
+        .send(ClientMessage::TerminatePane { pane: pane.id })
+        .await?;
+
+    wait_for_pane_closed(&mut conn, pane.id.0).await?;
+
+    println!("Terminated pane {}", pane.id.0);
+    Ok(())
+}
+
+pub async fn set_pane_meta(
+    session: &str,
+    selector: &str,
+    alias: Option<String>,
+    role: Option<String>,
+) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    let pane = resolve_existing_pane(&panes, selector)?;
+
+    let alias = normalize_meta_value(alias).or_else(|| pane.alias.clone());
+    let role = normalize_meta_value(role).or_else(|| pane.role.clone());
+    if alias.is_none() && role.is_none() {
+        anyhow::bail!("at least one of --alias or --role is required");
     }
 
     conn.tx
-        .send(ClientMessage::TerminatePane {
-            pane: PaneId(pane_id),
+        .send(ClientMessage::SetPaneMeta {
+            pane: pane.id,
+            alias: alias.clone(),
+            role: role.clone(),
         })
         .await?;
-
-    wait_for_pane_closed(&mut conn, pane_id).await?;
-
-    println!("Terminated pane {}", pane_id);
+    println!(
+        "Updated pane {} alias={} role={}",
+        pane.id.0,
+        alias.as_deref().unwrap_or("-"),
+        role.as_deref().unwrap_or("-")
+    );
     Ok(())
 }
 
@@ -871,13 +1038,18 @@ fn unescape(s: &str) -> Vec<u8> {
 mod tests {
     use super::{
         build_apply_update_command, build_wait_condition, cleanup_staged_update,
-        handle_wait_message, join_command, unescape, PaneWaitKind, WaitCondition, WaitDecision,
-        WaitState,
+        find_pane_by_selector, handle_wait_message, join_command, resolve_existing_pane,
+        resolve_pane_for_request, subscription_event_from_message, unescape, PaneWaitKind,
+        SubscribePaneJsonEvent, WaitCondition, WaitDecision, WaitState,
     };
     use regex::Regex;
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::Duration;
-    use yatamux_protocol::{types::PaneId, ServerMessage};
+    use yatamux_protocol::{
+        types::{PaneId, PaneInfo, SurfaceId},
+        ServerMessage,
+    };
 
     #[test]
     fn unescape_newline() {
@@ -1050,5 +1222,92 @@ mod tests {
 
         assert!(!new_path.exists(), "staged binary should be removed");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn find_pane_by_selector_matches_alias() {
+        let panes = vec![PaneInfo {
+            id: PaneId(4),
+            surface: SurfaceId(1),
+            title: "shell".to_string(),
+            cols: 80,
+            rows: 24,
+            alias: Some("tests".to_string()),
+            role: Some("verifier".to_string()),
+            cwd: None,
+            command: None,
+            busy: false,
+            last_output_unix_ms: None,
+            active: false,
+            floating: false,
+        }];
+        let pane = find_pane_by_selector(&panes, "tests").expect("alias should resolve");
+        assert_eq!(pane.id, PaneId(4));
+    }
+
+    #[test]
+    fn resolve_pane_for_request_accepts_numeric_id_without_lookup() {
+        let panes = Vec::<PaneInfo>::new();
+        let pane_id = resolve_pane_for_request(&panes, "999").expect("numeric id should pass");
+        assert_eq!(pane_id, PaneId(999));
+    }
+
+    #[test]
+    fn resolve_existing_pane_errors_for_unknown_alias() {
+        let panes = Vec::<PaneInfo>::new();
+        let err = resolve_existing_pane(&panes, "missing").expect_err("missing alias should fail");
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn subscription_event_maps_output_to_json_line_event() {
+        let event = subscription_event_from_message(
+            PaneId(7),
+            ServerMessage::Output {
+                pane: PaneId(7),
+                data: Arc::from(&b"hello\r\n"[..]),
+            },
+        )
+        .expect("stream event conversion should succeed")
+        .expect("matching pane output should yield an event");
+
+        match event {
+            SubscribePaneJsonEvent::Output { pane, text } => {
+                assert_eq!(pane, PaneId(7));
+                assert_eq!(text, "hello\r\n");
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+
+    #[test]
+    fn subscription_event_ignores_other_pane_messages() {
+        let event = subscription_event_from_message(
+            PaneId(7),
+            ServerMessage::PaneClosed { pane: PaneId(8) },
+        )
+        .expect("non-matching pane should not error");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn subscription_event_treats_lag_error_as_stream_event() {
+        let event = subscription_event_from_message(
+            PaneId(7),
+            ServerMessage::Error {
+                message: "subscription lagged by 3 messages; stream output may be incomplete"
+                    .to_string(),
+            },
+        )
+        .expect("lagged error should be converted")
+        .expect("lagged error should produce an event");
+
+        match event {
+            SubscribePaneJsonEvent::Lagged { pane, message } => {
+                assert_eq!(pane, PaneId(7));
+                assert!(message.contains("lagged by 3 messages"));
+            }
+            _ => panic!("unexpected event"),
+        }
     }
 }

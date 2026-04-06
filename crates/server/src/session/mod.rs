@@ -15,7 +15,7 @@ use yatamux_protocol::types::{PaneId, SurfaceId, WorkspaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::CjkWidthConfig;
 
-use crate::pane::{Pane, PaneEvent};
+use crate::pane::{Pane, PaneEvent, PaneMeta};
 pub use model::{PaneTree, Surface, Workspace};
 
 /// サーバー本体
@@ -838,6 +838,73 @@ mod tests {
             .await
             .expect("timeout waiting for busy=false after CommandFinished");
             assert!(!after_finish.busy);
+        })
+        .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_set_pane_meta_updates_list_panes_alias_and_role() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            tx.send(ClientMessage::CreateWorkspace { name: None })
+                .await
+                .unwrap();
+            let ws_id = match recv_one(&mut rx).await {
+                ServerMessage::WorkspaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+                .await
+                .unwrap();
+            let surf_id = match recv_one(&mut rx).await {
+                ServerMessage::SurfaceCreated { id, .. } => id,
+                _ => panic!(),
+            };
+            tx.send(ClientMessage::CreatePane {
+                surface: surf_id,
+                split_from: None,
+                direction: None,
+                size: TermSize { cols: 80, rows: 24 },
+                working_dir: None,
+            })
+            .await
+            .unwrap();
+            let pane_id = match recv_ctrl(&mut rx).await {
+                ServerMessage::PaneCreated { id, .. } => id,
+                other => panic!("expected PaneCreated, got {:?}", other),
+            };
+
+            tx.send(ClientMessage::SetPaneMeta {
+                pane: pane_id,
+                alias: Some("tests".to_string()),
+                role: Some("verifier".to_string()),
+            })
+            .await
+            .unwrap();
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let ServerMessage::PaneMetaUpdated { pane, alias, role } =
+                        recv_one(&mut rx).await
+                    {
+                        assert_eq!(pane, pane_id);
+                        assert_eq!(alias.as_deref(), Some("tests"));
+                        assert_eq!(role.as_deref(), Some("verifier"));
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for PaneMetaUpdated");
+
+            let panes = list_panes(&tx, &mut rx).await;
+            let pane = panes
+                .into_iter()
+                .find(|p| p.id == pane_id)
+                .expect("created pane should be listed");
+            assert_eq!(pane.alias.as_deref(), Some("tests"));
+            assert_eq!(pane.role.as_deref(), Some("verifier"));
         })
         .await;
     }
