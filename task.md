@@ -12,12 +12,10 @@
 ## 直近の優先候補
 
 - `B-1`: `yatamux update` 失敗経路の再現と切り分け
-- `C-30`: 高水準 `exec` API
-- `C-38`: セルフアップデート機能の integration test
 
 ## 進行中の周辺整理
 
-- `CI-1`: GitHub Actions の Node.js 24 移行（workflow 更新済み、CI 実行確認待ち）
+- `CI-1`: GitHub Actions の Node.js 24 移行（`Bump Version` 確認済み、`Release` 実行確認待ち）
 
 ## 運用ルール
 

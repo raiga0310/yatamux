@@ -10,7 +10,9 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 use yatamux_client::connection::ServerConnection;
-use yatamux_protocol::types::{PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId};
+use yatamux_protocol::types::{
+    ExecStatus, ExecWaitCondition, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId,
+};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 
 #[derive(Serialize)]
@@ -124,8 +126,53 @@ fn build_wait_condition(
     }
 }
 
+fn build_exec_wait_condition(
+    wait_for: crate::WaitForArg,
+    output_regex: Option<&str>,
+    silence_ms: u64,
+    lines: usize,
+) -> Result<ExecWaitCondition> {
+    match wait_for {
+        crate::WaitForArg::Exit => {
+            if output_regex.is_some() {
+                anyhow::bail!("--output-regex can only be used with --wait-for output-regex");
+            }
+            Ok(ExecWaitCondition::Exit)
+        }
+        crate::WaitForArg::Silence => {
+            if output_regex.is_some() {
+                anyhow::bail!("--output-regex can only be used with --wait-for output-regex");
+            }
+            Ok(ExecWaitCondition::Silence { silence_ms })
+        }
+        crate::WaitForArg::OutputRegex => {
+            let pattern =
+                output_regex.ok_or_else(|| anyhow::anyhow!("--output-regex is required"))?;
+            Regex::new(pattern)
+                .with_context(|| format!("invalid --output-regex pattern: {}", pattern))?;
+            Ok(ExecWaitCondition::OutputRegex {
+                pattern: pattern.to_string(),
+                lines,
+            })
+        }
+    }
+}
+
 fn join_command(command: &[String]) -> String {
     command.join(" ")
+}
+
+fn next_request_id(prefix: &str, pane: PaneId) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!(
+        "{}-{}-{}-{}",
+        prefix,
+        std::process::id(),
+        pane.0,
+        now.as_nanos()
+    )
 }
 
 fn maybe_exit_with_code(result: WaitResult) {
@@ -268,6 +315,46 @@ async fn wait_for_pane(
             Err(_) => {}
         }
     }
+}
+
+async fn wait_for_exec_result(
+    conn: &mut ServerConnection,
+    request_id: &str,
+    timeout: Duration,
+) -> Result<WaitResult> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::ExecResult {
+                    request_id: result_id,
+                    status,
+                    exit_code,
+                    message,
+                    ..
+                }) if result_id == request_id => match status {
+                    ExecStatus::Completed => return Ok(WaitResult { exit_code }),
+                    ExecStatus::TimedOut | ExecStatus::PaneClosed | ExecStatus::Error => {
+                        return Err(anyhow::anyhow!(
+                            "{}",
+                            message
+                                .unwrap_or_else(|| format!("exec request {} failed", request_id))
+                        ));
+                    }
+                },
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message));
+                }
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending ExecResult"
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for exec result")?
 }
 
 async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
@@ -733,7 +820,7 @@ pub async fn exec_command(
     let panes = request_panes(&mut conn).await?;
     let pane = resolve_existing_pane(&panes, selector)?;
 
-    let condition = build_wait_condition(
+    let wait = build_exec_wait_condition(
         options.wait_for,
         options.output_regex.as_deref(),
         options.silence_ms,
@@ -746,19 +833,22 @@ pub async fn exec_command(
         unescape(&command_text)
     };
     data.push(b'\r');
+    let request_id = next_request_id("exec", pane.id);
 
     conn.tx
-        .send(ClientMessage::Input {
+        .send(ClientMessage::Exec {
+            request_id: request_id.clone(),
             pane: pane.id,
             data,
+            wait,
+            timeout_ms: options.timeout_secs.saturating_mul(1000),
         })
         .await?;
 
-    let result = wait_for_pane(
+    let result = wait_for_exec_result(
         &mut conn,
-        pane.id.0,
-        &PaneWaitKind::Condition(condition),
-        Duration::from_secs(options.timeout_secs),
+        &request_id,
+        Duration::from_secs(options.timeout_secs.saturating_add(5)),
     )
     .await?;
     maybe_exit_with_code(result);
@@ -1037,17 +1127,20 @@ fn unescape(s: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_apply_update_command, build_wait_condition, cleanup_staged_update,
-        find_pane_by_selector, handle_wait_message, join_command, resolve_existing_pane,
-        resolve_pane_for_request, subscription_event_from_message, unescape, PaneWaitKind,
+        build_apply_update_command, build_exec_wait_condition, build_wait_condition,
+        cleanup_staged_update, find_pane_by_selector, handle_wait_message, join_command,
+        next_request_id, resolve_existing_pane, resolve_pane_for_request,
+        subscription_event_from_message, unescape, wait_for_exec_result, PaneWaitKind,
         SubscribePaneJsonEvent, WaitCondition, WaitDecision, WaitState,
     };
     use regex::Regex;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::mpsc;
+    use yatamux_client::connection::ServerConnection;
     use yatamux_protocol::{
-        types::{PaneId, PaneInfo, SurfaceId},
+        types::{ExecStatus, ExecWaitCondition, PaneId, PaneInfo, SurfaceId},
         ServerMessage,
     };
 
@@ -1102,6 +1195,34 @@ mod tests {
         let err = build_wait_condition(crate::WaitForArg::OutputRegex, Some("("), 1500, 200)
             .expect_err("invalid regex should fail");
         assert!(err.to_string().contains("invalid --output-regex pattern"));
+    }
+
+    #[test]
+    fn build_exec_wait_condition_for_output_regex() {
+        let wait =
+            build_exec_wait_condition(crate::WaitForArg::OutputRegex, Some("passed"), 1500, 200)
+                .expect("exec wait should build");
+        assert_eq!(
+            wait,
+            ExecWaitCondition::OutputRegex {
+                pattern: "passed".to_string(),
+                lines: 200,
+            }
+        );
+    }
+
+    #[test]
+    fn build_exec_wait_condition_rejects_invalid_regex() {
+        let err = build_exec_wait_condition(crate::WaitForArg::OutputRegex, Some("("), 1500, 200)
+            .expect_err("invalid regex should fail");
+        assert!(err.to_string().contains("invalid --output-regex pattern"));
+    }
+
+    #[test]
+    fn next_request_id_includes_prefix() {
+        let request_id = next_request_id("exec", PaneId(12));
+        assert!(request_id.starts_with("exec-"));
+        assert!(request_id.contains("-12-"));
     }
 
     #[test]
@@ -1222,6 +1343,70 @@ mod tests {
 
         assert!(!new_path.exists(), "staged binary should be removed");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn wait_for_exec_result_ignores_other_request_ids() {
+        let (client_tx, _client_rx) = mpsc::channel(4);
+        let (server_tx, server_rx) = mpsc::channel(4);
+        let mut conn = ServerConnection {
+            tx: client_tx,
+            rx: server_rx,
+            server_pid: 0,
+        };
+
+        server_tx
+            .send(ServerMessage::ExecResult {
+                request_id: "other".to_string(),
+                pane: PaneId(3),
+                status: ExecStatus::Completed,
+                exit_code: Some(9),
+                message: None,
+            })
+            .await
+            .expect("send other result");
+        server_tx
+            .send(ServerMessage::ExecResult {
+                request_id: "target".to_string(),
+                pane: PaneId(3),
+                status: ExecStatus::Completed,
+                exit_code: Some(0),
+                message: None,
+            })
+            .await
+            .expect("send target result");
+
+        let result = wait_for_exec_result(&mut conn, "target", Duration::from_secs(1))
+            .await
+            .expect("wait should succeed");
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn wait_for_exec_result_returns_error_message() {
+        let (client_tx, _client_rx) = mpsc::channel(4);
+        let (server_tx, server_rx) = mpsc::channel(4);
+        let mut conn = ServerConnection {
+            tx: client_tx,
+            rx: server_rx,
+            server_pid: 0,
+        };
+
+        server_tx
+            .send(ServerMessage::ExecResult {
+                request_id: "target".to_string(),
+                pane: PaneId(4),
+                status: ExecStatus::TimedOut,
+                exit_code: None,
+                message: Some("timeout waiting for pane 4".to_string()),
+            })
+            .await
+            .expect("send timed out result");
+
+        let err = wait_for_exec_result(&mut conn, "target", Duration::from_secs(1))
+            .await
+            .expect_err("timed out exec should surface as error");
+        assert!(err.to_string().contains("timeout waiting for pane 4"));
     }
 
     #[test]

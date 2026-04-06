@@ -127,6 +127,7 @@ fn should_forward_message(msg: &ServerMessage, subscriptions: &HashSet<PaneId>) 
     }
 
     match msg {
+        ServerMessage::ExecResult { .. } => true,
         ServerMessage::Output { pane, .. }
         | ServerMessage::TitleChanged { pane, .. }
         | ServerMessage::Notification { pane, .. }
@@ -270,6 +271,23 @@ mod tests {
         ));
         assert!(should_forward_message(
             &ServerMessage::PaneClosed { pane: PaneId(9) },
+            &subscriptions,
+        ));
+    }
+
+    #[test]
+    fn subscribed_client_still_receives_exec_results() {
+        let mut subscriptions = HashSet::new();
+        subscriptions.insert(PaneId(3));
+
+        assert!(should_forward_message(
+            &ServerMessage::ExecResult {
+                request_id: "req-1".to_string(),
+                pane: PaneId(9),
+                status: yatamux_protocol::types::ExecStatus::Completed,
+                exit_code: Some(0),
+                message: None,
+            },
             &subscriptions,
         ));
     }

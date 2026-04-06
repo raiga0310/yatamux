@@ -303,3 +303,189 @@ async fn wait_for_pane_created(server_rx: &mut mpsc::Receiver<ServerMessage>) ->
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct AppDataOverride {
+        previous: Option<OsString>,
+        root: PathBuf,
+    }
+
+    impl AppDataOverride {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "yatamux-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                unique
+            ));
+            std::fs::create_dir_all(&root).expect("create temp appdata dir");
+            let previous = std::env::var_os("APPDATA");
+            unsafe {
+                std::env::set_var("APPDATA", &root);
+            }
+            Self { previous, root }
+        }
+    }
+
+    impl Drop for AppDataOverride {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe {
+                    std::env::set_var("APPDATA", previous);
+                },
+                None => unsafe {
+                    std::env::remove_var("APPDATA");
+                },
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn load_initial_layout_restores_session_snapshot_and_metadata() {
+        let _guard = crate::app::appdata_env_lock()
+            .lock()
+            .expect("lock APPDATA env");
+        let _appdata = AppDataOverride::new("restore-session");
+
+        let session_path = LayoutSnapshot::default_path();
+        let snapshot = LayoutSnapshot {
+            root: LayoutNodeDef::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.4,
+                first: Box::new(LayoutNodeDef::Leaf {
+                    id: PaneId(1),
+                    command: Some("codex resume --last".to_string()),
+                    cwd: Some(r"C:\worktree".to_string()),
+                    alias: Some("main".to_string()),
+                    role: Some("planner".to_string()),
+                }),
+                second: Box::new(LayoutNodeDef::Leaf {
+                    id: PaneId(2),
+                    command: Some("cargo test -q".to_string()),
+                    cwd: None,
+                    alias: Some("tests".to_string()),
+                    role: Some("verifier".to_string()),
+                }),
+            },
+            active: PaneId(2),
+        };
+        snapshot
+            .save(&session_path)
+            .expect("save test session snapshot");
+
+        let (client_tx, mut client_rx) = mpsc::channel(16);
+        let (server_tx, mut server_rx) = mpsc::channel(4);
+        server_tx
+            .send(ServerMessage::PaneCreated {
+                id: PaneId(99),
+                surface: SurfaceId(1),
+                split_from: Some(PaneId(10)),
+                direction: Some(SplitDirection::Vertical),
+            })
+            .await
+            .expect("queue PaneCreated response");
+
+        let (layout, sinks, active, pane_commands, pane_aliases, pane_roles) = load_initial_layout(
+            None,
+            PaneId(10),
+            SurfaceId(1),
+            TermSize { cols: 80, rows: 24 },
+            &client_tx,
+            &mut server_rx,
+        )
+        .await
+        .expect("restore session snapshot");
+
+        assert_eq!(active, PaneId(99));
+        assert_eq!(sinks.len(), 2);
+        match layout {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                assert_eq!(direction, SplitDirection::Vertical);
+                assert!((ratio - 0.4).abs() < f32::EPSILON);
+                assert!(matches!(*first, LayoutNode::Leaf(PaneId(10))));
+                assert!(matches!(*second, LayoutNode::Leaf(PaneId(99))));
+            }
+            other => panic!("expected restored split layout, got {:?}", other),
+        }
+
+        assert_eq!(
+            pane_commands.get(&PaneId(10)).map(String::as_str),
+            Some("codex resume --last")
+        );
+        assert_eq!(
+            pane_commands.get(&PaneId(99)).map(String::as_str),
+            Some("cargo test -q")
+        );
+        assert_eq!(
+            pane_aliases.get(&PaneId(10)).map(String::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            pane_aliases.get(&PaneId(99)).map(String::as_str),
+            Some("tests")
+        );
+        assert_eq!(
+            pane_roles.get(&PaneId(10)).map(String::as_str),
+            Some("planner")
+        );
+        assert_eq!(
+            pane_roles.get(&PaneId(99)).map(String::as_str),
+            Some("verifier")
+        );
+
+        let mut messages = Vec::new();
+        while let Ok(message) = client_rx.try_recv() {
+            messages.push(message);
+        }
+
+        assert!(messages.iter().any(|message| {
+            matches!(
+                message,
+                ClientMessage::CreatePane {
+                    surface,
+                    split_from: Some(split_from),
+                    direction: Some(direction),
+                    ..
+                } if *surface == SurfaceId(1)
+                    && *split_from == PaneId(10)
+                    && *direction == SplitDirection::Vertical
+            )
+        }));
+        assert!(messages.iter().any(|message| {
+            matches!(
+                message,
+                ClientMessage::Input { pane, data }
+                    if *pane == PaneId(10)
+                        && data == &format!("cd /d \"{}\"\r", r"C:\worktree").into_bytes()
+            )
+        }));
+        assert!(messages.iter().any(|message| {
+            matches!(
+                message,
+                ClientMessage::SetPaneMeta {
+                    pane,
+                    alias,
+                    role,
+                } if *pane == PaneId(99)
+                    && alias.as_deref() == Some("tests")
+                    && role.as_deref() == Some("verifier")
+            )
+        }));
+    }
+}

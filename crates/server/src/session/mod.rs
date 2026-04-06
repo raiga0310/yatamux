@@ -7,11 +7,13 @@ mod handlers;
 mod model;
 mod tree;
 
+use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-use yatamux_protocol::types::{PaneId, SurfaceId, WorkspaceId};
+use yatamux_protocol::types::{ExecStatus, ExecWaitCondition, PaneId, SurfaceId, WorkspaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::CjkWidthConfig;
 
@@ -39,6 +41,85 @@ pub struct Server {
     active_pane: Option<PaneId>,
     /// GUI が最後に同期したフローティング表示ペイン
     floating_pane: Option<PaneId>,
+    /// protocol-level exec リクエストの待機状態
+    pending_execs: Vec<PendingExec>,
+}
+
+#[derive(Debug)]
+enum PendingExecWaitKind {
+    Exit,
+    Silence(Duration),
+    OutputRegex { regex: Regex, lines: usize },
+}
+
+#[derive(Debug)]
+struct PendingExec {
+    request_id: String,
+    pane: PaneId,
+    wait: PendingExecWaitKind,
+    started_at: tokio::time::Instant,
+    timeout: Duration,
+    last_activity: tokio::time::Instant,
+    next_capture_at: tokio::time::Instant,
+    last_exit_code: Option<i32>,
+}
+
+impl PendingExec {
+    fn new(
+        request_id: String,
+        pane: PaneId,
+        wait: ExecWaitCondition,
+        timeout_ms: u64,
+    ) -> anyhow::Result<Self> {
+        let wait = match wait {
+            ExecWaitCondition::Exit => PendingExecWaitKind::Exit,
+            ExecWaitCondition::Silence { silence_ms } => {
+                PendingExecWaitKind::Silence(Duration::from_millis(silence_ms))
+            }
+            ExecWaitCondition::OutputRegex { pattern, lines } => {
+                let regex = Regex::new(&pattern)
+                    .map_err(|err| anyhow::anyhow!("invalid exec regex: {}", err))?;
+                PendingExecWaitKind::OutputRegex { regex, lines }
+            }
+        };
+        let now = tokio::time::Instant::now();
+        Ok(Self {
+            request_id,
+            pane,
+            wait,
+            started_at: now,
+            timeout: Duration::from_millis(timeout_ms),
+            last_activity: now,
+            next_capture_at: now,
+            last_exit_code: None,
+        })
+    }
+
+    fn timeout_at(&self) -> tokio::time::Instant {
+        self.started_at + self.timeout
+    }
+
+    fn next_deadline(&self) -> tokio::time::Instant {
+        match &self.wait {
+            PendingExecWaitKind::Exit => self.timeout_at(),
+            PendingExecWaitKind::Silence(duration) => {
+                std::cmp::min(self.timeout_at(), self.last_activity + *duration)
+            }
+            PendingExecWaitKind::OutputRegex { .. } => {
+                std::cmp::min(self.timeout_at(), self.next_capture_at)
+            }
+        }
+    }
+
+    fn result_message(&self, status: ExecStatus, message: Option<String>) -> ServerMessage {
+        ServerMessage::ExecResult {
+            request_id: self.request_id.clone(),
+            pane: self.pane,
+            status,
+            exit_code: self.last_exit_code,
+            message,
+        }
+    }
 }
 
 impl Server {
@@ -60,12 +141,15 @@ impl Server {
             pane_event_tx,
             active_pane: None,
             floating_pane: None,
+            pending_execs: Vec::new(),
         }
     }
 
     /// イベントループを開始する
     pub async fn run(mut self, mut client_rx: mpsc::Receiver<ClientMessage>) {
         loop {
+            let has_pending_execs = !self.pending_execs.is_empty();
+            let next_exec_deadline = self.next_exec_deadline();
             tokio::select! {
                 // クライアントからのメッセージ処理
                 Some(msg) = client_rx.recv() => {
@@ -80,6 +164,7 @@ impl Server {
                     if let Some(pane) = self.panes.get(&pane_id) {
                         pane.mark_output_received();
                     }
+                    self.note_exec_output(pane_id);
                     let _ = self.client_tx.send(ServerMessage::Output {
                         pane: pane_id,
                         data,
@@ -88,6 +173,9 @@ impl Server {
                 // ペインからの内部イベント転送
                 Some((pane_id, event)) = self.pane_event_rx.recv() => {
                     self.forward_pane_event(pane_id, event).await;
+                }
+                _ = tokio::time::sleep_until(next_exec_deadline), if has_pending_execs => {
+                    self.poll_pending_execs().await;
                 }
             }
         }
@@ -114,6 +202,170 @@ impl Server {
             .await;
     }
 
+    async fn send_exec_result(
+        &mut self,
+        request_id: String,
+        pane: PaneId,
+        status: ExecStatus,
+        exit_code: Option<i32>,
+        message: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.client_tx
+            .send(ServerMessage::ExecResult {
+                request_id,
+                pane,
+                status,
+                exit_code,
+                message,
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("Failed to send ExecResult: {}", err))
+    }
+
+    fn next_exec_deadline(&self) -> tokio::time::Instant {
+        self.pending_execs
+            .iter()
+            .map(PendingExec::next_deadline)
+            .min()
+            .unwrap_or_else(tokio::time::Instant::now)
+    }
+
+    fn note_exec_output(&mut self, pane: PaneId) {
+        let now = tokio::time::Instant::now();
+        for exec in &mut self.pending_execs {
+            if exec.pane == pane {
+                exec.last_activity = now;
+            }
+        }
+    }
+
+    async fn finish_execs_for_closed_pane(&mut self, pane: PaneId) {
+        let mut completed = Vec::new();
+        let mut idx = 0;
+        while idx < self.pending_execs.len() {
+            if self.pending_execs[idx].pane != pane {
+                idx += 1;
+                continue;
+            }
+
+            let exec = self.pending_execs.remove(idx);
+            let message = match exec.wait {
+                PendingExecWaitKind::OutputRegex { .. } => {
+                    Some(format!("pane {} closed before regex matched", pane.0))
+                }
+                _ => None,
+            };
+            let status = match exec.wait {
+                PendingExecWaitKind::OutputRegex { .. } => ExecStatus::PaneClosed,
+                _ => ExecStatus::Completed,
+            };
+            completed.push(exec.result_message(status, message));
+        }
+
+        for message in completed {
+            let _ = self.client_tx.send(message).await;
+        }
+    }
+
+    async fn note_exec_command_finished(&mut self, pane: PaneId, exit_code: Option<i32>) {
+        let now = tokio::time::Instant::now();
+        let mut completed = Vec::new();
+        let mut idx = 0;
+        while idx < self.pending_execs.len() {
+            if self.pending_execs[idx].pane != pane {
+                idx += 1;
+                continue;
+            }
+
+            self.pending_execs[idx].last_activity = now;
+            self.pending_execs[idx].last_exit_code = exit_code;
+            if matches!(self.pending_execs[idx].wait, PendingExecWaitKind::Exit) {
+                let exec = self.pending_execs.remove(idx);
+                completed.push(exec.result_message(ExecStatus::Completed, None));
+                continue;
+            }
+            idx += 1;
+        }
+
+        for message in completed {
+            let _ = self.client_tx.send(message).await;
+        }
+    }
+
+    async fn poll_pending_execs(&mut self) {
+        let now = tokio::time::Instant::now();
+        let mut completed = Vec::new();
+        let mut idx = 0;
+
+        while idx < self.pending_execs.len() {
+            let mut result = None;
+            let mut next_capture_at = None;
+            let mut capture_job = None;
+
+            {
+                let exec = &self.pending_execs[idx];
+                if now >= exec.timeout_at() {
+                    result = Some(exec.result_message(
+                        ExecStatus::TimedOut,
+                        Some(format!("timeout waiting for pane {}", exec.pane.0)),
+                    ));
+                } else {
+                    match &exec.wait {
+                        PendingExecWaitKind::Exit => {}
+                        PendingExecWaitKind::Silence(duration) => {
+                            if now.duration_since(exec.last_activity) >= *duration {
+                                result = Some(exec.result_message(ExecStatus::Completed, None));
+                            }
+                        }
+                        PendingExecWaitKind::OutputRegex { regex, lines } => {
+                            if now >= exec.next_capture_at {
+                                capture_job = Some((
+                                    exec.pane,
+                                    regex.clone(),
+                                    *lines,
+                                    exec.request_id.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((pane, regex, lines, _request_id)) = capture_job {
+                if let Some(target_pane) = self.panes.get(&pane) {
+                    let (content, _) =
+                        handlers::support::build_capture_response(target_pane, lines).await;
+                    if regex.is_match(&content) {
+                        result = Some(
+                            self.pending_execs[idx].result_message(ExecStatus::Completed, None),
+                        );
+                    } else {
+                        next_capture_at = Some(now + Duration::from_millis(200));
+                    }
+                } else {
+                    result = Some(self.pending_execs[idx].result_message(
+                        ExecStatus::PaneClosed,
+                        Some(format!("pane {} closed before regex matched", pane.0)),
+                    ));
+                }
+            }
+
+            if let Some(message) = result {
+                self.pending_execs.remove(idx);
+                completed.push(message);
+            } else {
+                if let Some(next_at) = next_capture_at {
+                    self.pending_execs[idx].next_capture_at = next_at;
+                }
+                idx += 1;
+            }
+        }
+
+        for message in completed {
+            let _ = self.client_tx.send(message).await;
+        }
+    }
+
     async fn forward_pane_event(&mut self, pane: PaneId, event: PaneEvent) {
         match event {
             PaneEvent::Notification(body) => self.send_notification(pane, body).await,
@@ -129,12 +381,14 @@ impl Server {
                     self.floating_pane = None;
                 }
                 self.send_pane_closed(pane).await;
+                self.finish_execs_for_closed_pane(pane).await;
             }
             PaneEvent::CommandFinished(exit_code) => {
                 if let Some(p) = self.panes.get(&pane) {
                     p.mark_busy(false);
                 }
                 self.send_command_finished(pane, exit_code).await;
+                self.note_exec_command_finished(pane, exit_code).await;
             }
         }
     }
@@ -145,7 +399,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::sync::mpsc;
-    use yatamux_protocol::types::{PaneInfo, SurfaceId, TermSize, WorkspaceId};
+    use yatamux_protocol::types::{
+        ExecStatus, ExecWaitCondition, PaneId, PaneInfo, SurfaceId, TermSize, WorkspaceId,
+    };
     use yatamux_protocol::{ClientMessage, ServerMessage};
 
     /// テスト用サーバーを起動し (client_tx, server_rx) を返す
@@ -217,6 +473,40 @@ mod tests {
         })
         .await
         .expect("timeout waiting for PanesListed")
+    }
+
+    #[cfg(windows)]
+    async fn create_test_pane(
+        tx: &mpsc::Sender<ClientMessage>,
+        rx: &mut mpsc::Receiver<ServerMessage>,
+    ) -> PaneId {
+        tx.send(ClientMessage::CreateWorkspace { name: None })
+            .await
+            .unwrap();
+        let ws_id = match recv_one(rx).await {
+            ServerMessage::WorkspaceCreated { id, .. } => id,
+            other => panic!("expected WorkspaceCreated, got {:?}", other),
+        };
+        tx.send(ClientMessage::CreateSurface { workspace: ws_id })
+            .await
+            .unwrap();
+        let surface = match recv_one(rx).await {
+            ServerMessage::SurfaceCreated { id, .. } => id,
+            other => panic!("expected SurfaceCreated, got {:?}", other),
+        };
+        tx.send(ClientMessage::CreatePane {
+            surface,
+            split_from: None,
+            direction: None,
+            size: TermSize { cols: 80, rows: 24 },
+            working_dir: None,
+        })
+        .await
+        .unwrap();
+        match recv_ctrl(rx).await {
+            ServerMessage::PaneCreated { id, .. } => id,
+            other => panic!("expected PaneCreated, got {:?}", other),
+        }
     }
 
     /// テスト全体を 120 秒でタイムアウトさせるラッパー。
@@ -1502,6 +1792,117 @@ mod tests {
                 got_error,
                 "CreatePane with non-existent working_dir should return Error"
             );
+        })
+        .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_exec_request_returns_completed_result_with_request_id() {
+        with_timeout(async {
+            let (tx, mut rx, notifier) = start_server_with_notifier();
+            let pane_id = create_test_pane(&tx, &mut rx).await;
+
+            tx.send(ClientMessage::Exec {
+                request_id: "req-exit".to_string(),
+                pane: pane_id,
+                data: b"echo ok\r".to_vec(),
+                wait: ExecWaitCondition::Exit,
+                timeout_ms: 5_000,
+            })
+            .await
+            .unwrap();
+
+            notifier
+                .send((pane_id, PaneEvent::CommandFinished(Some(7))))
+                .await
+                .unwrap();
+
+            let result = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let message = recv_one(&mut rx).await;
+                    match &message {
+                        ServerMessage::ExecResult { request_id, .. }
+                            if request_id == "req-exit" =>
+                        {
+                            return message;
+                        }
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for ExecResult");
+
+            match result {
+                ServerMessage::ExecResult {
+                    request_id,
+                    pane,
+                    status,
+                    exit_code,
+                    ..
+                } => {
+                    assert_eq!(request_id, "req-exit");
+                    assert_eq!(pane, pane_id);
+                    assert_eq!(status, ExecStatus::Completed);
+                    assert_eq!(exit_code, Some(7));
+                }
+                other => panic!("expected ExecResult, got {:?}", other),
+            }
+        })
+        .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_exec_request_times_out() {
+        with_timeout(async {
+            let (tx, mut rx) = start_server();
+            let pane_id = create_test_pane(&tx, &mut rx).await;
+
+            tx.send(ClientMessage::Exec {
+                request_id: "req-timeout".to_string(),
+                pane: pane_id,
+                data: b"echo slow\r".to_vec(),
+                wait: ExecWaitCondition::Exit,
+                timeout_ms: 10,
+            })
+            .await
+            .unwrap();
+
+            let result = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let message = recv_one(&mut rx).await;
+                    match &message {
+                        ServerMessage::ExecResult { request_id, .. }
+                            if request_id == "req-timeout" =>
+                        {
+                            return message;
+                        }
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("timeout waiting for timed out ExecResult");
+
+            match result {
+                ServerMessage::ExecResult {
+                    request_id,
+                    pane,
+                    status,
+                    message,
+                    ..
+                } => {
+                    assert_eq!(request_id, "req-timeout");
+                    assert_eq!(pane, pane_id);
+                    assert_eq!(status, ExecStatus::TimedOut);
+                    assert!(message
+                        .as_deref()
+                        .is_some_and(|msg| msg.contains("timeout waiting for pane")));
+                }
+                other => panic!("expected ExecResult, got {:?}", other),
+            }
         })
         .await;
     }

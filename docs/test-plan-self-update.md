@@ -63,15 +63,15 @@ Codex との壁打ち（2026-04-05）を経て策定。
 - **操作**: `fetch_and_verify()` をエンドツーエンドで実行
 - **期待結果**: バイトが取得でき、SHA256 が一致したら `Ok`
 
-#### TC-10: IPC 経由 SaveAndQuit → session.toml 書き出し
-- **前提**: テスト用インスタンスを起動し named pipe に接続（`crates/server/tests/ipc_integration.rs` の配線を参考）
-- **操作**: `SaveAndQuit` を送信
-- **期待結果**: インスタンスが終了し、temp APPDATA に `session.toml` が書かれること
+#### TC-10: app bridge の SaveAndQuit 経路で `session.toml` が書き出される
+- **前提**: temp APPDATA 上で `spawn_bridge_fanout()` + `spawn_server_bridge()` を組み合わせる
+- **操作**: `ServerMessage::SaveAndQuit` を流し、続けて `ServerMessage::AllPaneProcesses` を返す
+- **期待結果**: `ClientMessage::QueryAllPaneProcesses` が送られたあと、`session.toml` が書き出され、`should_quit` が `true` になる
 
-#### TC-11: 新プロセス起動後の session 復元
+#### TC-11: 起動時 restore path が `session.toml` からレイアウトとメタデータを復元する
 - **前提**: APPDATA を temp dir に向け、既知の `session.toml` を配置
-- **操作**: 新 yatamux を起動して `list-panes` で確認
-- **期待結果**: 保存時と同じペイン構成が復元される
+- **操作**: `load_initial_layout(None, ...)` を呼び、必要な `PaneCreated` 応答を返す
+- **期待結果**: 保存時と同じ split 構成、active pane、command / alias / role が復元される
 
 #### TC-12: checksum 不一致時は置換しない
 - **操作**: `verify_checksum` に不正ハッシュを渡してフロー全体を流す

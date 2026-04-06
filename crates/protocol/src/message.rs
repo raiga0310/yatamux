@@ -1,5 +1,6 @@
 use crate::types::{
-    PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId,
+    ExecStatus, ExecWaitCondition, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId,
+    TermSize, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +44,15 @@ pub enum ClientMessage {
 
     /// ペインにキー入力を送信
     Input { pane: PaneId, data: Vec<u8> },
+
+    /// コマンド送信と完了待機を 1 回の要求にまとめる
+    Exec {
+        request_id: String,
+        pane: PaneId,
+        data: Vec<u8>,
+        wait: ExecWaitCondition,
+        timeout_ms: u64,
+    },
 
     /// IPC クライアントに対して、指定ペインのストリームイベント購読を開始する
     ///
@@ -160,6 +170,17 @@ pub enum ServerMessage {
         exit_code: Option<i32>,
     },
 
+    /// Exec への応答
+    ExecResult {
+        request_id: String,
+        pane: PaneId,
+        status: ExecStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
     /// エラー
     Error { message: String },
 
@@ -250,6 +271,44 @@ mod tests {
         match restored {
             ClientMessage::TerminatePane { pane } => {
                 assert_eq!(pane, crate::types::PaneId(8));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_exec_client_message_roundtrip() {
+        let msg = ClientMessage::Exec {
+            request_id: "req-1".to_string(),
+            pane: crate::types::PaneId(5),
+            data: b"cargo test\r".to_vec(),
+            wait: crate::types::ExecWaitCondition::OutputRegex {
+                pattern: "test result: ok".to_string(),
+                lines: 200,
+            },
+            timeout_ms: 30_000,
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::Exec {
+                request_id,
+                pane,
+                wait,
+                timeout_ms,
+                ..
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(pane, crate::types::PaneId(5));
+                assert_eq!(timeout_ms, 30_000);
+                assert_eq!(
+                    wait,
+                    crate::types::ExecWaitCondition::OutputRegex {
+                        pattern: "test result: ok".to_string(),
+                        lines: 200,
+                    }
+                );
             }
             _ => panic!("期待する variant でない"),
         }
@@ -371,6 +430,36 @@ mod tests {
                 assert_eq!(pane, crate::types::PaneId(6));
                 assert_eq!(alias.as_deref(), Some("server"));
                 assert_eq!(role.as_deref(), Some("worker"));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_exec_result_server_message_roundtrip() {
+        let msg = ServerMessage::ExecResult {
+            request_id: "req-2".to_string(),
+            pane: crate::types::PaneId(6),
+            status: crate::types::ExecStatus::TimedOut,
+            exit_code: Some(124),
+            message: Some("timeout waiting for pane 6".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ServerMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ServerMessage::ExecResult {
+                request_id,
+                pane,
+                status,
+                exit_code,
+                message,
+            } => {
+                assert_eq!(request_id, "req-2");
+                assert_eq!(pane, crate::types::PaneId(6));
+                assert_eq!(status, crate::types::ExecStatus::TimedOut);
+                assert_eq!(exit_code, Some(124));
+                assert_eq!(message.as_deref(), Some("timeout waiting for pane 6"));
             }
             _ => panic!("期待する variant でない"),
         }

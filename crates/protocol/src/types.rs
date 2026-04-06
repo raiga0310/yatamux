@@ -73,6 +73,25 @@ pub struct PaneCapture {
     pub scrollback_tail: Vec<String>,
 }
 
+/// `exec` リクエストで使う待機条件
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecWaitCondition {
+    Exit,
+    Silence { silence_ms: u64 },
+    OutputRegex { pattern: String, lines: usize },
+}
+
+/// `exec` 実行結果の状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecStatus {
+    Completed,
+    TimedOut,
+    PaneClosed,
+    Error,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +134,25 @@ mod tests {
         assert!(!restored.floating);
         assert!(!restored.busy);
         assert_eq!(restored.last_output_unix_ms, None);
+    }
+
+    #[test]
+    fn exec_wait_condition_roundtrip_preserves_output_regex() {
+        let wait = ExecWaitCondition::OutputRegex {
+            pattern: "test result: ok".to_string(),
+            lines: 300,
+        };
+        let json = serde_json::to_string(&wait).expect("serialize ExecWaitCondition");
+        let restored: ExecWaitCondition =
+            serde_json::from_str(&json).expect("deserialize ExecWaitCondition");
+        assert_eq!(restored, wait);
+    }
+
+    #[test]
+    fn exec_status_roundtrip_preserves_timed_out() {
+        let status = ExecStatus::TimedOut;
+        let json = serde_json::to_string(&status).expect("serialize ExecStatus");
+        let restored: ExecStatus = serde_json::from_str(&json).expect("deserialize ExecStatus");
+        assert_eq!(restored, status);
     }
 }

@@ -637,3 +637,157 @@ async fn send_command_input(
     data.push(b'\r');
     let _ = client_tx.send(ClientMessage::Input { pane, data }).await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::{sleep, timeout, Duration};
+    use yatamux_terminal::Grid;
+
+    struct AppDataOverride {
+        previous: Option<OsString>,
+        root: PathBuf,
+    }
+
+    impl AppDataOverride {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "yatamux-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                unique
+            ));
+            std::fs::create_dir_all(&root).expect("create temp appdata dir");
+            let previous = std::env::var_os("APPDATA");
+            unsafe {
+                std::env::set_var("APPDATA", &root);
+            }
+            Self { previous, root }
+        }
+    }
+
+    impl Drop for AppDataOverride {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe {
+                    std::env::set_var("APPDATA", previous);
+                },
+                None => unsafe {
+                    std::env::remove_var("APPDATA");
+                },
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct NoopNotificationBackend;
+
+    impl NotificationBackend for NoopNotificationBackend {
+        fn notify(&self, _pane_id: PaneId, _message: String) {}
+    }
+
+    fn make_store() -> Arc<Mutex<PaneStore>> {
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        Arc::new(Mutex::new(PaneStore::new(PaneId(1), grid)))
+    }
+
+    #[tokio::test]
+    async fn save_and_quit_bridge_writes_session_snapshot() {
+        let _guard = crate::app::appdata_env_lock()
+            .lock()
+            .expect("lock APPDATA env");
+        let _appdata = AppDataOverride::new("save-and-quit");
+        let session_path = yatamux_client::session::LayoutSnapshot::default_path();
+
+        let pane_store = make_store();
+        {
+            let mut store = pane_store.lock().unwrap();
+            store.pane_aliases.insert(PaneId(1), "worker".to_string());
+            store.pane_roles.insert(PaneId(1), "agent".to_string());
+        }
+
+        let (server_tx, server_rx) = mpsc::channel(8);
+        let (ipc_out_tx, _ipc_out_rx) = mpsc::channel(8);
+        let bridge_rx = spawn_bridge_fanout(server_rx, ipc_out_tx);
+        let (client_tx, mut client_rx) = mpsc::channel(8);
+        let (_split_tx, split_rx) = mpsc::channel(1);
+        let (_float_tx, float_rx) = mpsc::channel(1);
+        let (_layout_tx, layout_rx) = mpsc::channel(1);
+
+        spawn_server_bridge(
+            ServerBridge {
+                server_rx: bridge_rx,
+                client_tx,
+                surf_id: SurfaceId(1),
+                size: TermSize { cols: 80, rows: 24 },
+                pane_store: Arc::clone(&pane_store),
+                notif_backend: Arc::new(NoopNotificationBackend),
+                hooks: HooksConfig::default(),
+                sinks: HashMap::new(),
+            },
+            BridgeChannels {
+                split_rx,
+                float_rx,
+                layout_rx,
+            },
+        );
+
+        server_tx
+            .send(ServerMessage::SaveAndQuit)
+            .await
+            .expect("send SaveAndQuit");
+
+        let query = timeout(Duration::from_secs(1), client_rx.recv())
+            .await
+            .expect("timeout waiting for QueryAllPaneProcesses")
+            .expect("client channel closed");
+        assert!(matches!(query, ClientMessage::QueryAllPaneProcesses));
+
+        let mut commands = HashMap::new();
+        commands.insert("1".to_string(), Some("codex".to_string()));
+        let mut cwds = HashMap::new();
+        cwds.insert("1".to_string(), Some(r"C:\repo".to_string()));
+        server_tx
+            .send(ServerMessage::AllPaneProcesses { commands, cwds })
+            .await
+            .expect("send AllPaneProcesses");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if session_path.exists() && pane_store.lock().unwrap().should_quit {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("timeout waiting for saved session snapshot");
+
+        let snapshot = yatamux_client::session::LayoutSnapshot::load(&session_path)
+            .expect("load saved session snapshot");
+        assert_eq!(snapshot.active, PaneId(1));
+        match snapshot.root {
+            yatamux_client::session::LayoutNodeDef::Leaf {
+                command,
+                cwd,
+                alias,
+                role,
+                ..
+            } => {
+                assert_eq!(command.as_deref(), Some("codex resume --last"));
+                assert_eq!(cwd.as_deref(), Some(r"C:\repo"));
+                assert_eq!(alias.as_deref(), Some("worker"));
+                assert_eq!(role.as_deref(), Some("agent"));
+            }
+            other => panic!("expected leaf snapshot, got {:?}", other),
+        }
+    }
+}
