@@ -49,7 +49,7 @@ pub struct Pane {
     pub size: Arc<std::sync::Mutex<TermSize>>,
     /// 子プロセス kill ハンドル。Pane が Drop されるときに cmd.exe を終了させる。
     /// 孤児プロセス（テスト後の残留 cmd.exe）を防ぐために保持する。
-    child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
+    child_killer: std::sync::Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     /// ConPTY 直接子プロセスの PID（プロセスツリー走査に使用）
     pub child_pid: Option<u32>,
     /// 入力送信後から完了通知までのざっくりした busy フラグ
@@ -60,7 +60,7 @@ pub struct Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        if let Some(mut killer) = self.child_killer.take() {
+        if let Some(mut killer) = self.child_killer.lock().unwrap().take() {
             let _ = killer.kill();
         }
     }
@@ -186,7 +186,7 @@ impl Pane {
             cmd_tx,
             title,
             size: pane_size,
-            child_killer,
+            child_killer: std::sync::Mutex::new(child_killer),
             child_pid,
             busy,
             last_output_unix_ms,
@@ -225,6 +225,23 @@ impl Pane {
 
     pub fn last_output_unix_ms(&self) -> Option<u64> {
         *self.last_output_unix_ms.lock().unwrap()
+    }
+
+    pub fn terminate(&self) -> Result<()> {
+        if let Some(mut killer) = self.child_killer.lock().unwrap().take() {
+            match killer.kill() {
+                Ok(()) => {}
+                Err(err) if err.raw_os_error() == Some(258) => {}
+                Err(err) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to terminate pane {:?}: {}",
+                        self.id,
+                        err
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

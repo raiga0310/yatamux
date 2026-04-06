@@ -248,6 +248,12 @@ enum Commands {
         #[arg(long, value_name = "ID")]
         pane: u32,
     },
+    /// 指定ペインの子プロセスを強制終了する
+    TerminatePane {
+        /// 対象ペイン ID
+        #[arg(long, value_name = "ID")]
+        pane: u32,
+    },
     /// 指定ペインを閉じる
     ClosePane {
         /// 対象ペイン ID
@@ -420,6 +426,7 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, pane).await,
+        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(DEFAULT_SESSION, pane).await,
         Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, pane).await,
         Some(Commands::CapturePane {
             target,
@@ -681,6 +688,19 @@ mod tests {
         match cli.command {
             Some(Commands::ClosePane { pane }) => {
                 assert_eq!(pane, 9);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_terminate_pane() {
+        let cli = Cli::try_parse_from(["yatamux", "terminate-pane", "--pane", "11"])
+            .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::TerminatePane { pane }) => {
+                assert_eq!(pane, 11);
             }
             _ => panic!("unexpected command"),
         }

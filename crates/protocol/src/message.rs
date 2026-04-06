@@ -53,6 +53,17 @@ pub enum ClientMessage {
     /// ペインに Ctrl+C を送って割り込む
     InterruptPane { pane: PaneId },
 
+    /// ペインの子プロセスを強制終了する
+    TerminatePane { pane: PaneId },
+
+    /// GUI 側の active / floating 状態を server に同期する
+    SyncPaneState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_pane: Option<PaneId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        floating_pane: Option<PaneId>,
+    },
+
     /// スクリーンダンプを要求（接続時の初期状態取得）
     RequestScreen { pane: PaneId },
 
@@ -195,6 +206,43 @@ mod tests {
         match restored {
             ClientMessage::InterruptPane { pane } => {
                 assert_eq!(pane, crate::types::PaneId(7));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_terminate_pane_roundtrip() {
+        let msg = ClientMessage::TerminatePane {
+            pane: crate::types::PaneId(8),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::TerminatePane { pane } => {
+                assert_eq!(pane, crate::types::PaneId(8));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_sync_pane_state_roundtrip() {
+        let msg = ClientMessage::SyncPaneState {
+            active_pane: Some(crate::types::PaneId(3)),
+            floating_pane: Some(crate::types::PaneId(9)),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::SyncPaneState {
+                active_pane,
+                floating_pane,
+            } => {
+                assert_eq!(active_pane, Some(crate::types::PaneId(3)));
+                assert_eq!(floating_pane, Some(crate::types::PaneId(9)));
             }
             _ => panic!("期待する variant でない"),
         }

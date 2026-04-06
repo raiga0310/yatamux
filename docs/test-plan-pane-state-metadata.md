@@ -24,3 +24,13 @@
 - **前提**: server が pane 出力時刻を保持している
 - **操作**: `PaneCreated` 直後と `Output` 受信後で `ListPanes` を取り比較する
 - **期待結果**: 出力後の `last_output_unix_ms` が `Some(...)` になり、0 でない値になる
+
+### TC-06: `active` / `floating` フィールドの後方互換デシリアライズ
+- **前提**: 旧 `PaneInfo` JSON は `active` / `floating` を含まない
+- **操作**: 旧形式 JSON を `PaneInfo` としてデシリアライズする
+- **期待結果**: `active=false` / `floating=false` のデフォルトで復元される
+
+### TC-07: GUI 同期済みの `active` / `floating` が `ListPanes` に反映される
+- **前提**: server が GUI 由来の pane state を保持できる
+- **操作**: `ClientMessage::SyncPaneState` で active pane と floating pane を更新してから `ListPanes` を取る
+- **期待結果**: 対象 pane の `active` / `floating` が `true` になり、それ以外は `false` のまま返る

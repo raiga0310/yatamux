@@ -81,6 +81,8 @@ mod tests {
             command: Some("cargo".to_string()),
             busy: true,
             last_output_unix_ms: Some(1_744_000_000_000),
+            active: true,
+            floating: false,
         };
         assert_eq!(info.id, PaneId(3));
         assert_eq!(info.cols, 120);
@@ -90,6 +92,8 @@ mod tests {
         assert_eq!(info.command.as_deref(), Some("cargo"));
         assert!(info.busy);
         assert_eq!(info.last_output_unix_ms, Some(1_744_000_000_000));
+        assert!(info.active);
+        assert!(!info.floating);
     }
 
     // TC-C13-01: CapturePane メッセージが正しくシリアライズ/デシリアライズされる
