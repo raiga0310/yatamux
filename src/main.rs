@@ -188,6 +188,60 @@ enum Commands {
         #[arg(long)]
         wait_for_prompt: bool,
     },
+    /// 指定ペインが条件を満たすまで待機する
+    WaitPane {
+        /// 対象ペイン ID
+        #[arg(long, value_name = "ID")]
+        pane: u32,
+        /// 待機条件
+        #[arg(long, value_enum, default_value = "exit")]
+        wait_for: WaitForArg,
+        /// 全体タイムアウト秒
+        #[arg(long, default_value = "60")]
+        timeout: u64,
+        /// `wait-for output-regex` で待つ正規表現
+        #[arg(long)]
+        output_regex: Option<String>,
+        /// `wait-for silence` の静穏時間ミリ秒
+        #[arg(long, default_value = "1500")]
+        silence_ms: u64,
+        /// `wait-for output-regex` で確認する capture-pane 行数
+        #[arg(long, default_value = "200")]
+        lines: usize,
+    },
+    /// 指定ペインでコマンドを実行し、条件を満たすまで待機する
+    Exec {
+        /// 対象ペイン ID
+        #[arg(long, value_name = "ID")]
+        pane: u32,
+        /// 待機条件
+        #[arg(long, value_enum, default_value = "exit")]
+        wait_for: WaitForArg,
+        /// 全体タイムアウト秒
+        #[arg(long, default_value = "60")]
+        timeout: u64,
+        /// `wait-for output-regex` で待つ正規表現
+        #[arg(long)]
+        output_regex: Option<String>,
+        /// `wait-for silence` の静穏時間ミリ秒
+        #[arg(long, default_value = "1500")]
+        silence_ms: u64,
+        /// `wait-for output-regex` で確認する capture-pane 行数
+        #[arg(long, default_value = "200")]
+        lines: usize,
+        /// エスケープ変換を無効化してそのまま送信する
+        #[arg(long)]
+        raw: bool,
+        /// 実行するコマンド
+        #[arg(
+            value_name = "COMMAND",
+            required = true,
+            num_args = 1..,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        command: Vec<String>,
+    },
     /// 指定ペインに Ctrl+C を送信する
     InterruptPane {
         /// 送信先ペイン ID
@@ -264,6 +318,13 @@ enum SplitDirectionArg {
     Horizontal,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitForArg {
+    Exit,
+    Silence,
+    OutputRegex,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
@@ -312,6 +373,52 @@ async fn main() -> Result<()> {
             raw,
             wait_for_prompt,
         }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw, wait_for_prompt).await,
+        Some(Commands::WaitPane {
+            pane,
+            wait_for,
+            timeout,
+            output_regex,
+            silence_ms,
+            lines,
+        }) => {
+            cli::wait_pane(
+                DEFAULT_SESSION,
+                pane,
+                cli::WaitOptions {
+                    wait_for,
+                    timeout_secs: timeout,
+                    output_regex,
+                    silence_ms,
+                    lines,
+                },
+            )
+            .await
+        }
+        Some(Commands::Exec {
+            pane,
+            wait_for,
+            timeout,
+            output_regex,
+            silence_ms,
+            lines,
+            raw,
+            command,
+        }) => {
+            cli::exec_command(
+                DEFAULT_SESSION,
+                pane,
+                command,
+                raw,
+                cli::WaitOptions {
+                    wait_for,
+                    timeout_secs: timeout,
+                    output_regex,
+                    silence_ms,
+                    lines,
+                },
+            )
+            .await
+        }
         Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, pane).await,
         Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, pane).await,
         Some(Commands::CapturePane {
@@ -482,6 +589,85 @@ mod tests {
         match cli.command {
             Some(Commands::InterruptPane { pane }) => {
                 assert_eq!(pane, 7);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_wait_pane_exit() {
+        let cli =
+            Cli::try_parse_from(["yatamux", "wait-pane", "--pane", "3", "--wait-for", "exit"])
+                .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::WaitPane { pane, wait_for, .. }) => {
+                assert_eq!(pane, 3);
+                assert_eq!(wait_for, WaitForArg::Exit);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_wait_pane_output_regex() {
+        let cli = Cli::try_parse_from([
+            "yatamux",
+            "wait-pane",
+            "--pane",
+            "2",
+            "--wait-for",
+            "output-regex",
+            "--output-regex",
+            "passed",
+            "--lines",
+            "300",
+        ])
+        .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::WaitPane {
+                pane,
+                wait_for,
+                output_regex,
+                lines,
+                ..
+            }) => {
+                assert_eq!(pane, 2);
+                assert_eq!(wait_for, WaitForArg::OutputRegex);
+                assert_eq!(output_regex.as_deref(), Some("passed"));
+                assert_eq!(lines, 300);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_exec_command() {
+        let cli = Cli::try_parse_from([
+            "yatamux",
+            "exec",
+            "--pane",
+            "1",
+            "--timeout",
+            "30",
+            "--",
+            "cargo",
+            "test",
+            "-q",
+        ])
+        .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::Exec {
+                pane,
+                timeout,
+                command,
+                ..
+            }) => {
+                assert_eq!(pane, 1);
+                assert_eq!(timeout, 30);
+                assert_eq!(command, vec!["cargo", "test", "-q"]);
             }
             _ => panic!("unexpected command"),
         }
