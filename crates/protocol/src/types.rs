@@ -34,6 +34,14 @@ pub struct PaneInfo {
     pub title: String,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_unix_ms: Option<u64>,
 }
 
 /// capture-pane のカーソル情報

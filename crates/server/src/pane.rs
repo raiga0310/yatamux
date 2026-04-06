@@ -8,6 +8,7 @@
 use anyhow::Result;
 use portable_pty::ChildKiller;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
 
@@ -51,6 +52,10 @@ pub struct Pane {
     child_killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     /// ConPTY 直接子プロセスの PID（プロセスツリー走査に使用）
     pub child_pid: Option<u32>,
+    /// 入力送信後から完了通知までのざっくりした busy フラグ
+    busy: Arc<std::sync::Mutex<bool>>,
+    /// 最後に出力を受け取った時刻（Unix epoch ms）
+    last_output_unix_ms: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl Drop for Pane {
@@ -74,6 +79,8 @@ impl Pane {
         let grid = Arc::new(Mutex::new(Grid::new(size.cols, size.rows, width_config)));
         let title = Arc::new(std::sync::Mutex::new(Arc::<str>::from("")));
         let pane_size = Arc::new(std::sync::Mutex::new(size));
+        let busy = Arc::new(std::sync::Mutex::new(false));
+        let last_output_unix_ms = Arc::new(std::sync::Mutex::new(None));
 
         let (pty_output_tx, mut pty_output_rx) = mpsc::channel::<Vec<u8>>(256);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCmd>(64);
@@ -181,6 +188,8 @@ impl Pane {
             size: pane_size,
             child_killer,
             child_pid,
+            busy,
+            last_output_unix_ms,
         })
     }
 
@@ -201,4 +210,28 @@ impl Pane {
             .await
             .map_err(|_| anyhow::anyhow!("Pane {:?} cmd channel closed", self.id))
     }
+
+    pub fn mark_busy(&self, busy: bool) {
+        *self.busy.lock().unwrap() = busy;
+    }
+
+    pub fn busy(&self) -> bool {
+        *self.busy.lock().unwrap()
+    }
+
+    pub fn mark_output_received(&self) {
+        *self.last_output_unix_ms.lock().unwrap() = Some(now_unix_ms());
+    }
+
+    pub fn last_output_unix_ms(&self) -> Option<u64> {
+        *self.last_output_unix_ms.lock().unwrap()
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }

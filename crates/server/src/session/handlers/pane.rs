@@ -61,6 +61,7 @@ impl Server {
 
     pub(super) async fn handle_input(&mut self, pane: PaneId, data: Vec<u8>) -> Result<()> {
         if let Some(p) = self.panes.get(&pane) {
+            p.mark_busy(true);
             p.send_input(data).await?;
         } else {
             self.send_pane_not_found_error(pane).await?;
@@ -80,6 +81,16 @@ impl Server {
         self.client_tx
             .send(ServerMessage::PaneClosed { pane })
             .await?;
+        Ok(())
+    }
+
+    pub(super) async fn handle_interrupt_pane(&mut self, pane: PaneId) -> Result<()> {
+        if let Some(p) = self.panes.get(&pane) {
+            p.mark_busy(true);
+            p.send_input(vec![0x03]).await?;
+        } else {
+            self.send_pane_not_found_error(pane).await?;
+        }
         Ok(())
     }
 

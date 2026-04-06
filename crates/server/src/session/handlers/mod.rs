@@ -29,6 +29,7 @@ impl Server {
             ClientMessage::Input { pane, data } => self.handle_input(pane, data).await,
             ClientMessage::Resize { pane, size } => self.handle_resize(pane, size).await,
             ClientMessage::ClosePane { pane } => self.handle_close_pane(pane).await,
+            ClientMessage::InterruptPane { pane } => self.handle_interrupt_pane(pane).await,
             ClientMessage::Detach => self.handle_detach().await,
             ClientMessage::RequestScreen { pane } => self.handle_request_screen(pane).await,
             ClientMessage::CapturePane {

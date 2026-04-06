@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use yatamux_client::connection::ServerConnection;
-use yatamux_protocol::types::{PaneCapture, PaneId, SplitDirection, SurfaceId};
+use yatamux_protocol::types::{PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 
 #[derive(Serialize)]
@@ -17,17 +17,10 @@ struct CapturePaneJsonOutput {
     capture: PaneCapture,
 }
 
-/// `yatamux list-panes [--json]` — 実行中のペイン一覧を標準出力に表示する
-///
-/// `--json` を付けると JSON 配列形式で出力する（C-24）。
-pub async fn list_panes(session: &str, json: bool) -> Result<()> {
-    let mut conn = ServerConnection::connect(session)
-        .await
-        .context("yatamux is not running (could not connect to IPC pipe)")?;
-
+async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
     conn.tx.send(ClientMessage::ListPanes).await?;
 
-    let panes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match conn.rx.recv().await {
                 Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
@@ -44,7 +37,21 @@ pub async fn list_panes(session: &str, json: bool) -> Result<()> {
         }
     })
     .await
-    .context("timeout waiting for pane list")??;
+    .context("timeout waiting for pane list")?
+}
+
+fn pane_exists(panes: &[PaneInfo], pane_id: u32) -> bool {
+    panes.iter().any(|p| p.id == PaneId(pane_id))
+}
+
+/// `yatamux list-panes [--json]` — 実行中のペイン一覧を標準出力に表示する
+///
+/// `--json` を付けると JSON 配列形式で出力する（C-24）。
+pub async fn list_panes(session: &str, json: bool) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&panes)?);
@@ -142,22 +149,7 @@ pub async fn split_pane(
         .context("yatamux is not running (could not connect to IPC pipe)")?;
 
     // まずペイン一覧を取得してサーフェス ID を取得する
-    conn.tx.send(ClientMessage::ListPanes).await?;
-    let panes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match conn.rx.recv().await {
-                Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
-                Some(_) => continue,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "server closed connection before sending PanesListed"
-                    ))
-                }
-            }
-        }
-    })
-    .await
-    .context("timeout waiting for pane list")??;
+    let panes = request_panes(&mut conn).await?;
 
     // 対象ペインを探す（C-25: 見つからない場合はエラー終了）
     let target_pane = if pane_id == 0 {
@@ -236,27 +228,9 @@ pub async fn send_keys(
         .context("yatamux is not running (could not connect to IPC pipe)")?;
 
     // ペイン存在チェック（C-25: 存在しないペインへの操作でエラー終了）
-    conn.tx.send(ClientMessage::ListPanes).await?;
-    let panes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match conn.rx.recv().await {
-                Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
-                Some(ServerMessage::Error { message }) => {
-                    return Err(anyhow::anyhow!("{}", message))
-                }
-                Some(_) => continue,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "server closed connection before sending PanesListed"
-                    ))
-                }
-            }
-        }
-    })
-    .await
-    .context("timeout waiting for pane list")??;
+    let panes = request_panes(&mut conn).await?;
 
-    if !panes.iter().any(|p| p.id == PaneId(pane_id)) {
+    if !pane_exists(&panes, pane_id) {
         eprintln!("Error: pane {} not found", pane_id);
         std::process::exit(1);
     }
@@ -305,6 +279,68 @@ pub async fn send_keys(
         .context("timeout waiting for command to finish (60s)")?;
     }
 
+    Ok(())
+}
+
+/// `yatamux interrupt-pane --pane <id>` — 指定ペインに Ctrl+C を送信する
+pub async fn interrupt_pane(session: &str, pane_id: u32) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    if !pane_exists(&panes, pane_id) {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
+
+    conn.tx
+        .send(ClientMessage::InterruptPane {
+            pane: PaneId(pane_id),
+        })
+        .await?;
+    println!("Interrupted pane {}", pane_id);
+    Ok(())
+}
+
+/// `yatamux close-pane --pane <id>` — 指定ペインを閉じる
+pub async fn close_pane(session: &str, pane_id: u32) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    if !pane_exists(&panes, pane_id) {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
+
+    conn.tx
+        .send(ClientMessage::ClosePane {
+            pane: PaneId(pane_id),
+        })
+        .await?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::PaneClosed { pane }) if pane == PaneId(pane_id) => {
+                    return Ok(())
+                }
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message))
+                }
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PaneClosed"
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for pane to close")??;
+
+    println!("Closed pane {}", pane_id);
     Ok(())
 }
 
