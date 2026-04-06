@@ -22,13 +22,46 @@ impl ServerConnection {
         {
             use std::os::windows::io::AsRawHandle;
             use tokio::net::windows::named_pipe::ClientOptions;
+            use tokio::time::{sleep, Duration};
             use windows::Win32::Foundation::HANDLE;
             use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 
             let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
-            let pipe = ClientOptions::new()
-                .open(&pipe_name)
-                .with_context(|| format!("Failed to connect to named pipe: {}", pipe_name))?;
+            let pipe = {
+                const PIPE_BUSY_ERROR: i32 = 231;
+                const CONNECT_RETRIES: usize = 20;
+                const RETRY_DELAY_MS: u64 = 25;
+
+                let mut last_busy_err = None;
+                let mut pipe = None;
+                for attempt in 0..CONNECT_RETRIES {
+                    match ClientOptions::new().open(&pipe_name) {
+                        Ok(opened) => {
+                            pipe = Some(opened);
+                            break;
+                        }
+                        Err(err) if err.raw_os_error() == Some(PIPE_BUSY_ERROR) => {
+                            last_busy_err = Some(err);
+                            if attempt + 1 < CONNECT_RETRIES {
+                                sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                                continue;
+                            }
+                        }
+                        Err(err) => {
+                            return Err(err).with_context(|| {
+                                format!("Failed to connect to named pipe: {}", pipe_name)
+                            });
+                        }
+                    }
+                }
+
+                pipe.ok_or_else(|| {
+                    last_busy_err
+                        .map(anyhow::Error::from)
+                        .unwrap_or_else(|| anyhow::anyhow!("named pipe remained busy"))
+                })
+                .with_context(|| format!("Failed to connect to named pipe: {}", pipe_name))?
+            };
 
             // GUI プロセスの PID を取得（バイナリ置換の待機に使う）
             let server_pid = {

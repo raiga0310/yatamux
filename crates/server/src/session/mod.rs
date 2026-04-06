@@ -1340,7 +1340,7 @@ mod tests {
                 ServerMessage::PaneCreated { id, .. } => id,
                 other => panic!("expected PaneCreated, got {:?}", other),
             };
-            let pane_ids = vec![pane1_id, pane2_id];
+            let pane_ids = [pane1_id, pane2_id];
             // 2 番目のペイン（非アクティブ）に Input を送信
             tx.send(ClientMessage::Input {
                 pane: pane_ids[1],
