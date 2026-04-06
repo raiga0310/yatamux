@@ -34,3 +34,13 @@
 - **前提**: `exec` が send-keys 相当の入力送信と待機をまとめて行う
 - **操作**: command 文字列から送信バイト列を組み立てて Enter 付きで送る
 - **期待結果**: 入力末尾に `\r` が付与され、既定の待機条件が適用される
+
+### TC-08: `close-pane` / `terminate-pane` が shared wait substrate で `PaneClosed` を待つ
+- **前提**: pane close 系コマンドが共有待機ロジックを使う
+- **操作**: `PaneClosed` を受け取った場合の待機判定を評価する
+- **期待結果**: 対象ペインの close で成功し、他ペインのイベントは無視される
+
+### TC-09: `send-keys --wait-for-prompt` が exit wait substrate を再利用する
+- **前提**: prompt 待機が `wait-pane --wait-for exit` と同じ内部待機経路に寄っている
+- **操作**: `CommandFinished { exit_code: Some(0) }` と `CommandFinished { exit_code: Some(2) }` を評価する
+- **期待結果**: 0 は成功、非 0 は exit code を保持した結果になる

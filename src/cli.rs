@@ -26,8 +26,39 @@ enum WaitCondition {
     OutputRegex { regex: Regex, lines: usize },
 }
 
+#[derive(Debug)]
 struct WaitResult {
     exit_code: Option<i32>,
+}
+
+#[derive(Debug)]
+enum PaneWaitKind {
+    Condition(WaitCondition),
+    PaneClosed,
+}
+
+#[derive(Debug)]
+struct WaitState {
+    last_activity: tokio::time::Instant,
+    next_capture_at: tokio::time::Instant,
+    last_exit_code: Option<i32>,
+}
+
+impl WaitState {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            last_activity: now,
+            next_capture_at: now,
+            last_exit_code: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum WaitDecision {
+    Continue,
+    Done(WaitResult),
+    Error(anyhow::Error),
 }
 
 pub struct WaitOptions {
@@ -80,33 +111,88 @@ fn maybe_exit_with_code(result: WaitResult) {
     }
 }
 
-async fn wait_for_condition(
+fn handle_wait_message(
+    kind: &PaneWaitKind,
+    pane: PaneId,
+    pane_id: u32,
+    msg: ServerMessage,
+    state: &mut WaitState,
+) -> WaitDecision {
+    match msg {
+        ServerMessage::Output {
+            pane: output_pane, ..
+        } if output_pane == pane => {
+            state.last_activity = tokio::time::Instant::now();
+            WaitDecision::Continue
+        }
+        ServerMessage::CommandFinished {
+            pane: finished_pane,
+            exit_code,
+        } if finished_pane == pane => {
+            state.last_activity = tokio::time::Instant::now();
+            state.last_exit_code = exit_code;
+            match kind {
+                PaneWaitKind::Condition(WaitCondition::Exit) => {
+                    WaitDecision::Done(WaitResult { exit_code })
+                }
+                _ => WaitDecision::Continue,
+            }
+        }
+        ServerMessage::PaneClosed { pane: closed_pane } if closed_pane == pane => match kind {
+            PaneWaitKind::PaneClosed => WaitDecision::Done(WaitResult {
+                exit_code: state.last_exit_code,
+            }),
+            PaneWaitKind::Condition(WaitCondition::OutputRegex { .. }) => WaitDecision::Error(
+                anyhow::anyhow!("pane {} closed before regex matched", pane_id),
+            ),
+            PaneWaitKind::Condition(_) => WaitDecision::Done(WaitResult {
+                exit_code: state.last_exit_code,
+            }),
+        },
+        ServerMessage::PaneContent {
+            pane: content_pane,
+            content,
+            ..
+        } if content_pane == pane => {
+            if let PaneWaitKind::Condition(WaitCondition::OutputRegex { regex, .. }) = kind {
+                if regex.is_match(&content) {
+                    return WaitDecision::Done(WaitResult {
+                        exit_code: state.last_exit_code,
+                    });
+                }
+            }
+            WaitDecision::Continue
+        }
+        ServerMessage::Error { message } => WaitDecision::Error(anyhow::anyhow!("{}", message)),
+        _ => WaitDecision::Continue,
+    }
+}
+
+async fn wait_for_pane(
     conn: &mut ServerConnection,
     pane_id: u32,
-    condition: &WaitCondition,
+    kind: &PaneWaitKind,
     timeout: Duration,
 ) -> Result<WaitResult> {
     let pane = PaneId(pane_id);
     let started = tokio::time::Instant::now();
-    let mut last_activity = tokio::time::Instant::now();
-    let mut next_capture_at = tokio::time::Instant::now();
-    let mut last_exit_code = None;
+    let mut state = WaitState::new(started);
 
     loop {
         if started.elapsed() >= timeout {
             anyhow::bail!("timeout waiting for pane {}", pane_id);
         }
 
-        if let WaitCondition::Silence(duration) = condition {
-            if last_activity.elapsed() >= *duration {
+        if let PaneWaitKind::Condition(WaitCondition::Silence(duration)) = kind {
+            if state.last_activity.elapsed() >= *duration {
                 return Ok(WaitResult {
-                    exit_code: last_exit_code,
+                    exit_code: state.last_exit_code,
                 });
             }
         }
 
-        if let WaitCondition::OutputRegex { lines, .. } = condition {
-            if tokio::time::Instant::now() >= next_capture_at {
+        if let PaneWaitKind::Condition(WaitCondition::OutputRegex { lines, .. }) = kind {
+            if tokio::time::Instant::now() >= state.next_capture_at {
                 conn.tx
                     .send(ClientMessage::CapturePane {
                         pane,
@@ -114,7 +200,7 @@ async fn wait_for_condition(
                         plain_text: true,
                     })
                     .await?;
-                next_capture_at = tokio::time::Instant::now() + Duration::from_millis(200);
+                state.next_capture_at = tokio::time::Instant::now() + Duration::from_millis(200);
             }
         }
 
@@ -123,15 +209,16 @@ async fn wait_for_condition(
         if timeout_left < next_wait {
             next_wait = timeout_left;
         }
-        if let WaitCondition::Silence(duration) = condition {
-            let silence_left = duration.saturating_sub(last_activity.elapsed());
+        if let PaneWaitKind::Condition(WaitCondition::Silence(duration)) = kind {
+            let silence_left = duration.saturating_sub(state.last_activity.elapsed());
             if silence_left < next_wait {
                 next_wait = silence_left;
             }
         }
-        if let WaitCondition::OutputRegex { .. } = condition {
-            let capture_left =
-                next_capture_at.saturating_duration_since(tokio::time::Instant::now());
+        if let PaneWaitKind::Condition(WaitCondition::OutputRegex { .. }) = kind {
+            let capture_left = state
+                .next_capture_at
+                .saturating_duration_since(tokio::time::Instant::now());
             if capture_left < next_wait {
                 next_wait = capture_left;
             }
@@ -141,49 +228,11 @@ async fn wait_for_condition(
         }
 
         match tokio::time::timeout(next_wait, conn.rx.recv()).await {
-            Ok(Some(ServerMessage::Output {
-                pane: output_pane, ..
-            })) if output_pane == pane => {
-                last_activity = tokio::time::Instant::now();
-            }
-            Ok(Some(ServerMessage::CommandFinished {
-                pane: finished_pane,
-                exit_code,
-            })) if finished_pane == pane => {
-                last_activity = tokio::time::Instant::now();
-                last_exit_code = exit_code;
-                if matches!(condition, WaitCondition::Exit) {
-                    return Ok(WaitResult { exit_code });
-                }
-            }
-            Ok(Some(ServerMessage::PaneClosed { pane: closed_pane })) if closed_pane == pane => {
-                return match condition {
-                    WaitCondition::OutputRegex { .. } => Err(anyhow::anyhow!(
-                        "pane {} closed before regex matched",
-                        pane_id
-                    )),
-                    _ => Ok(WaitResult {
-                        exit_code: last_exit_code,
-                    }),
-                };
-            }
-            Ok(Some(ServerMessage::PaneContent {
-                pane: content_pane,
-                content,
-                ..
-            })) if content_pane == pane => {
-                if let WaitCondition::OutputRegex { regex, .. } = condition {
-                    if regex.is_match(&content) {
-                        return Ok(WaitResult {
-                            exit_code: last_exit_code,
-                        });
-                    }
-                }
-            }
-            Ok(Some(ServerMessage::Error { message })) => {
-                return Err(anyhow::anyhow!("{}", message));
-            }
-            Ok(Some(_)) => {}
+            Ok(Some(msg)) => match handle_wait_message(kind, pane, pane_id, msg, &mut state) {
+                WaitDecision::Continue => {}
+                WaitDecision::Done(result) => return Ok(result),
+                WaitDecision::Error(err) => return Err(err),
+            },
             Ok(None) => {
                 anyhow::bail!(
                     "server closed connection while waiting for pane {}",
@@ -430,31 +479,15 @@ pub async fn send_keys(
 
     // --wait-for-prompt: 対象ペインの CommandFinished を受信するまで待機（C-27）
     if wait_for_prompt {
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            loop {
-                match conn.rx.recv().await {
-                    Some(ServerMessage::CommandFinished { pane, exit_code })
-                        if pane == PaneId(pane_id) =>
-                    {
-                        if let Some(code) = exit_code {
-                            if code != 0 {
-                                eprintln!("Command exited with status {}", code);
-                                std::process::exit(code);
-                            }
-                        }
-                        return;
-                    }
-                    Some(ServerMessage::Error { message }) => {
-                        eprintln!("Error: {}", message);
-                        std::process::exit(1);
-                    }
-                    Some(_) => continue,
-                    None => return,
-                }
-            }
-        })
+        let result = wait_for_pane(
+            &mut conn,
+            pane_id,
+            &PaneWaitKind::Condition(WaitCondition::Exit),
+            Duration::from_secs(60),
+        )
         .await
         .context("timeout waiting for command to finish (60s)")?;
+        maybe_exit_with_code(result);
     }
 
     Ok(())
@@ -477,10 +510,10 @@ pub async fn wait_pane(session: &str, pane_id: u32, options: WaitOptions) -> Res
         options.silence_ms,
         options.lines,
     )?;
-    let result = wait_for_condition(
+    let result = wait_for_pane(
         &mut conn,
         pane_id,
-        &condition,
+        &PaneWaitKind::Condition(condition),
         Duration::from_secs(options.timeout_secs),
     )
     .await?;
@@ -526,10 +559,10 @@ pub async fn exec_command(
         })
         .await?;
 
-    let result = wait_for_condition(
+    let result = wait_for_pane(
         &mut conn,
         pane_id,
-        &condition,
+        &PaneWaitKind::Condition(condition),
         Duration::from_secs(options.timeout_secs),
     )
     .await?;
@@ -604,26 +637,15 @@ pub async fn terminate_pane(session: &str, pane_id: u32) -> Result<()> {
 }
 
 async fn wait_for_pane_closed(conn: &mut ServerConnection, pane_id: u32) -> Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match conn.rx.recv().await {
-                Some(ServerMessage::PaneClosed { pane }) if pane == PaneId(pane_id) => {
-                    return Ok(())
-                }
-                Some(ServerMessage::Error { message }) => {
-                    return Err(anyhow::anyhow!("{}", message))
-                }
-                Some(_) => continue,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "server closed connection before sending PaneClosed"
-                    ))
-                }
-            }
-        }
-    })
+    let _ = wait_for_pane(
+        conn,
+        pane_id,
+        &PaneWaitKind::PaneClosed,
+        Duration::from_secs(5),
+    )
     .await
-    .context("timeout waiting for pane to close")?
+    .context("timeout waiting for pane to close")?;
+    Ok(())
 }
 
 /// `yatamux layout list` — 保存済みレイアウトの一覧を標準出力に表示する（C-22）
@@ -805,8 +827,13 @@ fn unescape(s: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_wait_condition, join_command, unescape, WaitCondition};
+    use super::{
+        build_wait_condition, handle_wait_message, join_command, unescape, PaneWaitKind,
+        WaitCondition, WaitDecision, WaitState,
+    };
+    use regex::Regex;
     use std::time::Duration;
+    use yatamux_protocol::{types::PaneId, ServerMessage};
 
     #[test]
     fn unescape_newline() {
@@ -867,5 +894,73 @@ mod tests {
             join_command(&["cargo".to_string(), "test".to_string(), "-q".to_string()]),
             "cargo test -q"
         );
+    }
+
+    #[test]
+    fn pane_closed_wait_ignores_other_panes_then_matches_target() {
+        let mut state = WaitState::new(tokio::time::Instant::now());
+        let kind = PaneWaitKind::PaneClosed;
+
+        let other = handle_wait_message(
+            &kind,
+            PaneId(5),
+            5,
+            ServerMessage::PaneClosed { pane: PaneId(4) },
+            &mut state,
+        );
+        assert!(matches!(other, WaitDecision::Continue));
+
+        let matched = handle_wait_message(
+            &kind,
+            PaneId(5),
+            5,
+            ServerMessage::PaneClosed { pane: PaneId(5) },
+            &mut state,
+        );
+        assert!(matches!(matched, WaitDecision::Done(_)));
+    }
+
+    #[test]
+    fn exit_wait_finishes_on_command_finished_and_preserves_exit_code() {
+        let mut state = WaitState::new(tokio::time::Instant::now());
+        let kind = PaneWaitKind::Condition(WaitCondition::Exit);
+
+        let matched = handle_wait_message(
+            &kind,
+            PaneId(8),
+            8,
+            ServerMessage::CommandFinished {
+                pane: PaneId(8),
+                exit_code: Some(2),
+            },
+            &mut state,
+        );
+        match matched {
+            WaitDecision::Done(result) => assert_eq!(result.exit_code, Some(2)),
+            _ => panic!("expected WaitDecision::Done"),
+        }
+    }
+
+    #[test]
+    fn regex_wait_errors_if_target_pane_closes_first() {
+        let mut state = WaitState::new(tokio::time::Instant::now());
+        let kind = PaneWaitKind::Condition(WaitCondition::OutputRegex {
+            regex: Regex::new("passed").expect("regex should compile"),
+            lines: 200,
+        });
+
+        let matched = handle_wait_message(
+            &kind,
+            PaneId(9),
+            9,
+            ServerMessage::PaneClosed { pane: PaneId(9) },
+            &mut state,
+        );
+        match matched {
+            WaitDecision::Error(err) => {
+                assert!(err.to_string().contains("closed before regex matched"));
+            }
+            _ => panic!("expected WaitDecision::Error"),
+        }
     }
 }
