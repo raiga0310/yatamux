@@ -162,6 +162,9 @@ pub enum ServerMessage {
     /// ペインが終了
     PaneClosed { pane: PaneId },
 
+    /// 入力が対象ペインのコマンドチャネルへ受理された
+    InputAccepted { pane: PaneId },
+
     /// OSC 133;D — シェルコマンド終了通知（`send-keys --wait-for-prompt` で利用）
     CommandFinished {
         pane: PaneId,
@@ -430,6 +433,22 @@ mod tests {
                 assert_eq!(pane, crate::types::PaneId(6));
                 assert_eq!(alias.as_deref(), Some("server"));
                 assert_eq!(role.as_deref(), Some("worker"));
+            }
+            _ => panic!("期待する variant でない"),
+        }
+    }
+
+    #[test]
+    fn test_input_accepted_roundtrip() {
+        let msg = ServerMessage::InputAccepted {
+            pane: crate::types::PaneId(7),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ServerMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ServerMessage::InputAccepted { pane } => {
+                assert_eq!(pane, crate::types::PaneId(7));
             }
             _ => panic!("期待する variant でない"),
         }

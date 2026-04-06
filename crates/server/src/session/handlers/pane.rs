@@ -67,6 +67,10 @@ impl Server {
         if let Some(p) = self.panes.get(&pane) {
             p.mark_busy(true);
             p.send_input(data).await?;
+            self.client_tx
+                .send(ServerMessage::InputAccepted { pane })
+                .await
+                .context("Failed to send InputAccepted")?;
         } else {
             self.send_pane_not_found_error(pane).await?;
         }

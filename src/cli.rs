@@ -357,6 +357,70 @@ async fn wait_for_exec_result(
     .context("timeout waiting for exec result")?
 }
 
+async fn wait_for_pane_meta_update(
+    conn: &mut ServerConnection,
+    pane: PaneId,
+    alias: Option<&str>,
+    role: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::PaneMetaUpdated {
+                    pane: updated_pane,
+                    alias: updated_alias,
+                    role: updated_role,
+                }) if updated_pane == pane => {
+                    if updated_alias.as_deref() == alias && updated_role.as_deref() == role {
+                        return Ok(());
+                    }
+                }
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message));
+                }
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending PaneMetaUpdated"
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for pane metadata update")?
+}
+
+async fn wait_for_input_accept(
+    conn: &mut ServerConnection,
+    pane: PaneId,
+    timeout: Duration,
+) -> Result<()> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::InputAccepted {
+                    pane: accepted_pane,
+                }) if accepted_pane == pane => {
+                    return Ok(());
+                }
+                Some(ServerMessage::Error { message }) => {
+                    return Err(anyhow::anyhow!("{}", message));
+                }
+                Some(_) => continue,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "server closed connection before sending InputAccepted"
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .context("timeout waiting for input acceptance")?
+}
+
 async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
     conn.tx.send(ClientMessage::ListPanes).await?;
 
@@ -788,6 +852,7 @@ pub async fn send_keys(
             data,
         })
         .await?;
+    wait_for_input_accept(&mut conn, pane.id, Duration::from_secs(5)).await?;
 
     // --wait-for-prompt: 対象ペインの CommandFinished を受信するまで待機（C-27）
     if wait_for_prompt {
@@ -955,6 +1020,14 @@ pub async fn set_pane_meta(
             role: role.clone(),
         })
         .await?;
+    wait_for_pane_meta_update(
+        &mut conn,
+        pane.id,
+        alias.as_deref(),
+        role.as_deref(),
+        Duration::from_secs(5),
+    )
+    .await?;
     println!(
         "Updated pane {} alias={} role={}",
         pane.id.0,
@@ -1154,8 +1227,9 @@ mod tests {
         build_apply_update_command, build_exec_wait_condition, build_wait_condition,
         cleanup_staged_update, find_pane_by_selector, handle_wait_message, join_command,
         next_request_id, resolve_existing_pane, resolve_pane_for_request,
-        subscription_event_from_message, unescape, wait_for_exec_result, PaneWaitKind,
-        SubscribePaneJsonEvent, WaitCondition, WaitDecision, WaitState,
+        subscription_event_from_message, unescape, wait_for_exec_result, wait_for_input_accept,
+        wait_for_pane_meta_update, PaneWaitKind, SubscribePaneJsonEvent, WaitCondition,
+        WaitDecision, WaitState,
     };
     use regex::Regex;
     use std::path::Path;
@@ -1463,6 +1537,120 @@ mod tests {
             .await
             .expect_err("timed out exec should surface as error");
         assert!(err.to_string().contains("timeout waiting for pane 4"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_pane_meta_update_ignores_unrelated_events() {
+        let (client_tx, _client_rx) = mpsc::channel(4);
+        let (server_tx, server_rx) = mpsc::channel(4);
+        let mut conn = ServerConnection {
+            tx: client_tx,
+            rx: server_rx,
+            server_pid: 0,
+        };
+
+        server_tx
+            .send(ServerMessage::PaneMetaUpdated {
+                pane: PaneId(3),
+                alias: Some("other".to_string()),
+                role: Some("observer".to_string()),
+            })
+            .await
+            .expect("send other pane metadata");
+        server_tx
+            .send(ServerMessage::PaneMetaUpdated {
+                pane: PaneId(4),
+                alias: Some("tests".to_string()),
+                role: Some("verifier".to_string()),
+            })
+            .await
+            .expect("send target pane metadata");
+
+        wait_for_pane_meta_update(
+            &mut conn,
+            PaneId(4),
+            Some("tests"),
+            Some("verifier"),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("wait should succeed");
+    }
+
+    #[tokio::test]
+    async fn wait_for_pane_meta_update_surfaces_server_error() {
+        let (client_tx, _client_rx) = mpsc::channel(4);
+        let (server_tx, server_rx) = mpsc::channel(4);
+        let mut conn = ServerConnection {
+            tx: client_tx,
+            rx: server_rx,
+            server_pid: 0,
+        };
+
+        server_tx
+            .send(ServerMessage::Error {
+                message: "pane 8 not found".to_string(),
+            })
+            .await
+            .expect("send error");
+
+        let err = wait_for_pane_meta_update(
+            &mut conn,
+            PaneId(8),
+            Some("tests"),
+            Some("verifier"),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("server error should surface");
+        assert!(err.to_string().contains("pane 8 not found"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_input_accept_ignores_other_panes() {
+        let (client_tx, _client_rx) = mpsc::channel(4);
+        let (server_tx, server_rx) = mpsc::channel(4);
+        let mut conn = ServerConnection {
+            tx: client_tx,
+            rx: server_rx,
+            server_pid: 0,
+        };
+
+        server_tx
+            .send(ServerMessage::InputAccepted { pane: PaneId(1) })
+            .await
+            .expect("send other pane ack");
+        server_tx
+            .send(ServerMessage::InputAccepted { pane: PaneId(2) })
+            .await
+            .expect("send target pane ack");
+
+        wait_for_input_accept(&mut conn, PaneId(2), Duration::from_secs(1))
+            .await
+            .expect("wait should succeed");
+    }
+
+    #[tokio::test]
+    async fn wait_for_input_accept_surfaces_server_error() {
+        let (client_tx, _client_rx) = mpsc::channel(4);
+        let (server_tx, server_rx) = mpsc::channel(4);
+        let mut conn = ServerConnection {
+            tx: client_tx,
+            rx: server_rx,
+            server_pid: 0,
+        };
+
+        server_tx
+            .send(ServerMessage::Error {
+                message: "pane 9 not found".to_string(),
+            })
+            .await
+            .expect("send error");
+
+        let err = wait_for_input_accept(&mut conn, PaneId(9), Duration::from_secs(1))
+            .await
+            .expect_err("server error should surface");
+        assert!(err.to_string().contains("pane 9 not found"));
     }
 
     #[test]
