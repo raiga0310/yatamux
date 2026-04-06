@@ -1,0 +1,61 @@
+name: E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/e2e.yml'
+      - 'src/**'
+      - 'crates/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/e2e.yml'
+      - 'src/**'
+      - 'crates/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-e2e-smoke:
+    name: Windows E2E smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      YATAMUX_E2E_TIMEOUT_SECS: 90
+    steps:
+      # actions/checkout v5.0.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      # actions-rust-lang/setup-rust-toolchain v1.15.0
+      - uses: actions-rust-lang/setup-rust-toolchain@2fcdc490d667999e01ddbbf0f2823181beef6b39
+        with:
+          toolchain: stable
+          cache: false
+          rustflags: ""
+
+      # actions/cache v5.0.1
+      - uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-e2e-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-e2e-cargo-
+
+      - name: Run ignored Windows E2E smoke
+        run: cargo test --test e2e_smoke -- --ignored --test-threads=1

@@ -24,17 +24,23 @@ jobs:
     name: Build (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.0.1
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # actions-rust-lang/setup-rust-toolchain v1.15.0
+        uses: actions-rust-lang/setup-rust-toolchain@2fcdc490d667999e01ddbbf0f2823181beef6b39
         with:
-          targets: x86_64-pc-windows-msvc
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+          cache: false
+          rustflags: ""
 
       - name: Cache cargo registry
-        uses: actions/cache@v5
+        # actions/cache v5.0.1
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
         with:
           path: |
             ~/.cargo/registry
@@ -55,7 +61,8 @@ jobs:
           Write-Host "SHA256: $hash"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # softprops/action-gh-release v2.5.0
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |

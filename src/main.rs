@@ -133,6 +133,10 @@ pub const DEFAULT_SESSION: &str = "default";
 #[derive(Parser)]
 #[command(name = "yatamux", version, about)]
 struct Cli {
+    /// 対象セッション名（IPC パイプ名のサフィックス）
+    #[arg(long, default_value = DEFAULT_SESSION, global = true, hide = true)]
+    session: String,
+
     /// 起動時に適用するレイアウト名（%APPDATA%\yatamux\layouts\<NAME>.toml）
     #[arg(long, value_name = "NAME")]
     layout: Option<String>,
@@ -352,6 +356,70 @@ enum WaitForArg {
     OutputRegex,
 }
 
+fn command_name(command: &Commands) -> &'static str {
+    match command {
+        Commands::ListPanes { .. } => "list-panes",
+        Commands::SendKeys { .. } => "send-keys",
+        Commands::WaitPane { .. } => "wait-pane",
+        Commands::Exec { .. } => "exec",
+        Commands::SubscribePane { .. } => "subscribe-pane",
+        Commands::InterruptPane { .. } => "interrupt-pane",
+        Commands::TerminatePane { .. } => "terminate-pane",
+        Commands::ClosePane { .. } => "close-pane",
+        Commands::SetPaneMeta { .. } => "set-pane-meta",
+        Commands::CapturePane { .. } => "capture-pane",
+        Commands::SplitPane { .. } => "split-pane",
+        Commands::Layout(_) => "layout",
+        Commands::Update => "update",
+    }
+}
+
+fn is_truthy_env(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
+fn maybe_write_startup_probe(cli: &Cli) -> Result<bool> {
+    use anyhow::Context;
+    use std::io::Write;
+
+    let Ok(probe_path) = std::env::var("YATAMUX_STARTUP_PROBE_FILE") else {
+        return Ok(false);
+    };
+
+    let payload = serde_json::json!({
+        "pid": std::process::id(),
+        "session": cli.session,
+        "appdata": std::env::var("APPDATA").ok(),
+        "exe": std::env::current_exe().ok(),
+        "command": cli.command.as_ref().map(command_name),
+        "apply_update": cli.apply_update.is_some(),
+        "launch": cli.launch,
+        "layout": cli.layout.as_deref(),
+        "args": std::env::args().collect::<Vec<_>>(),
+    });
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&probe_path)
+        .with_context(|| format!("startup probe ファイルを開けませんでした: {}", probe_path))?;
+    serde_json::to_writer(&mut file, &payload).with_context(|| {
+        format!(
+            "startup probe JSON の書き込みに失敗しました: {}",
+            probe_path
+        )
+    })?;
+    writeln!(file)
+        .with_context(|| format!("startup probe 改行の書き込みに失敗しました: {}", probe_path))?;
+
+    Ok(is_truthy_env("YATAMUX_STARTUP_PROBE_EXIT")
+        && cli.command.is_none()
+        && cli.apply_update.is_none())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(debug_assertions)]
@@ -381,6 +449,10 @@ async fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    std::env::set_var("YATAMUX_SESSION", &cli.session);
+    if maybe_write_startup_probe(&cli)? {
+        return Ok(());
+    }
 
     // --apply-update <pid> <new_path> [--launch] モード
     if let Some(args) = cli.apply_update {
@@ -392,14 +464,14 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::ListPanes { json }) => cli::list_panes(DEFAULT_SESSION, json).await,
+        Some(Commands::ListPanes { json }) => cli::list_panes(&cli.session, json).await,
         Some(Commands::SendKeys {
             pane,
             text,
             enter,
             raw,
             wait_for_prompt,
-        }) => cli::send_keys(DEFAULT_SESSION, &pane, &text, enter, raw, wait_for_prompt).await,
+        }) => cli::send_keys(&cli.session, &pane, &text, enter, raw, wait_for_prompt).await,
         Some(Commands::WaitPane {
             pane,
             wait_for,
@@ -409,7 +481,7 @@ async fn main() -> Result<()> {
             lines,
         }) => {
             cli::wait_pane(
-                DEFAULT_SESSION,
+                &cli.session,
                 &pane,
                 cli::WaitOptions {
                     wait_for,
@@ -432,7 +504,7 @@ async fn main() -> Result<()> {
             command,
         }) => {
             cli::exec_command(
-                DEFAULT_SESSION,
+                &cli.session,
                 &pane,
                 command,
                 raw,
@@ -447,20 +519,20 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::SubscribePane { pane, json }) => {
-            cli::subscribe_pane(DEFAULT_SESSION, &pane, json).await
+            cli::subscribe_pane(&cli.session, &pane, json).await
         }
-        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, &pane).await,
-        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(DEFAULT_SESSION, &pane).await,
-        Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, &pane).await,
+        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(&cli.session, &pane).await,
+        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(&cli.session, &pane).await,
+        Some(Commands::ClosePane { pane }) => cli::close_pane(&cli.session, &pane).await,
         Some(Commands::SetPaneMeta { pane, alias, role }) => {
-            cli::set_pane_meta(DEFAULT_SESSION, &pane, alias, role).await
+            cli::set_pane_meta(&cli.session, &pane, alias, role).await
         }
         Some(Commands::CapturePane {
             target,
             lines,
             plain_text,
             json,
-        }) => cli::capture_pane(DEFAULT_SESSION, &target, lines, plain_text, json).await,
+        }) => cli::capture_pane(&cli.session, &target, lines, plain_text, json).await,
         Some(Commands::SplitPane {
             dir,
             direction,
@@ -472,18 +544,18 @@ async fn main() -> Result<()> {
                     yatamux_protocol::types::SplitDirection::Horizontal
                 }
             };
-            cli::split_pane(DEFAULT_SESSION, target.as_deref(), split_dir, dir).await
+            cli::split_pane(&cli.session, target.as_deref(), split_dir, dir).await
         }
         Some(Commands::Layout(sub)) => match sub {
             LayoutCommands::List => cli::layout_list().await,
             LayoutCommands::Delete { name } => cli::layout_delete(&name).await,
             LayoutCommands::Export { name } => cli::layout_export(&name).await,
         },
-        Some(Commands::Update) => cli::update(DEFAULT_SESSION).await,
+        Some(Commands::Update) => cli::update(&cli.session).await,
         None => {
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
-            app::run(cli.layout, app_config).await
+            app::run(cli.session, cli.layout, app_config).await
         }
     }
 }
@@ -498,6 +570,22 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
     use anyhow::Context;
 
     let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
+    if let Ok(probe_path) = std::env::var("YATAMUX_UPDATE_HELPER_PROBE_FILE") {
+        let payload = serde_json::json!({
+            "pid": pid,
+            "new_path": new_path,
+            "launch": launch,
+            "session": std::env::var("YATAMUX_SESSION").ok(),
+            "exe": exe,
+        });
+        std::fs::write(&probe_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
+            format!(
+                "ヘルパー probe ファイルの書き込みに失敗しました: {}",
+                probe_path
+            )
+        })?;
+        return Ok(());
+    }
 
     if pid != 0 {
         eprintln!("PID {} の終了を待機中...", pid);
@@ -523,7 +611,6 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
     } else {
         eprintln!("バイナリ置換完了。");
     }
-
     Ok(())
 }
 
@@ -677,6 +764,15 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parse_global_session_option() {
+        let cli = Cli::try_parse_from(["yatamux", "--session", "e2e-smoke", "list-panes"])
+            .expect("CLI should parse");
+
+        assert_eq!(cli.session, "e2e-smoke");
+        assert!(matches!(cli.command, Some(Commands::ListPanes { .. })));
     }
 
     #[test]

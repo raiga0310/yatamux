@@ -138,9 +138,7 @@ async fn test_ipc_multiple_clients() {
 
     // クライアント 1 接続
     let mut conn1 = ServerConnection::connect(&session).await.unwrap();
-    // サーバーが次のパイプインスタンスを作成するまで待つ（os error 231 回避）
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    // クライアント 2 接続
+    // クライアント 2 接続も即時に成功すること
     let mut conn2 = ServerConnection::connect(&session).await.unwrap();
 
     // 両方から送信

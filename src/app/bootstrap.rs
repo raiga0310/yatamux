@@ -5,8 +5,6 @@ use yatamux_protocol::types::{PaneId, SurfaceId, TermSize, WorkspaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_server::{ipc::run_ipc_server, Server};
 
-use crate::DEFAULT_SESSION;
-
 pub(crate) struct BootstrapHandles {
     pub(crate) client_tx: mpsc::Sender<ClientMessage>,
     pub(crate) server_rx: mpsc::Receiver<ServerMessage>,
@@ -15,7 +13,7 @@ pub(crate) struct BootstrapHandles {
     pub(crate) pane_id: PaneId,
 }
 
-pub(crate) async fn bootstrap_runtime(size: TermSize) -> Result<BootstrapHandles> {
+pub(crate) async fn bootstrap_runtime(session: &str, size: TermSize) -> Result<BootstrapHandles> {
     let (server_out_tx, server_rx) = mpsc::channel::<ServerMessage>(256);
     let (ipc_out_tx, ipc_out_rx) = mpsc::channel::<ServerMessage>(256);
 
@@ -26,8 +24,9 @@ pub(crate) async fn bootstrap_runtime(size: TermSize) -> Result<BootstrapHandles
     let server = Server::new(server_out_tx);
     tokio::spawn(server.run(merged_rx));
 
+    let session = session.to_string();
     tokio::spawn(async move {
-        if let Err(e) = run_ipc_server(DEFAULT_SESSION, ipc_in_tx, ipc_out_rx).await {
+        if let Err(e) = run_ipc_server(&session, ipc_in_tx, ipc_out_rx).await {
             tracing::error!("IPC server exited with error: {:#}", e);
         }
     });

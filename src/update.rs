@@ -125,7 +125,14 @@ pub fn plan_update_paths(exe: &Path) -> (PathBuf, PathBuf) {
 
 /// アップデート後に起動する新プロセスのコマンドを構築する。
 pub fn build_launch_command(exe_path: &Path) -> std::process::Command {
-    std::process::Command::new(exe_path)
+    let mut command = std::process::Command::new(exe_path);
+    if let Ok(session) = std::env::var("YATAMUX_SESSION") {
+        let session = session.trim();
+        if !session.is_empty() {
+            command.arg("--session").arg(session);
+        }
+    }
+    command
 }
 
 /// 更新確認に使う Releases API URL を返す。
@@ -375,13 +382,30 @@ mod tests {
         F: FnOnce(&str) -> Vec<MockHttpResponse>,
     {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock http server");
+        listener
+            .set_nonblocking(true)
+            .expect("set mock http listener nonblocking");
         let addr = listener.local_addr().expect("resolve mock server address");
         let base_url = format!("http://{}", addr);
         let responses = build_responses(&base_url);
 
         let handle = thread::spawn(move || {
             for response in responses {
-                let (mut stream, _) = listener.accept().expect("accept test connection");
+                let deadline = std::time::Instant::now() + Duration::from_secs(90);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(stream) => break stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "timeout waiting for mock HTTP request for {}",
+                                response.path
+                            );
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(err) => panic!("accept test connection: {}", err),
+                    }
+                };
                 let mut buf = [0u8; 4096];
                 let size = stream.read(&mut buf).expect("read request");
                 let request = String::from_utf8_lossy(&buf[..size]);
@@ -548,9 +572,43 @@ mod tests {
     // TC-08: 新プロセス起動コマンドの組み立て
     #[test]
     fn test_build_launch_command_exe_path() {
+        unsafe {
+            std::env::remove_var("YATAMUX_SESSION");
+        }
         let exe = Path::new(r"C:\foo\yatamux.exe");
         let cmd = build_launch_command(exe);
         assert_eq!(cmd.get_program(), exe.as_os_str());
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.is_empty(),
+            "launch command should not add args by default"
+        );
+    }
+
+    #[test]
+    fn test_build_launch_command_preserves_session_argument() {
+        unsafe {
+            std::env::set_var("YATAMUX_SESSION", "e2e-update");
+        }
+
+        let exe = Path::new(r"C:\foo\yatamux.exe");
+        let cmd = build_launch_command(exe);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec!["--session".to_string(), "e2e-update".to_string()]
+        );
+
+        unsafe {
+            std::env::remove_var("YATAMUX_SESSION");
+        }
     }
 
     // extract_checksum のテスト

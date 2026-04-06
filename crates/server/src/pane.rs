@@ -256,21 +256,74 @@ impl Pane {
     }
 
     pub fn terminate(&self) -> Result<()> {
-        if let Some(mut killer) = self.child_killer.lock().unwrap().take() {
+        let mut child_killer = self.child_killer.lock().unwrap();
+        if let Some(killer) = child_killer.as_mut() {
             match killer.kill() {
-                Ok(()) => {}
-                Err(err) if err.raw_os_error() == Some(258) => {}
+                Ok(()) => {
+                    child_killer.take();
+                }
+                Err(err) if err.raw_os_error() == Some(258) => {
+                    child_killer.take();
+                }
                 Err(err) => {
-                    return Err(anyhow::anyhow!(
-                        "failed to terminate pane {:?}: {}",
-                        self.id,
-                        err
-                    ));
+                    if let Some(pid) = self.child_pid {
+                        force_terminate_process_tree(pid).map_err(|fallback_err| {
+                            anyhow::anyhow!(
+                                "failed to terminate pane {:?}: {}; fallback process-tree kill for PID {} also failed: {}",
+                                self.id,
+                                err,
+                                pid,
+                                fallback_err
+                            )
+                        })?;
+                        child_killer.take();
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "failed to terminate pane {:?}: {}",
+                            self.id,
+                            err
+                        ));
+                    }
                 }
             }
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn force_terminate_process_tree(pid: u32) -> Result<()> {
+    let output = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to start taskkill for PID {}: {}", pid, err))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.contains("not found")
+        || stderr.contains("見つかりません")
+        || stderr.contains("指定されたプロセスは見つかりません")
+    {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "taskkill /PID {} /T /F failed: {}",
+        pid,
+        stderr
+    ))
+}
+
+#[cfg(not(windows))]
+fn force_terminate_process_tree(_pid: u32) -> Result<()> {
+    Ok(())
 }
 
 fn now_unix_ms() -> u64 {
