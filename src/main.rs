@@ -133,6 +133,10 @@ pub const DEFAULT_SESSION: &str = "default";
 #[derive(Parser)]
 #[command(name = "yatamux", version, about)]
 struct Cli {
+    /// 対象セッション名（IPC パイプ名のサフィックス）
+    #[arg(long, default_value = DEFAULT_SESSION, global = true, hide = true)]
+    session: String,
+
     /// 起動時に適用するレイアウト名（%APPDATA%\yatamux\layouts\<NAME>.toml）
     #[arg(long, value_name = "NAME")]
     layout: Option<String>,
@@ -392,14 +396,14 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::ListPanes { json }) => cli::list_panes(DEFAULT_SESSION, json).await,
+        Some(Commands::ListPanes { json }) => cli::list_panes(&cli.session, json).await,
         Some(Commands::SendKeys {
             pane,
             text,
             enter,
             raw,
             wait_for_prompt,
-        }) => cli::send_keys(DEFAULT_SESSION, &pane, &text, enter, raw, wait_for_prompt).await,
+        }) => cli::send_keys(&cli.session, &pane, &text, enter, raw, wait_for_prompt).await,
         Some(Commands::WaitPane {
             pane,
             wait_for,
@@ -409,7 +413,7 @@ async fn main() -> Result<()> {
             lines,
         }) => {
             cli::wait_pane(
-                DEFAULT_SESSION,
+                &cli.session,
                 &pane,
                 cli::WaitOptions {
                     wait_for,
@@ -432,7 +436,7 @@ async fn main() -> Result<()> {
             command,
         }) => {
             cli::exec_command(
-                DEFAULT_SESSION,
+                &cli.session,
                 &pane,
                 command,
                 raw,
@@ -447,20 +451,20 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::SubscribePane { pane, json }) => {
-            cli::subscribe_pane(DEFAULT_SESSION, &pane, json).await
+            cli::subscribe_pane(&cli.session, &pane, json).await
         }
-        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, &pane).await,
-        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(DEFAULT_SESSION, &pane).await,
-        Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, &pane).await,
+        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(&cli.session, &pane).await,
+        Some(Commands::TerminatePane { pane }) => cli::terminate_pane(&cli.session, &pane).await,
+        Some(Commands::ClosePane { pane }) => cli::close_pane(&cli.session, &pane).await,
         Some(Commands::SetPaneMeta { pane, alias, role }) => {
-            cli::set_pane_meta(DEFAULT_SESSION, &pane, alias, role).await
+            cli::set_pane_meta(&cli.session, &pane, alias, role).await
         }
         Some(Commands::CapturePane {
             target,
             lines,
             plain_text,
             json,
-        }) => cli::capture_pane(DEFAULT_SESSION, &target, lines, plain_text, json).await,
+        }) => cli::capture_pane(&cli.session, &target, lines, plain_text, json).await,
         Some(Commands::SplitPane {
             dir,
             direction,
@@ -472,18 +476,18 @@ async fn main() -> Result<()> {
                     yatamux_protocol::types::SplitDirection::Horizontal
                 }
             };
-            cli::split_pane(DEFAULT_SESSION, target.as_deref(), split_dir, dir).await
+            cli::split_pane(&cli.session, target.as_deref(), split_dir, dir).await
         }
         Some(Commands::Layout(sub)) => match sub {
             LayoutCommands::List => cli::layout_list().await,
             LayoutCommands::Delete { name } => cli::layout_delete(&name).await,
             LayoutCommands::Export { name } => cli::layout_export(&name).await,
         },
-        Some(Commands::Update) => cli::update(DEFAULT_SESSION).await,
+        Some(Commands::Update) => cli::update(&cli.session).await,
         None => {
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
-            app::run(cli.layout, app_config).await
+            app::run(cli.session, cli.layout, app_config).await
         }
     }
 }
@@ -677,6 +681,15 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parse_global_session_option() {
+        let cli = Cli::try_parse_from(["yatamux", "--session", "e2e-smoke", "list-panes"])
+            .expect("CLI should parse");
+
+        assert_eq!(cli.session, "e2e-smoke");
+        assert!(matches!(cli.command, Some(Commands::ListPanes { .. })));
     }
 
     #[test]

@@ -7,14 +7,11 @@ use yatamux_protocol::types::{PaneId, SplitDirection, SurfaceId, TermSize};
 use yatamux_protocol::{ClientMessage, ServerMessage};
 use yatamux_terminal::TerminalSink;
 
+use crate::app::layout_switch::{
+    finalize_layout_switch, LayoutName, LayoutPhase, LayoutPlan, PaneLaunchPlan,
+};
 use crate::config::HooksConfig;
 use crate::layout_config::LayoutConfig;
-use crate::{
-    app::layout_switch::{
-        finalize_layout_switch, LayoutName, LayoutPhase, LayoutPlan, PaneLaunchPlan,
-    },
-    DEFAULT_SESSION,
-};
 
 use super::{DEFAULT_COLS, DEFAULT_ROWS};
 
@@ -143,11 +140,13 @@ pub(super) fn fire_hook(command: &Option<String>, pane: PaneId) {
         .expect("enabled hook should contain a command")
         .to_owned();
     let pane_id = pane.0.to_string();
+    let session_name =
+        std::env::var("YATAMUX_SESSION").unwrap_or_else(|_| crate::DEFAULT_SESSION.to_string());
     tokio::spawn(async move {
         let _ = tokio::process::Command::new("cmd")
             .args(["/C", &command])
             .env("YATAMUX_PANE_ID", pane_id)
-            .env("YATAMUX_SESSION", DEFAULT_SESSION)
+            .env("YATAMUX_SESSION", session_name)
             .spawn();
     });
 }

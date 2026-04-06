@@ -96,12 +96,18 @@ pub(crate) fn appdata_env_lock() -> &'static Mutex<()> {
 ///
 /// `layout_name` が `Some` の場合、`%APPDATA%\yatamux\layouts\<name>.toml` を読み込み
 /// 宣言的レイアウトで起動する。`None` の場合はセッション復元を試みる。
-pub async fn run(layout_name: Option<String>, app_config: AppConfig) -> Result<()> {
+pub async fn run(
+    session_name: String,
+    layout_name: Option<String>,
+    app_config: AppConfig,
+) -> Result<()> {
+    std::env::set_var("YATAMUX_SESSION", &session_name);
+
     let size = TermSize {
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
     };
-    let bootstrap = bootstrap_runtime(size).await?;
+    let bootstrap = bootstrap_runtime(&session_name, size).await?;
     let client_tx = bootstrap.client_tx;
     let mut server_rx = bootstrap.server_rx;
     let ipc_out_tx = bootstrap.ipc_out_tx;
