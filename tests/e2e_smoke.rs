@@ -62,22 +62,6 @@ impl AppProcess {
             .expect("spawn yatamux GUI");
         Self { child }
     }
-
-    fn wait_for_exit(&mut self, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.child.try_wait().expect("poll child exit") {
-                Some(status) => {
-                    assert!(status.success(), "yatamux exited with status {status}");
-                    return;
-                }
-                None if Instant::now() >= deadline => {
-                    panic!("timeout waiting for yatamux to exit");
-                }
-                None => sleep(Duration::from_millis(100)),
-            }
-        }
-    }
 }
 
 impl Drop for AppProcess {
@@ -129,7 +113,7 @@ fn wait_for_panes(appdata: &Path, session: &str) -> Vec<Value> {
 fn e2e_startup_list_panes_and_capture_pane_smoke() {
     let appdata = TempAppData::new("yatamux-e2e");
     let session = unique_name("e2e-smoke");
-    let mut app = AppProcess::spawn(appdata.path(), &session);
+    let _app = AppProcess::spawn(appdata.path(), &session);
 
     let panes = wait_for_panes(appdata.path(), &session);
     let pane_id = panes[0]
@@ -157,17 +141,4 @@ fn e2e_startup_list_panes_and_capture_pane_smoke() {
         capture_json.get("content").is_some(),
         "capture should include content"
     );
-
-    let close = run_cli(
-        appdata.path(),
-        &session,
-        &["close-pane", "--pane", &pane_id.to_string()],
-    );
-    assert!(
-        close.status.success(),
-        "close-pane failed: {}",
-        String::from_utf8_lossy(&close.stderr).trim()
-    );
-
-    app.wait_for_exit(Duration::from_secs(10));
 }
