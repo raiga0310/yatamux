@@ -936,10 +936,18 @@ fn e2e_save_and_quit_writes_session_snapshot() {
     );
     harness.set_pane_meta(&root.0.to_string(), Some("main"), Some("planner"));
     harness.set_pane_meta(&worker.0.to_string(), Some("worker"), Some("verifier"));
-    harness.send_keys_raw("worker", "ping 127.0.0.1 -t");
+    let ready_token = "E2E_TC05_READY";
+    harness.send_keys_raw(
+        "worker",
+        &format!(
+            r#"powershell -NoProfile -Command "Write-Output '{}'; ping 127.0.0.1 -t""#,
+            ready_token
+        ),
+    );
     let worker_capture =
-        harness.wait_capture_contains("worker", "127.0.0.1", Duration::from_secs(10));
-    assert!(worker_capture.contains("127.0.0.1"));
+        harness.wait_capture_contains("worker", ready_token, Duration::from_secs(10));
+    assert!(worker_capture.contains(ready_token));
+    sleep(Duration::from_millis(500));
 
     harness.send_save_and_quit();
     harness.app_mut().wait_for_exit(Duration::from_secs(20));
