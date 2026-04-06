@@ -169,6 +169,31 @@ pub(super) fn notify_if_inactive(
     }
 }
 
+pub(super) async fn sync_pane_state(
+    client_tx: &mpsc::Sender<ClientMessage>,
+    pane_store: &Arc<Mutex<PaneStore>>,
+) {
+    let (active_pane, floating_pane) = {
+        let store = pane_store.lock().unwrap();
+        let active = store
+            .grids
+            .contains_key(&store.active)
+            .then_some(store.active);
+        let floating = if store.floating_visible {
+            store.floating.filter(|pane| store.grids.contains_key(pane))
+        } else {
+            None
+        };
+        (active, floating)
+    };
+    let _ = client_tx
+        .send(ClientMessage::SyncPaneState {
+            active_pane,
+            floating_pane,
+        })
+        .await;
+}
+
 pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels) {
     tokio::spawn(async move {
         let ServerBridge {
@@ -231,12 +256,15 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                             }).await;
                         }
                         Some(_) => {
-                            let mut store = pane_store.lock().unwrap();
-                            if store.floating_visible {
-                                store.hide_float();
-                            } else {
-                                store.show_float();
+                            {
+                                let mut store = pane_store.lock().unwrap();
+                                if store.floating_visible {
+                                    store.hide_float();
+                                } else {
+                                    store.show_float();
+                                }
                             }
+                            sync_pane_state(&client_tx, &pane_store).await;
                         }
                     }
                 }
@@ -368,6 +396,7 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                 store.active = new_id;
                                 store.layout_changed = true;
                             }
+                            sync_pane_state(&client_tx, &pane_store).await;
                         }
                         BridgeEvent::PaneClosed { pane } => {
                             fire_hook(&hooks.on_pane_closed, pane);
@@ -410,6 +439,7 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                                     }
                                 }
                             }
+                            sync_pane_state(&client_tx, &pane_store).await;
                         }
                         BridgeEvent::UserNotification { pane, body } => {
                             notify_if_inactive(&pane_store, &notif_backend, pane, body);

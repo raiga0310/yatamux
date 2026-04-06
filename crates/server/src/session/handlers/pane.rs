@@ -46,6 +46,7 @@ impl Server {
             }
             s.active_pane = Some(id);
         }
+        self.active_pane = Some(id);
 
         self.client_tx
             .send(ServerMessage::PaneCreated {
@@ -78,6 +79,12 @@ impl Server {
 
     pub(super) async fn handle_close_pane(&mut self, pane: PaneId) -> Result<()> {
         self.panes.remove(&pane);
+        if self.active_pane == Some(pane) {
+            self.active_pane = None;
+        }
+        if self.floating_pane == Some(pane) {
+            self.floating_pane = None;
+        }
         self.client_tx
             .send(ServerMessage::PaneClosed { pane })
             .await?;
@@ -91,6 +98,25 @@ impl Server {
         } else {
             self.send_pane_not_found_error(pane).await?;
         }
+        Ok(())
+    }
+
+    pub(super) async fn handle_terminate_pane(&mut self, pane: PaneId) -> Result<()> {
+        if let Some(p) = self.panes.get(&pane) {
+            p.terminate()?;
+        } else {
+            self.send_pane_not_found_error(pane).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn handle_sync_pane_state(
+        &mut self,
+        active_pane: Option<PaneId>,
+        floating_pane: Option<PaneId>,
+    ) -> Result<()> {
+        self.active_pane = active_pane.filter(|pane| self.panes.contains_key(pane));
+        self.floating_pane = floating_pane.filter(|pane| self.panes.contains_key(pane));
         Ok(())
     }
 

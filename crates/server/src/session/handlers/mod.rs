@@ -30,6 +30,14 @@ impl Server {
             ClientMessage::Resize { pane, size } => self.handle_resize(pane, size).await,
             ClientMessage::ClosePane { pane } => self.handle_close_pane(pane).await,
             ClientMessage::InterruptPane { pane } => self.handle_interrupt_pane(pane).await,
+            ClientMessage::TerminatePane { pane } => self.handle_terminate_pane(pane).await,
+            ClientMessage::SyncPaneState {
+                active_pane,
+                floating_pane,
+            } => {
+                self.handle_sync_pane_state(active_pane, floating_pane)
+                    .await
+            }
             ClientMessage::Detach => self.handle_detach().await,
             ClientMessage::RequestScreen { pane } => self.handle_request_screen(pane).await,
             ClientMessage::CapturePane {

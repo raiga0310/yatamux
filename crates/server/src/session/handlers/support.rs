@@ -25,7 +25,13 @@ pub(super) async fn build_capture_response(pane: &Pane, lines: usize) -> (String
     (content, capture)
 }
 
-pub(super) fn pane_info(id: PaneId, surface: SurfaceId, pane: &Pane) -> PaneInfo {
+pub(super) fn pane_info(
+    id: PaneId,
+    surface: SurfaceId,
+    pane: &Pane,
+    active: bool,
+    floating: bool,
+) -> PaneInfo {
     let size = pane.size.lock().unwrap();
     let (cols, rows) = (size.cols, size.rows);
     drop(size);
@@ -47,6 +53,8 @@ pub(super) fn pane_info(id: PaneId, surface: SurfaceId, pane: &Pane) -> PaneInfo
         command,
         busy: pane.busy(),
         last_output_unix_ms: pane.last_output_unix_ms(),
+        active,
+        floating,
     }
 }
 

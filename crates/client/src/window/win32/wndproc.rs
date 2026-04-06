@@ -435,6 +435,9 @@ pub(super) unsafe fn handle_mouse_message(
                     false
                 }
             };
+            if float_handled {
+                state.sync_pane_state();
+            }
             if float_handled || state.focus_pane_at(px, py) {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }

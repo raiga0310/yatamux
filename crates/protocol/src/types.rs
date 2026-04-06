@@ -42,6 +42,10 @@ pub struct PaneInfo {
     pub busy: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub floating: bool,
 }
 
 /// capture-pane のカーソル情報
@@ -63,4 +67,45 @@ pub struct PaneCapture {
     pub cursor: CursorInfo,
     pub visible_text: Vec<String>,
     pub scrollback_tail: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_info_roundtrip_preserves_active_and_floating() {
+        let info = PaneInfo {
+            id: PaneId(1),
+            surface: SurfaceId(2),
+            title: "shell".to_string(),
+            cols: 80,
+            rows: 24,
+            cwd: Some("C:\\Users".to_string()),
+            command: Some("pwsh".to_string()),
+            busy: true,
+            last_output_unix_ms: Some(1234),
+            active: true,
+            floating: true,
+        };
+        let json = serde_json::to_string(&info).expect("serialize PaneInfo");
+        let restored: PaneInfo = serde_json::from_str(&json).expect("deserialize PaneInfo");
+        assert_eq!(restored, info);
+    }
+
+    #[test]
+    fn pane_info_old_json_defaults_active_and_floating_to_false() {
+        let json = r#"{
+            "id": 1,
+            "surface": 2,
+            "title": "shell",
+            "cols": 80,
+            "rows": 24
+        }"#;
+        let restored: PaneInfo = serde_json::from_str(json).expect("deserialize legacy PaneInfo");
+        assert!(!restored.active);
+        assert!(!restored.floating);
+        assert!(!restored.busy);
+        assert_eq!(restored.last_output_unix_ms, None);
+    }
 }

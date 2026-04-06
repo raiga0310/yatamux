@@ -69,7 +69,13 @@ impl Server {
                 .unwrap_or_default();
             for pane_id in &ids_in_tree {
                 if let Some(pane) = self.panes.get(pane_id) {
-                    panes.push(pane_info(*pane_id, *surf_id, pane));
+                    panes.push(pane_info(
+                        *pane_id,
+                        *surf_id,
+                        pane,
+                        self.active_pane == Some(*pane_id),
+                        self.floating_pane == Some(*pane_id),
+                    ));
                 }
             }
         }

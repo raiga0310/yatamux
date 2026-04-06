@@ -278,6 +278,26 @@ mod win32 {
                 .try_send(ClientMessage::Input { pane: active, data });
         }
 
+        fn sync_pane_state(&self) {
+            let (active_pane, floating_pane) = {
+                let store = self.panes.lock().unwrap();
+                let active = store
+                    .grids
+                    .contains_key(&store.active)
+                    .then_some(store.active);
+                let floating = if store.floating_visible {
+                    store.floating.filter(|pane| store.grids.contains_key(pane))
+                } else {
+                    None
+                };
+                (active, floating)
+            };
+            let _ = self.msg_tx.try_send(ClientMessage::SyncPaneState {
+                active_pane,
+                floating_pane,
+            });
+        }
+
         /// 全ペインをコンテンツ領域サイズに合わせてリサイズ
         fn resize_all_panes(&self, content_w: i32, content_h: i32) {
             let total = PaneRect {
@@ -324,6 +344,8 @@ mod win32 {
             if next != store.active {
                 store.active = next;
                 store.scroll_offset = 0;
+                drop(store);
+                self.sync_pane_state();
             }
         }
 
@@ -336,6 +358,8 @@ mod win32 {
             if next != store.active {
                 store.active = next;
                 store.scroll_offset = 0;
+                drop(store);
+                self.sync_pane_state();
             }
         }
 
@@ -350,6 +374,8 @@ mod win32 {
                 if store.active != pane_id {
                     store.active = pane_id;
                     store.scroll_offset = 0;
+                    drop(store);
+                    self.sync_pane_state();
                     return true;
                 }
             }
@@ -2713,6 +2739,7 @@ mod win32 {
                 news_scroll_px_per_tick,
                 app_version,
             ));
+            state.sync_pane_state();
             let state_ptr = Box::into_raw(state);
 
             // ── ウィンドウクラス登録 ─────────────────────────────────────

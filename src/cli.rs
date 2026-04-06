@@ -574,6 +574,36 @@ pub async fn close_pane(session: &str, pane_id: u32) -> Result<()> {
         })
         .await?;
 
+    wait_for_pane_closed(&mut conn, pane_id).await?;
+
+    println!("Closed pane {}", pane_id);
+    Ok(())
+}
+
+/// `yatamux terminate-pane --pane <id>` — 指定ペインの子プロセスを強制終了する
+pub async fn terminate_pane(session: &str, pane_id: u32) -> Result<()> {
+    let mut conn = ServerConnection::connect(session)
+        .await
+        .context("yatamux is not running (could not connect to IPC pipe)")?;
+    let panes = request_panes(&mut conn).await?;
+    if !pane_exists(&panes, pane_id) {
+        eprintln!("Error: pane {} not found", pane_id);
+        std::process::exit(1);
+    }
+
+    conn.tx
+        .send(ClientMessage::TerminatePane {
+            pane: PaneId(pane_id),
+        })
+        .await?;
+
+    wait_for_pane_closed(&mut conn, pane_id).await?;
+
+    println!("Terminated pane {}", pane_id);
+    Ok(())
+}
+
+async fn wait_for_pane_closed(conn: &mut ServerConnection, pane_id: u32) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match conn.rx.recv().await {
@@ -593,10 +623,7 @@ pub async fn close_pane(session: &str, pane_id: u32) -> Result<()> {
         }
     })
     .await
-    .context("timeout waiting for pane to close")??;
-
-    println!("Closed pane {}", pane_id);
-    Ok(())
+    .context("timeout waiting for pane to close")?
 }
 
 /// `yatamux layout list` — 保存済みレイアウトの一覧を標準出力に表示する（C-22）
