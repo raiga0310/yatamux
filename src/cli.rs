@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Serialize;
+use std::path::Path;
 use std::time::Duration;
 use yatamux_client::connection::ServerConnection;
 use yatamux_protocol::types::{PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId};
@@ -269,6 +270,52 @@ async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
 
 fn pane_exists(panes: &[PaneInfo], pane_id: u32) -> bool {
     panes.iter().any(|p| p.id == PaneId(pane_id))
+}
+
+fn is_running_inside_yatamux() -> bool {
+    matches!(std::env::var("YATAMUX").as_deref(), Ok("1"))
+}
+
+fn cleanup_staged_update(new_path: &Path) {
+    if new_path.exists() {
+        if let Err(err) = std::fs::remove_file(new_path) {
+            eprintln!(
+                "警告: staging 済みバイナリの削除に失敗しました: {} ({:#})",
+                new_path.display(),
+                err
+            );
+        }
+    }
+}
+
+fn build_apply_update_command(
+    exe: &Path,
+    wait_pid: u32,
+    new_path: &Path,
+    launch: bool,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command.args([
+        "--apply-update",
+        &wait_pid.to_string(),
+        &new_path.to_string_lossy(),
+    ]);
+    if launch {
+        command.arg("--launch");
+    }
+    command
+}
+
+fn spawn_apply_update_helper(
+    exe: &Path,
+    wait_pid: u32,
+    new_path: &Path,
+    launch: bool,
+) -> Result<()> {
+    build_apply_update_command(exe, wait_pid, new_path, launch)
+        .spawn()
+        .context("アップデートヘルパーの起動に失敗")?;
+    Ok(())
 }
 
 /// `yatamux list-panes [--json]` — 実行中のペイン一覧を標準出力に表示する
@@ -689,8 +736,7 @@ pub async fn layout_export(name: &str) -> Result<()> {
 /// 7. `--apply-update <pid> <new_path>` ヘルパーを起動して処理を委譲
 pub async fn update(session: &str) -> anyhow::Result<()> {
     use crate::update::{
-        download_and_verify_release_binary, fetch_latest_release, need_update, plan_update_paths,
-        release_api_url,
+        download_and_stage_release_binary, fetch_latest_release, need_update, release_api_url,
     };
 
     const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -728,19 +774,16 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
 
     eprintln!("アップデートを開始します...");
 
-    eprintln!("バイナリをダウンロード中: {}", release.asset_url);
-    let binary = download_and_verify_release_binary(&client, &release).await?;
-    eprintln!("チェックサム OK");
-
-    // <exe>.new に保存
     let exe = std::env::current_exe().context("現在の実行ファイルのパスが取得できません")?;
-    let (new_path, _) = plan_update_paths(&exe);
-    std::fs::write(&new_path, &binary)
-        .with_context(|| format!("バイナリの書き込みに失敗: {}", new_path.display()))?;
+    eprintln!("バイナリをダウンロード中: {}", release.asset_url);
+    let new_path = download_and_stage_release_binary(&client, &release, &exe).await?;
+    eprintln!("チェックサム OK");
     eprintln!("バイナリを書き込みました: {}", new_path.display());
 
     // IPC 経由で SaveAndQuit を送信（yatamux GUI が起動中の場合）
-    match yatamux_client::connection::ServerConnection::connect(session).await {
+    let coordination_result = match yatamux_client::connection::ServerConnection::connect(session)
+        .await
+    {
         Ok(conn) => {
             // GUI の PID を取得（バイナリ置換前に GUI の終了を待つため）
             let gui_pid = conn.server_pid;
@@ -748,46 +791,45 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
                 "yatamux インスタンス（PID {}）に SaveAndQuit を送信中...",
                 gui_pid
             );
-            let _ = conn
-                .tx
+            conn.tx
                 .send(yatamux_protocol::ClientMessage::SaveAndQuit)
-                .await;
+                .await
+                .context("SaveAndQuit の送信に失敗")?;
 
             // --apply-update ヘルパーを起動（GUI PID 待機 + 置換後に新インスタンスを起動）
             eprintln!("アップデートヘルパーを起動中...");
-            std::process::Command::new(&exe)
-                .args([
-                    "--apply-update",
-                    &gui_pid.to_string(),
-                    &new_path.to_string_lossy(),
-                    "--launch",
-                ])
-                .spawn()
-                .context("アップデートヘルパーの起動に失敗")?;
+            spawn_apply_update_helper(&exe, gui_pid, &new_path, true)?;
             eprintln!("アップデートヘルパーを起動しました。このプロセスを終了します。");
+            Ok(())
         }
         Err(err) => {
-            // GUI が起動していない → ヘルパーを起動して自プロセス終了後に rename させる
-            // （Windows では実行中の exe を rename できないため self PID を渡して待機）
-            eprintln!(
-                "セッション '{}' の IPC に接続できませんでした: {:#}",
-                session, err
-            );
-            eprintln!(
-                "実行中の yatamux インスタンスが見つかりません。ヘルパーでバイナリを置換します。"
-            );
-            let self_pid = std::process::id();
-            std::process::Command::new(&exe)
-                .args([
-                    "--apply-update",
-                    &self_pid.to_string(),
-                    &new_path.to_string_lossy(),
-                    // --launch なし: 新ウィンドウは開かない
-                ])
-                .spawn()
-                .context("アップデートヘルパーの起動に失敗")?;
-            eprintln!("ヘルパーを起動しました。このプロセスを終了します。");
+            if is_running_inside_yatamux() {
+                Err(anyhow::anyhow!(
+                    "セッション '{}' の IPC に接続できませんでした。yatamux ペイン内からの update では SaveAndQuit に失敗したまま自己置換へフォールバックできないため、中断します: {:#}",
+                    session,
+                    err
+                ))
+            } else {
+                // GUI が起動していない → ヘルパーを起動して自プロセス終了後に rename させる
+                // （Windows では実行中の exe を rename できないため self PID を渡して待機）
+                eprintln!(
+                    "セッション '{}' の IPC に接続できませんでした: {:#}",
+                    session, err
+                );
+                eprintln!(
+                    "実行中の yatamux インスタンスが見つかりません。ヘルパーでバイナリを置換します。"
+                );
+                let self_pid = std::process::id();
+                spawn_apply_update_helper(&exe, self_pid, &new_path, false)?;
+                eprintln!("ヘルパーを起動しました。このプロセスを終了します。");
+                Ok(())
+            }
         }
+    };
+
+    if let Err(err) = coordination_result {
+        cleanup_staged_update(&new_path);
+        return Err(err);
     }
     Ok(())
 }
@@ -828,10 +870,12 @@ fn unescape(s: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_wait_condition, handle_wait_message, join_command, unescape, PaneWaitKind,
-        WaitCondition, WaitDecision, WaitState,
+        build_apply_update_command, build_wait_condition, cleanup_staged_update,
+        handle_wait_message, join_command, unescape, PaneWaitKind, WaitCondition, WaitDecision,
+        WaitState,
     };
     use regex::Regex;
+    use std::path::Path;
     use std::time::Duration;
     use yatamux_protocol::{types::PaneId, ServerMessage};
 
@@ -962,5 +1006,49 @@ mod tests {
             }
             _ => panic!("expected WaitDecision::Error"),
         }
+    }
+
+    #[test]
+    fn build_apply_update_command_includes_launch_when_requested() {
+        let exe = Path::new(r"C:\tmp\yatamux.exe");
+        let new_path = Path::new(r"C:\tmp\yatamux.exe.new");
+        let command = build_apply_update_command(exe, 1234, new_path, true);
+
+        let program = command.get_program().to_string_lossy().into_owned();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(program.ends_with("yatamux.exe"));
+        assert_eq!(
+            args,
+            vec![
+                "--apply-update".to_string(),
+                "1234".to_string(),
+                r"C:\tmp\yatamux.exe.new".to_string(),
+                "--launch".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cleanup_staged_update_removes_staged_binary() {
+        let dir = std::env::temp_dir().join(format!(
+            "yatamux-cli-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let new_path = dir.join("yatamux.exe.new");
+        std::fs::write(&new_path, b"staged binary").expect("write staged binary");
+
+        cleanup_staged_update(&new_path);
+
+        assert!(!new_path.exists(), "staged binary should be removed");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
