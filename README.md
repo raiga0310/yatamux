@@ -189,7 +189,7 @@ These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-d
 - `--wait-for silence --silence-ms <ms>`: wait until no new pane output is observed for the given duration
 - `--wait-for output-regex --output-regex <pattern>`: poll `capture-pane --plain-text` and match the regex against captured content
 
-`exec` sends the given command with an automatic Enter and then reuses the same wait conditions.
+`exec` sends the given command with an automatic Enter and then reuses the same wait conditions. `send-keys --wait-for-prompt`, `close-pane`, and `terminate-pane` also use the same internal pane wait substrate, so timeout and event handling stay aligned.
 
 The pane control commands are intentionally distinct:
 
@@ -476,7 +476,7 @@ yatamux layout delete work
 - `--wait-for silence --silence-ms <ms>`: 指定時間だけ新しい出力が来ない状態を待つ
 - `--wait-for output-regex --output-regex <pattern>`: `capture-pane --plain-text` の内容に正規表現が一致するまで待つ
 
-`exec` はコマンド送信時に自動で Enter を付け、同じ待機条件をそのまま使えます。
+`exec` はコマンド送信時に自動で Enter を付け、同じ待機条件をそのまま使えます。`send-keys --wait-for-prompt`、`close-pane`、`terminate-pane` も同じ内部待機基盤を使うので、タイムアウトやイベント解釈の挙動がそろいます。
 
 ペイン制御コマンドの役割分担は次の通りです。
 

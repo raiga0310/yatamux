@@ -233,7 +233,7 @@ Agent 運用では `pane 3` のような数値 ID よりも、`tests` `server` `
 - [x] visible screen と scrollback の切り分けルールを明文化する
 - [x] README とテスト計画に Agent 向け利用例を追加する
 
-### C-36: 待機条件 API の一般化（output regex / silence / exit） 【優先度: 中】
+### ~~C-36: 待機条件 API の一般化（output regex / silence / exit）~~ ✅ 対応済み 【優先度: 中】
 
 現状の待機は `send-keys --wait-for-prompt` に限定されており、
 対話的ツールや独自プロンプトを使うプロセスでは Agent が完了判定しづらい。
@@ -247,7 +247,7 @@ Agent 運用では `pane 3` のような数値 ID よりも、`tests` `server` `
 - [x] 待機条件ごとのイベントソース（Output / PaneClosed / CommandFinished）を CLI 実装として整理する
 - [x] regex マッチは当面 `capture-pane --plain-text` の内容を対象にする方針を決める
 - [x] タイムアウト・キャンセルとの組み合わせ仕様を CLI 引数として定義する
-- [ ] `exec` / `subscribe` と共有できる内部待機基盤に寄せる
+- [x] `exec` / `send-keys --wait-for-prompt` / `close-pane` / `terminate-pane` と共有できる内部待機基盤に寄せる
 
 ### ~~C-37: エージェント向け環境変数伝搬 + AGENTS.md 整備~~ ✅ 対応済み 【優先度: 中】
 
