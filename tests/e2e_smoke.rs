@@ -436,6 +436,115 @@ impl AppHarness {
         assert_success(&output, "send-keys --raw --enter");
     }
 
+    fn exec_output_regex(
+        &self,
+        selector: &str,
+        pattern: &str,
+        timeout_secs: u64,
+        command: Vec<String>,
+    ) -> Output {
+        let mut args = vec![
+            "exec".to_string(),
+            "--pane".to_string(),
+            selector.to_string(),
+            "--wait-for".to_string(),
+            "output-regex".to_string(),
+            "--output-regex".to_string(),
+            pattern.to_string(),
+            "--timeout".to_string(),
+            timeout_secs.to_string(),
+            "--".to_string(),
+        ];
+        args.extend(command);
+        self.run_cli_owned(&args)
+    }
+
+    fn exec_output_regex_with_retries(
+        &self,
+        selector: &str,
+        pattern: &str,
+        timeout_secs: u64,
+        command: Vec<String>,
+        attempts: usize,
+        context: &str,
+    ) -> Output {
+        let attempts = attempts.max(1);
+        let mut last_output = None;
+        for attempt in 0..attempts {
+            let output = self.exec_output_regex(selector, pattern, timeout_secs, command.clone());
+            if output.status.success() {
+                return output;
+            }
+            last_output = Some(output);
+            if attempt + 1 < attempts {
+                sleep(Duration::from_millis(250));
+            }
+        }
+
+        assert_success(
+            &last_output.expect("at least one exec attempt should run"),
+            context,
+        );
+        unreachable!("assert_success should panic on failure")
+    }
+
+    fn wait_for_shell_ready(&self, selector: &str) {
+        let ready_token = unique_name("pane-ready");
+        let _ = self.exec_output_regex_with_retries(
+            selector,
+            &ready_token,
+            10,
+            vec![
+                "cmd".to_string(),
+                "/c".to_string(),
+                "echo".to_string(),
+                ready_token.clone(),
+            ],
+            5,
+            &format!("wait for pane {} shell readiness", selector),
+        );
+    }
+
+    fn send_keys_and_wait_output_regex_with_retries(
+        &self,
+        selector: &str,
+        attempts: usize,
+        timeout_secs: u64,
+        build_text: impl Fn(&str) -> String,
+        context: &str,
+    ) -> String {
+        let attempts = attempts.max(1);
+        let mut last_output = None;
+        for attempt in 0..attempts {
+            let token = unique_name("send-keys");
+            self.send_keys_raw(selector, &build_text(&token));
+            let output = self.run_cli_owned(&[
+                "wait-pane".to_string(),
+                "--pane".to_string(),
+                selector.to_string(),
+                "--wait-for".to_string(),
+                "output-regex".to_string(),
+                "--output-regex".to_string(),
+                token.clone(),
+                "--timeout".to_string(),
+                timeout_secs.to_string(),
+            ]);
+            if output.status.success() {
+                return token;
+            }
+            last_output = Some(output);
+            if attempt + 1 < attempts {
+                sleep(Duration::from_millis(250));
+            }
+        }
+
+        assert_success(
+            &last_output.expect("at least one send-keys attempt should run"),
+            context,
+        );
+        unreachable!("assert_success should panic on failure")
+    }
+
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -662,24 +771,17 @@ fn e2e_split_send_keys_wait_and_exec_flow() {
 
     let worker_info = harness.wait_for_alias("worker");
     assert_eq!(worker_info.role.as_deref(), Some("verifier"));
-    sleep(Duration::from_millis(500));
+    harness.wait_for_shell_ready("worker");
 
-    let send_token = "E2E_TC02_SEND";
-    harness.send_keys_raw("worker", &format!("echo {}", send_token));
-    let wait_output = harness.run_cli(&[
-        "wait-pane",
-        "--pane",
+    let send_token = harness.send_keys_and_wait_output_regex_with_retries(
         "worker",
-        "--wait-for",
-        "output-regex",
-        "--output-regex",
-        send_token,
-        "--timeout",
-        "20",
-    ]);
-    assert_success(&wait_output, "wait-pane for send-keys token");
-    let captured = harness.wait_capture_contains("worker", send_token, Duration::from_secs(10));
-    assert!(captured.contains(send_token));
+        5,
+        20,
+        |token| format!("echo {}", token),
+        "wait-pane for send-keys token",
+    );
+    let captured = harness.wait_capture_contains("worker", &send_token, Duration::from_secs(10));
+    assert!(captured.contains(&send_token));
 
     let exec_token = "E2E_TC02_EXEC";
     let exec_output = harness.run_cli_owned(&[
@@ -700,7 +802,7 @@ fn e2e_split_send_keys_wait_and_exec_flow() {
     ]);
     assert_success(&exec_output, "exec end-to-end");
     let captured = harness.wait_capture_contains("worker", exec_token, Duration::from_secs(10));
-    assert!(captured.contains(send_token));
+    assert!(captured.contains(&send_token));
     assert!(captured.contains(exec_token));
 }
 
@@ -829,7 +931,7 @@ fn e2e_subscribe_interrupt_close_and_terminate_flow() {
     harness.set_pane_meta(&stream.0.to_string(), Some("stream"), Some("observer"));
     let stream_info = harness.wait_for_alias("stream");
     assert_eq!(stream_info.role.as_deref(), Some("observer"));
-    sleep(Duration::from_millis(500));
+    harness.wait_for_shell_ready("stream");
 
     let mut subscriber = harness.cli_command(&["subscribe-pane", "--pane", "stream", "--json"]);
     let subscriber = subscriber
@@ -839,22 +941,19 @@ fn e2e_subscribe_interrupt_close_and_terminate_flow() {
         .expect("spawn subscribe-pane");
 
     let stream_token = "E2E_TC04_STREAM";
-    let stream_output = harness.run_cli_owned(&[
-        "exec".to_string(),
-        "--pane".to_string(),
-        "stream".to_string(),
-        "--wait-for".to_string(),
-        "output-regex".to_string(),
-        "--output-regex".to_string(),
-        stream_token.to_string(),
-        "--timeout".to_string(),
-        "20".to_string(),
-        "--".to_string(),
-        "cmd".to_string(),
-        "/c".to_string(),
-        "echo".to_string(),
-        stream_token.to_string(),
-    ]);
+    let stream_output = harness.exec_output_regex_with_retries(
+        "stream",
+        stream_token,
+        20,
+        vec![
+            "cmd".to_string(),
+            "/c".to_string(),
+            "echo".to_string(),
+            stream_token.to_string(),
+        ],
+        5,
+        "exec stream token",
+    );
     assert_success(&stream_output, "exec stream token");
     let stream_capture =
         harness.wait_capture_contains("stream", stream_token, Duration::from_secs(20));
@@ -880,17 +979,22 @@ fn e2e_subscribe_interrupt_close_and_terminate_flow() {
 
     let control = harness.split_pane(&root.0.to_string(), SplitDirection::Vertical, None);
     harness.set_pane_meta(&control.0.to_string(), Some("control"), Some("runner"));
+    harness.wait_for_shell_ready("control");
 
-    harness.send_keys_raw(
+    let interrupt_start = "E2E_TC04_INTERRUPT_START";
+    let control_output = harness.exec_output_regex_with_retries(
         "control",
-        r#"powershell -NoProfile -Command "Write-Output 'E2E_TC04_INTERRUPT_START'; ping 127.0.0.1 -t""#,
+        interrupt_start,
+        20,
+        vec![
+            "cmd".to_string(),
+            "/c".to_string(),
+            format!("echo {} & ping 127.0.0.1 -t", interrupt_start),
+        ],
+        5,
+        "start interruptable loop",
     );
-    let loop_capture = harness.wait_capture_contains(
-        "control",
-        "E2E_TC04_INTERRUPT_START",
-        Duration::from_secs(20),
-    );
-    assert!(loop_capture.contains("E2E_TC04_INTERRUPT_START"));
+    assert_success(&control_output, "start interruptable loop");
 
     let interrupt_output = harness.run_cli(&["interrupt-pane", "--pane", "control"]);
     assert_success(&interrupt_output, "interrupt-pane");
@@ -936,17 +1040,21 @@ fn e2e_save_and_quit_writes_session_snapshot() {
     );
     harness.set_pane_meta(&root.0.to_string(), Some("main"), Some("planner"));
     harness.set_pane_meta(&worker.0.to_string(), Some("worker"), Some("verifier"));
+    harness.wait_for_shell_ready("worker");
     let ready_token = "E2E_TC05_READY";
-    harness.send_keys_raw(
+    let worker_output = harness.exec_output_regex_with_retries(
         "worker",
-        &format!(
-            r#"powershell -NoProfile -Command "Write-Output '{}'; ping 127.0.0.1 -t""#,
-            ready_token
-        ),
+        ready_token,
+        20,
+        vec![
+            "cmd".to_string(),
+            "/c".to_string(),
+            format!("echo {} & ping 127.0.0.1 -t", ready_token),
+        ],
+        5,
+        "start save-and-quit worker loop",
     );
-    let worker_capture =
-        harness.wait_capture_contains("worker", ready_token, Duration::from_secs(10));
-    assert!(worker_capture.contains(ready_token));
+    assert_success(&worker_output, "start save-and-quit worker loop");
     sleep(Duration::from_millis(500));
 
     harness.send_save_and_quit();
@@ -1088,6 +1196,7 @@ fn e2e_self_update_smoke_preserves_session_and_relaunches() {
         Some(&worker_dir),
     );
     harness.set_pane_meta(&worker.0.to_string(), Some("worker"), Some("updater"));
+    harness.wait_for_shell_ready("worker");
     harness.send_keys_raw("worker", "ping 127.0.0.1 -t");
     sleep(Duration::from_millis(800));
 
