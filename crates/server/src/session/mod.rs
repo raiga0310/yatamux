@@ -725,19 +725,20 @@ mod tests {
             })
             .await
             .unwrap();
-            // 500ms 以内に Error が来ないことを確認
-            let got_error = tokio::time::timeout(Duration::from_millis(500), async {
+            let accepted = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::Error { .. } = recv_one(&mut rx).await {
-                        return true;
+                    match recv_one(&mut rx).await {
+                        ServerMessage::InputAccepted { pane } if pane == pane_id => return true,
+                        ServerMessage::Error { message } => {
+                            panic!("unexpected error after Input: {}", message)
+                        }
+                        _ => continue,
                     }
                 }
             })
-            .await;
-            assert!(
-                got_error.is_err(),
-                "no error should be received after Input"
-            );
+            .await
+            .expect("timeout waiting for InputAccepted");
+            assert!(accepted, "input should be acknowledged");
         })
         .await;
     }
