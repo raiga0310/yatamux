@@ -59,6 +59,10 @@ mod tests {
                 assert_eq!(panes[0].title, "bash");
                 assert_eq!(panes[0].cols, 80);
                 assert_eq!(panes[0].rows, 24);
+                assert_eq!(panes[0].cwd, None);
+                assert_eq!(panes[0].command, None);
+                assert!(!panes[0].busy);
+                assert_eq!(panes[0].last_output_unix_ms, None);
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -73,11 +77,19 @@ mod tests {
             title: "nvim".to_string(),
             cols: 120,
             rows: 40,
+            cwd: Some("C:/Users/test".to_string()),
+            command: Some("cargo".to_string()),
+            busy: true,
+            last_output_unix_ms: Some(1_744_000_000_000),
         };
         assert_eq!(info.id, PaneId(3));
         assert_eq!(info.cols, 120);
         assert_eq!(info.rows, 40);
         assert_eq!(info.title, "nvim");
+        assert_eq!(info.cwd.as_deref(), Some("C:/Users/test"));
+        assert_eq!(info.command.as_deref(), Some("cargo"));
+        assert!(info.busy);
+        assert_eq!(info.last_output_unix_ms, Some(1_744_000_000_000));
     }
 
     // TC-C13-01: CapturePane メッセージが正しくシリアライズ/デシリアライズされる

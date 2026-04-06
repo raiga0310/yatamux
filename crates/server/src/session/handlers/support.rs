@@ -30,6 +30,12 @@ pub(super) fn pane_info(id: PaneId, surface: SurfaceId, pane: &Pane) -> PaneInfo
     let (cols, rows) = (size.cols, size.rows);
     drop(size);
     let title = pane.title.lock().unwrap().to_string();
+    let command = pane
+        .child_pid
+        .and_then(yatamux_terminal::process::find_active_command);
+    let cwd = pane
+        .child_pid
+        .and_then(yatamux_terminal::process::find_process_cwd);
 
     PaneInfo {
         id,
@@ -37,6 +43,10 @@ pub(super) fn pane_info(id: PaneId, surface: SurfaceId, pane: &Pane) -> PaneInfo
         title,
         cols,
         rows,
+        cwd,
+        command,
+        busy: pane.busy(),
+        last_output_unix_ms: pane.last_output_unix_ms(),
     }
 }
 

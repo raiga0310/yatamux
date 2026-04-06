@@ -50,6 +50,9 @@ pub enum ClientMessage {
     /// ペインを閉じる
     ClosePane { pane: PaneId },
 
+    /// ペインに Ctrl+C を送って割り込む
+    InterruptPane { pane: PaneId },
+
     /// スクリーンダンプを要求（接続時の初期状態取得）
     RequestScreen { pane: PaneId },
 
@@ -179,6 +182,22 @@ mod tests {
         let restored: ServerMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         assert!(matches!(restored, ServerMessage::SaveAndQuit));
+    }
+
+    #[test]
+    fn test_interrupt_pane_roundtrip() {
+        let msg = ClientMessage::InterruptPane {
+            pane: crate::types::PaneId(7),
+        };
+        let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
+        let restored: ClientMessage =
+            serde_json::from_str(&json).expect("デシリアライズに成功すること");
+        match restored {
+            ClientMessage::InterruptPane { pane } => {
+                assert_eq!(pane, crate::types::PaneId(7));
+            }
+            _ => panic!("期待する variant でない"),
+        }
     }
 
     // QueryAllPaneProcesses のラウンドトリップ

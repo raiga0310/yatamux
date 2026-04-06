@@ -188,6 +188,18 @@ enum Commands {
         #[arg(long)]
         wait_for_prompt: bool,
     },
+    /// 指定ペインに Ctrl+C を送信する
+    InterruptPane {
+        /// 送信先ペイン ID
+        #[arg(long, value_name = "ID")]
+        pane: u32,
+    },
+    /// 指定ペインを閉じる
+    ClosePane {
+        /// 対象ペイン ID
+        #[arg(long, value_name = "ID")]
+        pane: u32,
+    },
     /// 指定ペインの内容を表示（スクロールバック末尾 N 行 + 現在画面）
     CapturePane {
         /// 対象ペイン ID
@@ -300,6 +312,8 @@ async fn main() -> Result<()> {
             raw,
             wait_for_prompt,
         }) => cli::send_keys(DEFAULT_SESSION, pane, &text, enter, raw, wait_for_prompt).await,
+        Some(Commands::InterruptPane { pane }) => cli::interrupt_pane(DEFAULT_SESSION, pane).await,
+        Some(Commands::ClosePane { pane }) => cli::close_pane(DEFAULT_SESSION, pane).await,
         Some(Commands::CapturePane {
             target,
             lines,
@@ -455,6 +469,32 @@ mod tests {
                 assert_eq!(target, 1);
                 assert_eq!(lines, 20);
                 assert!(json);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_interrupt_pane() {
+        let cli = Cli::try_parse_from(["yatamux", "interrupt-pane", "--pane", "7"])
+            .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::InterruptPane { pane }) => {
+                assert_eq!(pane, 7);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_close_pane() {
+        let cli = Cli::try_parse_from(["yatamux", "close-pane", "--pane", "9"])
+            .expect("CLI should parse");
+
+        match cli.command {
+            Some(Commands::ClosePane { pane }) => {
+                assert_eq!(pane, 9);
             }
             _ => panic!("unexpected command"),
         }
