@@ -474,53 +474,25 @@ async fn apply_update(pid: u32, new_path: &std::path::Path, launch: bool) -> any
 
     if pid != 0 {
         eprintln!("PID {} の終了を待機中...", pid);
-
-        // Windows: WaitForSingleObject でプロセス終了を待つ
-        #[cfg(windows)]
-        {
-            use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-            use windows::Win32::System::Threading::{
-                OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-            };
-
-            match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
-                Ok(handle) => {
-                    // 30秒タイムアウト
-                    let result = unsafe { WaitForSingleObject(handle, 30_000) };
-                    unsafe {
-                        let _ = CloseHandle(handle);
-                    }
-                    if result != WAIT_OBJECT_0 {
-                        anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid);
-                    }
-                }
-                Err(_) => {
-                    // プロセスがすでに終了していた場合はそのまま続行
-                    eprintln!("PID {} はすでに終了しています。リネームを続行します。", pid);
-                }
-            }
-        }
-
-        #[cfg(not(windows))]
-        {
-            for _ in 0..60 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                    break;
-                }
-            }
-        }
-
-        eprintln!("PID {} が終了しました。バイナリを置換します。", pid);
+    }
+    if launch {
+        eprintln!("PID {} の終了後に新しいインスタンスを起動します。", pid);
     }
 
-    update::replace_executable(&exe, new_path)?;
+    update::apply_staged_update(
+        &exe,
+        pid,
+        new_path,
+        launch,
+        std::time::Duration::from_secs(30),
+    )?;
+
+    if pid != 0 {
+        eprintln!("PID {} が終了しました。バイナリを置換しました。", pid);
+    }
 
     if launch {
-        eprintln!("バイナリ置換完了。新しいインスタンスを起動します。");
-        update::build_launch_command(&exe)
-            .spawn()
-            .context("新しい yatamux の起動に失敗")?;
+        eprintln!("バイナリ置換完了。新しいインスタンスを起動しました。");
     } else {
         eprintln!("バイナリ置換完了。");
     }

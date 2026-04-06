@@ -75,11 +75,11 @@ Codex との壁打ち（2026-04-05）を経て策定。
 
 #### TC-12: checksum 不一致時は置換しない
 - **操作**: `verify_checksum` に不正ハッシュを渡してフロー全体を流す
-- **期待結果**: `.new` が残らず、既存 exe が変更されない
+- **期待結果**: staging 前に stale `.new` が掃除され、失敗後も `.new` が残らず、既存 exe が変更されない
 
 #### TC-13: quit timeout 時は rename しない
 - **操作**: SaveAndQuit を送っても応答がないケースをシミュレート（IPC mock）
-- **期待結果**: `.bak` への rename が走らない
+- **期待結果**: `.bak` への rename が走らず、`<exe>.new` は保持されたまま既存 exe が変更されない
 
 #### TC-14: バイナリ置換（`--apply-update` ヘルパーモード）
 - **前提**: temp dir に `yatamux.exe`（実行中）と `yatamux.exe.new` を配置

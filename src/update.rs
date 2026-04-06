@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const DEFAULT_RELEASE_API_URL: &str =
     "https://api.github.com/repos/raiga0310/yatamux/releases/latest";
@@ -217,6 +218,36 @@ pub async fn download_and_verify_release_binary(
     Ok(binary.to_vec())
 }
 
+/// `<exe>.new` の staging パスを用意する。
+///
+/// 以前の更新失敗で残っていた `.new` はここで削除してから再利用する。
+pub fn prepare_staged_binary_path(exe: &Path) -> Result<PathBuf> {
+    let (new_path, _) = plan_update_paths(exe);
+    if new_path.exists() {
+        std::fs::remove_file(&new_path)
+            .with_context(|| format!("古い .new の削除に失敗: {}", new_path.display()))?;
+    }
+    Ok(new_path)
+}
+
+/// 検証済みバイナリを `<exe>.new` へ書き込む。
+pub fn write_staged_binary(new_path: &Path, binary: &[u8]) -> Result<()> {
+    std::fs::write(new_path, binary)
+        .with_context(|| format!("バイナリの書き込みに失敗: {}", new_path.display()))
+}
+
+/// checksums とバイナリを取得・検証して `<exe>.new` へ staging する。
+pub async fn download_and_stage_release_binary(
+    client: &reqwest::Client,
+    release: &ReleaseInfo,
+    exe: &Path,
+) -> Result<PathBuf> {
+    let new_path = prepare_staged_binary_path(exe)?;
+    let binary = download_and_verify_release_binary(client, release).await?;
+    write_staged_binary(&new_path, &binary)?;
+    Ok(new_path)
+}
+
 /// `<exe>` を `<exe>.bak` へ退避し、`<new_path>` を `<exe>` に置き換える。
 pub fn replace_executable(exe: &Path, new_path: &Path) -> Result<PathBuf> {
     let (_, bak_path) = plan_update_paths(exe);
@@ -245,6 +276,80 @@ pub fn replace_executable(exe: &Path, new_path: &Path) -> Result<PathBuf> {
     Ok(bak_path)
 }
 
+/// 指定 PID の終了を待つ。
+///
+/// `OpenProcess` に失敗した場合は、すでに終了済みとみなして成功扱いにする。
+pub fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<()> {
+    if pid == 0 {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+        match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+            Ok(handle) => {
+                let result = unsafe { WaitForSingleObject(handle, timeout_ms) };
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                match result {
+                    WAIT_OBJECT_0 => Ok(()),
+                    WAIT_TIMEOUT => {
+                        anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid)
+                    }
+                    WAIT_FAILED => {
+                        anyhow::bail!("プロセス {} の終了待機に失敗しました", pid)
+                    }
+                    other => anyhow::bail!(
+                        "プロセス {} の終了待機で予期しない結果を受け取りました: {:?}",
+                        pid,
+                        other
+                    ),
+                }
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        anyhow::bail!("プロセス {} の終了待機がタイムアウトしました", pid)
+    }
+}
+
+/// staging 済みバイナリを本体へ反映し、必要なら新インスタンスを起動する。
+pub fn apply_staged_update(
+    exe: &Path,
+    pid: u32,
+    new_path: &Path,
+    launch: bool,
+    wait_timeout: Duration,
+) -> Result<()> {
+    wait_for_process_exit(pid, wait_timeout)?;
+    replace_executable(exe, new_path)?;
+
+    if launch {
+        build_launch_command(exe)
+            .spawn()
+            .context("新しい yatamux の起動に失敗")?;
+    }
+
+    Ok(())
+}
+
 // ── テスト ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -254,6 +359,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -600,6 +706,66 @@ mod tests {
         handle.join().expect("join mock server thread");
     }
 
+    #[tokio::test]
+    async fn test_download_and_stage_release_binary_removes_stale_new_on_checksum_mismatch() {
+        let exe_dir = make_temp_test_dir("update-stage-mismatch");
+        let exe = exe_dir.join("yatamux.exe");
+        let old_binary = b"existing binary".to_vec();
+        let stale_new = exe_dir.join("yatamux.exe.new");
+        let binary = b"mock yatamux binary".to_vec();
+
+        std::fs::write(&exe, &old_binary).expect("write existing exe");
+        std::fs::write(&stale_new, b"stale staged binary").expect("write stale .new");
+
+        let (base_url, handle) = spawn_mock_http_server(|_base_url| {
+            vec![
+                MockHttpResponse {
+                    path: "/downloads/checksums.txt",
+                    status_line: "200 OK",
+                    content_type: "text/plain",
+                    body: b"deadbeef  yatamux.exe\n".to_vec(),
+                },
+                MockHttpResponse {
+                    path: "/downloads/yatamux.exe",
+                    status_line: "200 OK",
+                    content_type: "application/octet-stream",
+                    body: binary.clone(),
+                },
+            ]
+        });
+
+        let client = reqwest::Client::builder()
+            .user_agent("yatamux-test")
+            .build()
+            .expect("build reqwest client");
+        let release = ReleaseInfo {
+            tag_name: "v0.1.99".to_string(),
+            asset_url: format!("{}/downloads/yatamux.exe", base_url),
+            checksum_url: format!("{}/downloads/checksums.txt", base_url),
+            published_at: None,
+        };
+
+        let err = download_and_stage_release_binary(&client, &release, &exe)
+            .await
+            .expect_err("checksum mismatch should fail");
+        assert!(
+            err.to_string().contains("SHA256"),
+            "checksum mismatch should mention SHA256: {err:#}"
+        );
+        assert!(
+            !stale_new.exists(),
+            ".new should be cleaned up before a failed staging attempt"
+        );
+        assert_eq!(
+            std::fs::read(&exe).expect("read existing exe"),
+            old_binary,
+            "existing exe should remain unchanged"
+        );
+
+        handle.join().expect("join mock server thread");
+        std::fs::remove_dir_all(&exe_dir).expect("cleanup temp dir");
+    }
+
     #[test]
     fn test_replace_executable_swaps_new_file_and_overwrites_stale_backup() {
         let temp_dir = make_temp_test_dir("update-replace");
@@ -623,6 +789,62 @@ mod tests {
         );
         assert!(!new_path.exists(), ".new should be consumed by rename");
 
+        std::fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn test_apply_staged_update_times_out_before_replacing_binary() {
+        let temp_dir = make_temp_test_dir("update-timeout");
+        let exe = temp_dir.join("yatamux.exe");
+        let new_path = temp_dir.join("yatamux.exe.new");
+        let bak_path = temp_dir.join("yatamux.exe.bak");
+
+        std::fs::write(&exe, b"old binary").expect("write old exe");
+        std::fs::write(&new_path, b"new binary").expect("write new exe");
+
+        #[cfg(windows)]
+        let mut child = Command::new("ping")
+            .args(["127.0.0.1", "-n", "6"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn long-running child");
+
+        #[cfg(not(windows))]
+        let mut child = Command::new("sleep")
+            .arg("2")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn long-running child");
+
+        let err = apply_staged_update(
+            &exe,
+            child.id(),
+            &new_path,
+            false,
+            Duration::from_millis(100),
+        )
+        .expect_err("live process should trigger timeout");
+        assert!(
+            err.to_string().contains("タイムアウト"),
+            "timeout should be reported clearly: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read(&exe).expect("read exe after timeout"),
+            b"old binary"
+        );
+        assert_eq!(
+            std::fs::read(&new_path).expect("read staged binary after timeout"),
+            b"new binary"
+        );
+        assert!(
+            !bak_path.exists(),
+            ".bak should not be created when process wait times out"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
         std::fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
     }
 }
