@@ -445,8 +445,12 @@ async fn main() -> Result<()> {
     #[cfg(windows)]
     {
         if std::env::args().count() > 1 {
-            // CLI 引数あり: 親コンソール（PowerShell 等）にアタッチして出力を有効化。
-            attach_parent_console();
+            // yatamux ペイン内（YATAMUX=1）では ConPTY が stdout を用意しているため
+            // attach_parent_console() は不要（CONOUT$ にリダイレクトすると逆に出力が消える）。
+            // ペイン外（PowerShell / CMD 直起動）の場合のみ親コンソールにアタッチする。
+            if std::env::var_os("YATAMUX").is_none() {
+                attach_parent_console();
+            }
             // UTF-8 コードページに切り替えて日本語文字化けを防ぐ。
             unsafe {
                 use windows::Win32::System::Console::SetConsoleOutputCP;
