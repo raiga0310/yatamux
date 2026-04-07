@@ -2335,7 +2335,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "yatamux"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "yatamux-client"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "serde",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "yatamux-protocol"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "serde",
  "serde_json",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "yatamux-renderer"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "yatamux-server"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "portable-pty",
@@ -2416,7 +2416,7 @@ dependencies = [
 
 [[package]]
 name = "yatamux-terminal"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "base64",
