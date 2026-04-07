@@ -1221,6 +1221,52 @@ fn unescape(s: &str) -> Vec<u8> {
     out
 }
 
+/// 設定ファイルを読み込んで `%APPDATA%\yatamux\config.toml` に適用する。
+///
+/// - TOML として有効かを検証する（`AppConfig` にデシリアライズ可能か確認）
+/// - 検証通過後、`config.toml` にコピーする
+/// - 変更はプロセス再起動後に有効になる
+pub async fn source_config(path: &str) -> anyhow::Result<()> {
+    use crate::config::AppConfig;
+    use std::io::Write;
+
+    let src = std::path::Path::new(path);
+    if !src.exists() {
+        anyhow::bail!("ファイルが見つかりません: {}", path);
+    }
+
+    let content = std::fs::read_to_string(src)
+        .with_context(|| format!("ファイルを読み込めませんでした: {}", path))?;
+
+    // TOML + AppConfig として検証
+    let _: AppConfig = toml::from_str(&content)
+        .with_context(|| format!("TOML のパースに失敗しました: {}", path))?;
+
+    let dest = AppConfig::default_path();
+
+    // 親ディレクトリを作成
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("設定ディレクトリを作成できませんでした: {}", parent.display()))?;
+    }
+
+    // 既存 config.toml があればバックアップ
+    if dest.exists() {
+        let backup = dest.with_extension("toml.bak");
+        std::fs::copy(&dest, &backup)
+            .with_context(|| format!("バックアップに失敗しました: {}", backup.display()))?;
+        println!("バックアップ: {}", backup.display());
+    }
+
+    std::fs::write(&dest, &content)
+        .with_context(|| format!("設定ファイルの書き込みに失敗しました: {}", dest.display()))?;
+
+    println!("設定を適用しました: {}", dest.display());
+    println!("変更はプロセス再起動後に有効になります。");
+    let _ = std::io::stdout().flush();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
