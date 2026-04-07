@@ -182,6 +182,10 @@ mod win32 {
         pub news_scroll_px_per_tick: i32,
         /// PaneStore.news_text のキャッシュ（Win32 スレッド専用 — 毎フレームの lock を省く）
         news_text_cache: std::cell::RefCell<String>,
+        /// CPU/RAM ポーリング間引きカウンタ（60 フレームごとに更新 ≈ 1 秒）
+        sysinfo_tick: std::cell::Cell<u32>,
+        /// ステータスバー領域が更新されたことを示すフラグ（WM_TIMER → paint で使用）
+        status_bar_dirty: std::cell::Cell<bool>,
         /// CPU 使用率（0–100、GetSystemTimes デルタから算出）
         cpu_usage: std::cell::Cell<f32>,
         /// メモリ使用率（0–100、GlobalMemoryStatusEx から算出）
@@ -241,6 +245,8 @@ mod win32 {
                 news_scroll_px: std::cell::Cell::new(0),
                 news_scroll_px_per_tick,
                 news_text_cache: std::cell::RefCell::new(String::new()),
+                sysinfo_tick: std::cell::Cell::new(0),
+                status_bar_dirty: std::cell::Cell::new(false),
                 cpu_usage: std::cell::Cell::new(0.0),
                 mem_usage: std::cell::Cell::new(0.0),
                 prev_idle_ticks: std::cell::Cell::new(0),
@@ -1099,8 +1105,16 @@ mod win32 {
             }
         }
 
-        // ── ステータスバー ───────────────────────────────────────────
-        paint_status_bar(mem_dc, rect.right, rect.bottom, state);
+        // ── ステータスバー（更新が必要なフレームのみ描画）────────────────
+        // ps.rcPaint がステータスバー領域を含む場合のみ描画する。
+        // WM_TIMER 側でペイン dirty とステータスバー dirty を別 RECT で
+        // InvalidateRect しているため、ペイン出力だけの場合は rcPaint.bottom が
+        // bar_y 以下に収まりステータスバー描画がスキップされる。
+        let bar_h_px = state.cell_height * STATUS_BAR_ROWS;
+        let bar_y_px = win_h - bar_h_px;
+        if ps.rcPaint.bottom > bar_y_px {
+            paint_status_bar(mem_dc, rect.right, rect.bottom, state);
+        }
 
         // ── トースト通知 ────────────────────────────────────────────
         paint_toasts(mem_dc, rect.right, rect.bottom, state);
