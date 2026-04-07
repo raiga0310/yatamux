@@ -312,8 +312,12 @@ pub(super) unsafe fn handle_wm_timer(
             }
         }
 
-        // CPU 使用率（GetSystemTimes デルタ）
-        {
+        // ── sysinfo（CPU/RAM）は 60 フレームごと（≈1秒）に更新 ───────────────
+        let tick = state.sysinfo_tick.get().wrapping_add(1);
+        state.sysinfo_tick.set(tick);
+        let sysinfo_updated = tick % 60 == 0;
+        if sysinfo_updated {
+            // CPU 使用率（GetSystemTimes デルタ）
             let mut idle = windows::Win32::Foundation::FILETIME::default();
             let mut kernel = windows::Win32::Foundation::FILETIME::default();
             let mut user = windows::Win32::Foundation::FILETIME::default();
@@ -341,10 +345,7 @@ pub(super) unsafe fn handle_wm_timer(
                 state.prev_kernel_ticks.set(kernel_now);
                 state.prev_user_ticks.set(user_now);
             }
-        }
-
-        // メモリ使用率（GlobalMemoryStatusEx）
-        {
+            // メモリ使用率（GlobalMemoryStatusEx）
             let mut ms = MEMORYSTATUSEX {
                 dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
                 ..Default::default()
@@ -354,18 +355,35 @@ pub(super) unsafe fn handle_wm_timer(
             }
         }
 
-        // PaneStore.news_text を Win32 スレッドのキャッシュに同期してスクロール位置を進める。
-        // paint_status_bar はキャッシュから読むため PaneStore の追加 lock が不要になる。
+        // ── news_text 同期・ティッカースクロール ──────────────────────────────
+        // PaneStore から1フレーム1回だけ読んでキャッシュに保存。
         {
             let new_text = state.panes.lock().unwrap().news_text.clone();
             *state.news_text_cache.borrow_mut() = new_text;
         }
-        if state.news_scroll_px_per_tick > 0 && !state.news_text_cache.borrow().is_empty() {
+        let ticker_active =
+            state.news_scroll_px_per_tick > 0 && !state.news_text_cache.borrow().is_empty();
+        if ticker_active {
             let cur = state.news_scroll_px.get();
             state.news_scroll_px.set(cur + state.news_scroll_px_per_tick);
         }
 
-        let needs_repaint = {
+        // ── ステータスバーの dirty 判定 ──────────────────────────────────────
+        // ティッカーが動いている、または sysinfo が更新されたフレームのみ dirty にする。
+        let status_dirty = ticker_active || sysinfo_updated;
+        state.status_bar_dirty.set(status_dirty);
+
+        // ── 描画領域を分離して InvalidateRect ────────────────────────────────
+        // ペインコンテンツとステータスバーを別々に無効化することで、
+        // エージェント出力が多い場面でもステータスバーの余分な再描画を抑える。
+        let mut client_rect = RECT::default();
+        GetClientRect(hwnd, &mut client_rect).ok();
+        let win_h = client_rect.bottom;
+        let win_w = client_rect.right;
+        let bar_h = state.cell_height * STATUS_BAR_ROWS;
+        let bar_y = win_h - bar_h;
+
+        let needs_content_repaint = {
             let store = state.panes.lock().unwrap();
             let dirty = store
                 .grids
@@ -373,8 +391,14 @@ pub(super) unsafe fn handle_wm_timer(
                 .any(|g| g.lock().unwrap().has_dirty_rows());
             dirty || state.ime.state.lock().unwrap().composing
         };
-        if needs_repaint || has_active_toasts {
-            let _ = InvalidateRect(Some(hwnd), None, false);
+
+        if needs_content_repaint || has_active_toasts {
+            let content_rect = RECT { left: 0, top: 0, right: win_w, bottom: bar_y.max(0) };
+            let _ = InvalidateRect(Some(hwnd), Some(&content_rect), false);
+        }
+        if status_dirty || has_active_toasts {
+            let sb_rect = RECT { left: 0, top: bar_y.max(0), right: win_w, bottom: win_h };
+            let _ = InvalidateRect(Some(hwnd), Some(&sb_rect), false);
         }
     }
     LRESULT(0)
