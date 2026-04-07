@@ -175,6 +175,10 @@ pub(super) unsafe fn handle_wm_keydown(
 ) -> LRESULT {
     if !state_ptr.is_null() {
         let state = &*state_ptr;
+        // 前回の WM_KEYDOWN が WM_CHAR を生成しなかった場合（矢印キー等の非 printable キー）
+        // skip_char が true のまま残ってしまうため、ここでリセットする。
+        // これにより「非 printable キーの後に Enter を2回押さないといけない」バグ（B-2）を防ぐ。
+        state.skip_char.set(false);
         let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
         let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
         let key = KeyInput {
