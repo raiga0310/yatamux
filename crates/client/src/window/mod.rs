@@ -180,6 +180,8 @@ mod win32 {
         news_scroll_px: std::cell::Cell<i32>,
         /// ティッカー 1 ティックあたりスクロール量（px）
         pub news_scroll_px_per_tick: i32,
+        /// PaneStore.news_text のキャッシュ（Win32 スレッド専用 — 毎フレームの lock を省く）
+        news_text_cache: std::cell::RefCell<String>,
         /// CPU 使用率（0–100、GetSystemTimes デルタから算出）
         cpu_usage: std::cell::Cell<f32>,
         /// メモリ使用率（0–100、GlobalMemoryStatusEx から算出）
@@ -238,6 +240,7 @@ mod win32 {
                 prev_overlay_key: std::cell::Cell::new(0),
                 news_scroll_px: std::cell::Cell::new(0),
                 news_scroll_px_per_tick,
+                news_text_cache: std::cell::RefCell::new(String::new()),
                 cpu_usage: std::cell::Cell::new(0.0),
                 mem_usage: std::cell::Cell::new(0.0),
                 prev_idle_ticks: std::cell::Cell::new(0),
@@ -1229,7 +1232,7 @@ mod win32 {
         match mode {
             ClientMode::Normal => {
                 // Normal モード: ニュースティッカー（右→左スクロール）
-                let news_text = state.panes.lock().unwrap().news_text.clone();
+                let news_text = state.news_text_cache.borrow().clone();
                 if news_text.is_empty() {
                     // ニュースがなければデフォルトヒントを表示
                     let hint = " Ctrl+B: ペインモード  Ctrl+P: テーマ";

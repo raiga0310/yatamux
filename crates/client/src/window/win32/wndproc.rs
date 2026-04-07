@@ -354,15 +354,15 @@ pub(super) unsafe fn handle_wm_timer(
             }
         }
 
-        // ニュースティッカー スクロール位置を進める
-        if state.news_scroll_px_per_tick > 0 {
-            let news_text = state.panes.lock().unwrap().news_text.clone();
-            if !news_text.is_empty() {
-                let cur = state.news_scroll_px.get();
-                state
-                    .news_scroll_px
-                    .set(cur + state.news_scroll_px_per_tick);
-            }
+        // PaneStore.news_text を Win32 スレッドのキャッシュに同期してスクロール位置を進める。
+        // paint_status_bar はキャッシュから読むため PaneStore の追加 lock が不要になる。
+        {
+            let new_text = state.panes.lock().unwrap().news_text.clone();
+            *state.news_text_cache.borrow_mut() = new_text;
+        }
+        if state.news_scroll_px_per_tick > 0 && !state.news_text_cache.borrow().is_empty() {
+            let cur = state.news_scroll_px.get();
+            state.news_scroll_px.set(cur + state.news_scroll_px_per_tick);
         }
 
         let needs_repaint = {
