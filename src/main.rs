@@ -323,6 +323,20 @@ enum Commands {
 
     /// GitHub Releases から最新バイナリを取得してセルフアップデートする（C-38）
     Update,
+
+    /// 設定ファイルを読み込んで %APPDATA%\yatamux\config.toml に適用する
+    ///
+    /// 指定した TOML ファイルを検証し、yatamux の設定ファイルとして保存する。
+    /// 変更はプロセス再起動後に反映される。
+    ///
+    /// 例:
+    ///   yatamux source ~/my-config.toml
+    ///   yatamux source C:\Users\raiga\dotfiles\yatamux.toml
+    #[command(verbatim_doc_comment)]
+    Source {
+        /// 読み込む TOML 設定ファイルのパス
+        path: String,
+    },
 }
 
 /// `yatamux layout` のサブコマンド
@@ -371,6 +385,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::SplitPane { .. } => "split-pane",
         Commands::Layout(_) => "layout",
         Commands::Update => "update",
+        Commands::Source { .. } => "source",
     }
 }
 
@@ -445,6 +460,19 @@ async fn main() -> Result<()> {
                 use windows::Win32::System::Console::FreeConsole;
                 let _ = FreeConsole();
             }
+        }
+    }
+
+    // --version / -V を Cli::parse() より前にインターセプトして明示フラッシュ。
+    // clap はバージョン表示後 process::exit(0) するが GUI サブシステムバイナリでは
+    // stdout バッファが flush される前に終了することがあるため自前で処理する。
+    {
+        use std::io::Write;
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--version" || a == "-V") {
+            println!("yatamux {}", env!("CARGO_PKG_VERSION"));
+            let _ = std::io::stdout().flush();
+            return Ok(());
         }
     }
 
@@ -552,6 +580,7 @@ async fn main() -> Result<()> {
             LayoutCommands::Export { name } => cli::layout_export(&name).await,
         },
         Some(Commands::Update) => cli::update(&cli.session).await,
+        Some(Commands::Source { path }) => cli::source_config(&path).await,
         None => {
             let app_config =
                 config::AppConfig::load(&config::AppConfig::default_path()).unwrap_or_default();
