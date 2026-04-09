@@ -1344,20 +1344,24 @@ fn e2e_bel_on_background_pane_triggers_notification() {
     // bg != active となり、BEL が notify_if_inactive を通過する。
     let bg = harness.split_pane(&root.0.to_string(), SplitDirection::Vertical, None);
     harness.wait_for_pane_count(2);
+    // bg ペインのシェルが起動するまで待つ（コマンドを受け付けられる状態にする）
+    harness.wait_for_shell_ready(&bg.0.to_string());
 
     harness.block_on(async {
         let mut conn = ServerConnection::connect(&harness.session)
             .await
             .expect("connect for alert BEL test");
 
-        // BEL (0x07) を bg ペインに直接送信
+        // PowerShell で BEL (0x07) を PTY 出力に書き出す。
+        // ClientMessage::Input は PTY stdin に書くため、cmd.exe がコマンドとして実行し
+        // PowerShell が [char]7 を stdout に出力 → VtProcessor が BEL を検出する。
         conn.tx
             .send(ClientMessage::Input {
                 pane: bg,
-                data: vec![0x07],
+                data: b"powershell -nop -c \"[Console]::Write([char]7)\"\r".to_vec(),
             })
             .await
-            .expect("send BEL to bg pane");
+            .expect("send BEL command to bg pane");
 
         // Notification が IPC ストリームに流れることを確認
         let body = wait_for_notification(&mut conn, bg, Duration::from_secs(10)).await;
@@ -1426,21 +1430,23 @@ fn e2e_osc9_on_background_pane_triggers_notification() {
     let root = harness.wait_for_pane_count(1)[0].id;
     let bg = harness.split_pane(&root.0.to_string(), SplitDirection::Vertical, None);
     harness.wait_for_pane_count(2);
+    // bg ペインのシェルが起動するまで待つ
+    harness.wait_for_shell_ready(&bg.0.to_string());
 
     harness.block_on(async {
         let mut conn = ServerConnection::connect(&harness.session)
             .await
             .expect("connect for OSC 9 test");
 
-        // OSC 9 通知シーケンス: ESC ] 9 ; <body> BEL
-        let osc9: Vec<u8> = b"\x1b]9;e2e-osc9-test\x07".to_vec();
+        // PowerShell で OSC 9 シーケンス（ESC ] 9 ; <body> BEL）を PTY 出力に書き出す。
+        // [string][char]27 = ESC、[string][char]7 = BEL をシングルクォート文字列と結合する。
         conn.tx
             .send(ClientMessage::Input {
                 pane: bg,
-                data: osc9,
+                data: b"powershell -nop -c \"[Console]::Write([string][char]27+']9;e2e-osc9-test'+[string][char]7)\"\r".to_vec(),
             })
             .await
-            .expect("send OSC 9 to bg pane");
+            .expect("send OSC 9 command to bg pane");
 
         let body = wait_for_notification(&mut conn, bg, Duration::from_secs(10)).await;
         assert_eq!(
