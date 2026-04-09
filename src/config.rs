@@ -102,6 +102,8 @@ pub struct AppearanceConfig {
     pub selection_bg: Option<String>,
     /// ステータスバー背景色（`"#rrggbb"` 形式）
     pub status_bar_bg: Option<String>,
+    /// 通知アラート時のペインボーダー色（`"#rrggbb"` 形式、省略時: `#FF6B6B`）
+    pub alert_border: Option<String>,
 }
 
 /// `"#rrggbb"` 形式の文字列を `(r, g, b)` に変換する。
@@ -287,5 +289,26 @@ mod tests {
         let config: AppConfig = toml::from_str("").unwrap();
         assert!(config.appearance.font_family.is_none());
         assert!(config.appearance.background.is_none());
+    }
+
+    // TC-C41-01: alert_border フィールドを読み込める
+    #[test]
+    fn test_load_alert_border_config() {
+        let dir = std::env::temp_dir().join("yatamux_alert_border_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[appearance]\nalert_border = \"#FF0000\"\n").unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.appearance.alert_border.as_deref(), Some("#FF0000"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // TC-C41-02: alert_border を省略するとデフォルト（None）になる
+    #[test]
+    fn test_alert_border_default_is_none() {
+        let config: AppConfig = toml::from_str("[appearance]").unwrap();
+        assert!(config.appearance.alert_border.is_none());
     }
 }

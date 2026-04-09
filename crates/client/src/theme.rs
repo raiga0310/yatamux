@@ -18,4 +18,6 @@ pub struct Theme {
     pub font_family: Option<String>,
     /// フォントサイズ（pt）
     pub font_size: Option<u32>,
+    /// 通知アラート時のペインボーダー色（`0xRRGGBB`、`None` = デフォルト `#FF6B6B`）
+    pub alert_border: Option<u32>,
 }

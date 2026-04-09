@@ -15,7 +15,7 @@ pub use catalog::{
     list_available_layouts, list_available_themes, load_theme_from_file, save_layout_file,
 };
 pub use launcher::{LauncherState, LayoutPreview, ThemeLauncherState};
-pub use store::{CopyState, PaneStore, PromptState, Toast};
+pub use store::{CopyState, PaneStore, PromptState, Toast, ALERT_FLIP_COUNT, ALERT_TICK_DIVISOR};
 pub use tree::{Direction, LayoutNode, PaneRect};
 
 /// 現在のレイアウトツリーを `[[panes]]` TOML 形式に変換する。

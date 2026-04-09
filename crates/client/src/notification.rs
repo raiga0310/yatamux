@@ -77,6 +77,32 @@ impl NotificationBackend for NativeToast {
     }
 }
 
+// ── AlertingBackend ────────────────────────────────────────────────────────
+
+/// 通知受信時にペインボーダーアラートを起動するラッパー。
+///
+/// 内部バックエンド（`FocusAwareBackend` 等）に処理を委譲しつつ、
+/// `PaneStore::trigger_alert` を必ず呼んでボーダー点滅を開始する。
+pub struct AlertingBackend<I: NotificationBackend> {
+    store: Arc<Mutex<PaneStore>>,
+    inner: I,
+}
+
+impl<I: NotificationBackend> AlertingBackend<I> {
+    pub fn new(store: Arc<Mutex<PaneStore>>, inner: I) -> Self {
+        Self { store, inner }
+    }
+}
+
+impl<I: NotificationBackend> NotificationBackend for AlertingBackend<I> {
+    fn notify(&self, pane_id: PaneId, message: String) {
+        // ボーダーアラートを開始（フォーカス状態に関わらず常に）
+        self.store.lock().unwrap().trigger_alert(pane_id);
+        // 内部バックエンド（トースト / OS 通知）に委譲
+        self.inner.notify(pane_id, message);
+    }
+}
+
 // ── FocusAwareBackend ──────────────────────────────────────────────────────
 
 /// フォーカス状態に応じて InternalToast / NativeToast を切り替えるラッパー
@@ -126,6 +152,43 @@ mod tests {
     fn make_store() -> Arc<Mutex<PaneStore>> {
         let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
         Arc::new(Mutex::new(PaneStore::new(PaneId(1), grid)))
+    }
+
+    // TC-C41-30: AlertingBackend::notify で trigger_alert が呼ばれる
+    #[test]
+    fn test_alerting_backend_triggers_alert() {
+        let store = make_store();
+        let internal = InternalToast::new(Arc::clone(&store));
+        let backend = AlertingBackend::new(Arc::clone(&store), internal);
+        backend.notify(PaneId(2), "test".to_string());
+        let store = store.lock().unwrap();
+        assert!(store.alerting_panes.contains_key(&PaneId(2)));
+    }
+
+    // TC-C41-31: AlertingBackend::notify は内部バックエンドにも委譲する
+    #[test]
+    fn test_alerting_backend_delegates_to_inner() {
+        let store = make_store();
+        let internal = InternalToast::new(Arc::clone(&store));
+        let backend = AlertingBackend::new(Arc::clone(&store), internal);
+        backend.notify(PaneId(2), "hello".to_string());
+        let store = store.lock().unwrap();
+        // InternalToast が pending_toasts に追加しているはず
+        assert_eq!(store.pending_toasts.len(), 1);
+        assert_eq!(store.pending_toasts[0].message, "hello");
+    }
+
+    // TC-C41-32: AlertingBackend はアクティブペインへの通知でも trigger_alert を呼ぶ
+    #[test]
+    fn test_alerting_backend_triggers_alert_for_active_pane() {
+        let store = make_store();
+        // store.active = PaneId(1)（デフォルト）
+        let internal = InternalToast::new(Arc::clone(&store));
+        let backend = AlertingBackend::new(Arc::clone(&store), internal);
+        backend.notify(PaneId(1), "active pane msg".to_string());
+        let store = store.lock().unwrap();
+        // AlertingBackend はアクティブチェックを行わず常に trigger_alert を呼ぶ
+        assert!(store.alerting_panes.contains_key(&PaneId(1)));
     }
 
     // TC-07: InternalToast — notify が pending_toasts に追加される

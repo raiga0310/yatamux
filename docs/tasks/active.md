@@ -421,6 +421,32 @@ yatamux ペインのシェルから `yatamux update` を実行すると exit cod
 - [x] `SaveAndQuit` 送信失敗と「yatamux ペイン内なのに IPC 接続失敗」の分岐を明示エラー化し、誤った自己置換フォールバックを止める
 - [ ] IPC 接続 / `SaveAndQuit` / `--apply-update` / ダウンロード検証のどこで落ちるかを切り分ける
 
+### C-41: 通知時のペインボーダーアクセントカラー + 点滅 【優先度: 中】
+
+tmux / cmux のように、バックグラウンドペインで通知が発生したとき OS のトースト通知（Windows Action Center）を送りつつ、
+該当ペインの枠線をアクセントカラーに切り替えて数回点滅させる視覚フィードバックを追加する。
+
+- **概要**:
+  1. **OS 通知**: 既存の `NativeToast` キュー（非フォーカス時）に加え、フォーカス中でも OS Action Center へ通知を送るオプションを追加する。発火トリガーは既存の BEL / OSC 9/99/777 / PTY 終了通知フローをそのまま流用する。
+  2. **ペインボーダー点滅**: 通知を受けたペインの ID を `alerting_panes: HashMap<PaneId, u8>` で管理し、残り点滅回数をカウントダウンする。`WM_TIMER` 16ms ティックでカウントを進め、0 になったら通常色に戻す。点滅の ON/OFF 切り替えは 200〜300ms 間隔（約 4〜5 ティックに 1 回）とする。
+  3. **アクセントカラー**: `AppearanceConfig` に `alert_border: Option<String>`（デフォルト `#FF6B6B` = 赤橙系）を追加し、`config.toml` の `[appearance]` セクションで上書き可能にする。
+  4. **点滅回数**: デフォルト 5 回（ON/OFF の対で 10 フリップ）。将来的に設定化できるよう `alert_blink_count` をコード上定数で管理する。
+
+- **変更クレート**: `yatamux-client`（`layout.rs`, `window.rs`, `config.rs`, `render/` 周辺）、`yatamux-protocol`（必要に応じて）
+- **テスト計画**: `docs/test-plan-pane-alert.md`
+
+#### サブタスク
+
+- [x] `docs/test-plan-pane-alert.md` を作成してテストケースを列挙する
+- [x] `AppearanceConfig` に `alert_border: Option<String>` を追加し、`parse_hex_color` でデフォルト `#FF6B6B` にフォールバックする
+- [x] `PaneStore` に `alerting_panes: HashMap<PaneId, u8>`（残りフリップ数）と `alert_tick: u8`（点滅タイマー用サブカウンタ）を追加する
+- [x] `AlertingBackend<I>` を `notification.rs` に追加し、`notify()` で `trigger_alert` を呼んだ後に内部バックエンドへ委譲する。`app.rs` で `FocusAwareBackend` をラップして接続する
+- [x] `WM_TIMER` ハンドラで `clear_alert(active)` を呼び、`tick_alert()` でフリップカウントをデクリメント → 0 になったエントリを削除して `InvalidateRect` を要求する
+- [x] `paint()` のセパレーター描画後に `alerting_panes` を参照し、点滅 ON フェーズなら `alert_border` 色で 2px ペインボーダーを描画する
+- [ ] フォーカス中でも OS Action Center へ `ShellExecute` / `Windows.UI.Notifications` 相当の API で送信する経路を追加する（既存 `NativeToast` のフォーカス条件を外すか別送信パスを設ける）
+- [x] `tests/e2e_smoke.rs` に BEL / ProcessExit / OSC 9 の通知 E2E テストを 3 本追加する（CI `windows-latest` で実機実行）
+- [x] 修正後に Clippy・全テスト・rustfmt を通す
+
 ## ドキュメント
 
 ### D-2: IPC / Agent 運用ドキュメント再整理 【優先度: 中】

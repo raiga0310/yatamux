@@ -649,6 +649,7 @@ mod win32 {
             has_save_prompt,
             floating_visible,
             hovered_url,
+            alert_on_panes,
         ) = {
             let store = state.panes.lock().unwrap();
             let rects = store.layout.compute_rects(total_rect);
@@ -665,6 +666,13 @@ mod win32 {
             let hsp = store.save_prompt.is_some();
             let fv = store.floating_visible;
             let hu = store.hovered_url.clone();
+            // アラート ON フェーズのペイン ID セットを収集（ロック解放前）
+            let alert_on: std::collections::HashSet<PaneId> = store
+                .alerting_panes
+                .iter()
+                .filter(|(_, &count)| count > 0 && count % 2 == 0)
+                .map(|(&id, _)| id)
+                .collect();
             (
                 store.active,
                 store.scroll_offset,
@@ -678,6 +686,7 @@ mod win32 {
                 hsp,
                 fv,
                 hu,
+                alert_on,
             )
         };
 
@@ -977,6 +986,27 @@ mod win32 {
                 PADDING_X + sep.x + sep.w,
                 PADDING_Y + sep.y + sep.h,
             );
+        }
+
+        // ── アラートボーダー描画（通知受信ペインの枠線をアクセントカラーで描く）──
+        if !alert_on_panes.is_empty() {
+            let alert_color = state.theme.get().alert_border;
+            for (pane_id, rect) in &pane_rects {
+                if alert_on_panes.contains(pane_id) {
+                    let x0 = PADDING_X + rect.x;
+                    let y0 = PADDING_Y + rect.y;
+                    let x1 = x0 + rect.w;
+                    let y1 = y0 + rect.h;
+                    let pen = CreatePen(PS_SOLID, 2, alert_color);
+                    let old_pen = SelectObject(mem_dc, pen.into());
+                    let null_brush = GetStockObject(NULL_BRUSH);
+                    let old_brush = SelectObject(mem_dc, null_brush);
+                    let _ = Rectangle(mem_dc, x0, y0, x1, y1);
+                    SelectObject(mem_dc, old_pen);
+                    SelectObject(mem_dc, old_brush);
+                    let _ = DeleteObject(pen.into());
+                }
+            }
         }
 
         // ── フローティングペイン ─────────────────────────────────────
@@ -3137,7 +3167,7 @@ pub fn run_window(
     >,
     _float_tx: tokio::sync::mpsc::Sender<()>,
     _layout_tx: tokio::sync::mpsc::Sender<String>,
-    _theme: Theme,
+    _theme: crate::Theme,
     _news_scroll_px_per_tick: i32,
     _app_version: &'static str,
 ) -> anyhow::Result<()> {

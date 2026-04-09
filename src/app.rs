@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use yatamux_client::{run_window, FocusAwareBackend, NotificationBackend, PaneStore, Theme};
+use yatamux_client::{
+    run_window, AlertingBackend, FocusAwareBackend, NotificationBackend, PaneStore, Theme,
+};
 use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
 use yatamux_protocol::ClientMessage;
 use yatamux_terminal::TerminalSink;
@@ -75,6 +77,7 @@ fn build_theme(appearance: &AppearanceConfig) -> Theme {
         status_bar_bg: parse(&appearance.status_bar_bg),
         font_family: appearance.font_family.clone(),
         font_size: appearance.font_size,
+        alert_border: parse(&appearance.alert_border),
     }
 }
 
@@ -153,11 +156,14 @@ pub async fn run(
         Arc::new(Mutex::new(store))
     };
 
-    // ── 通知バックエンド（フォーカス状態に応じて切り替え）────────────────
+    // ── 通知バックエンド（フォーカス状態に応じて切り替え + ボーダーアラート）──
     let app_focused = Arc::new(AtomicBool::new(true));
-    let (notif_backend, native_notif_queue) =
+    let (focus_backend, native_notif_queue) =
         FocusAwareBackend::new(Arc::clone(&app_focused), Arc::clone(&pane_store));
-    let notif_backend: Arc<dyn NotificationBackend> = Arc::new(notif_backend);
+    let notif_backend: Arc<dyn NotificationBackend> = Arc::new(AlertingBackend::new(
+        Arc::clone(&pane_store),
+        focus_backend,
+    ));
 
     // ── 入力・リサイズ チャネル（Window → Server）───────────────────────
     let (msg_tx, mut msg_rx) = mpsc::channel::<ClientMessage>(64);

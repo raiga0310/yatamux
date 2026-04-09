@@ -63,7 +63,7 @@ pub use layout::{
     CopyState, Direction, LauncherState, LayoutNode, LayoutPreview, PaneRect, PaneStore,
     PromptState, ThemeLauncherState, Toast,
 };
-pub use notification::{FocusAwareBackend, NotificationBackend};
+pub use notification::{AlertingBackend, FocusAwareBackend, NotificationBackend};
 pub use session::{LayoutNodeDef, LayoutSnapshot};
 pub use theme::Theme;
 pub use window::run_window;
