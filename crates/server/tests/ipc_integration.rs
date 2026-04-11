@@ -450,6 +450,187 @@ async fn test_ipc_send_keys_to_unknown_pane_returns_error() {
     );
 }
 
+// C-42: Handshake 成功 — HandshakeAccepted が返り、protocol_version と capabilities を含む
+#[tokio::test]
+async fn test_ipc_handshake_returns_accepted() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use yatamux_protocol::{MIN_CLIENT_VERSION, PROTOCOL_VERSION, SERVER_CAPABILITIES};
+
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
+    let pipe = ClientOptions::new().open(&pipe_name).unwrap();
+    let (reader, mut writer) = tokio::io::split(pipe);
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    // Handshake 送信
+    let hs = serde_json::to_string(&ClientMessage::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+    })
+    .unwrap();
+    writer
+        .write_all(format!("{}\n", hs).as_bytes())
+        .await
+        .unwrap();
+
+    // HandshakeAccepted を受信
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("timeout")
+        .expect("io error")
+        .expect("no line");
+
+    let msg: ServerMessage = serde_json::from_str(&line).unwrap();
+    match msg {
+        ServerMessage::HandshakeAccepted {
+            protocol_version,
+            min_client_version,
+            capabilities,
+        } => {
+            assert_eq!(
+                protocol_version, PROTOCOL_VERSION,
+                "protocol_version mismatch"
+            );
+            assert_eq!(
+                min_client_version, MIN_CLIENT_VERSION,
+                "min_client_version mismatch"
+            );
+            for cap in SERVER_CAPABILITIES {
+                assert!(
+                    capabilities.contains(&cap.to_string()),
+                    "missing capability: {}",
+                    cap
+                );
+            }
+        }
+        other => panic!("expected HandshakeAccepted, got: {:?}", other),
+    }
+}
+
+// C-42: バージョン不一致 — 古いクライアントバージョンはエラーで切断される
+#[tokio::test]
+async fn test_ipc_handshake_old_version_rejected() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use yatamux_protocol::MIN_CLIENT_VERSION;
+
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
+    let pipe = ClientOptions::new().open(&pipe_name).unwrap();
+    let (reader, mut writer) = tokio::io::split(pipe);
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    // MIN_CLIENT_VERSION より古いバージョンを送信
+    let old_version = MIN_CLIENT_VERSION.saturating_sub(1);
+    // MIN_CLIENT_VERSION が 1 なので 0 を送る（MIN が 0 なら skip できないが現在は 1 固定）
+    let hs = serde_json::to_string(&ClientMessage::Handshake {
+        protocol_version: old_version,
+        capabilities: vec![],
+    })
+    .unwrap();
+    writer
+        .write_all(format!("{}\n", hs).as_bytes())
+        .await
+        .unwrap();
+
+    // Error が返り、接続が切断される
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("timeout")
+        .expect("io error")
+        .expect("no line");
+
+    let msg: ServerMessage = serde_json::from_str(&line).unwrap();
+    match msg {
+        ServerMessage::Error { message } => {
+            assert!(
+                message.contains("not supported") || message.contains("minimum"),
+                "error should mention version mismatch: {}",
+                message
+            );
+        }
+        other => panic!("expected Error, got: {:?}", other),
+    }
+
+    // 切断確認（次の読み取りは None になる）
+    let next = tokio::time::timeout(Duration::from_millis(500), lines.next_line())
+        .await
+        .expect("timeout waiting for disconnect")
+        .expect("io error");
+    assert!(
+        next.is_none(),
+        "connection should be closed after version rejection"
+    );
+}
+
+// C-42: Handshake なし（レガシー互換）— 旧クライアントでも接続が機能する
+#[tokio::test]
+async fn test_ipc_legacy_client_without_handshake_still_works() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let session = unique_session();
+    let (server_cmd_tx, server_event_rx) = mpsc::channel::<ClientMessage>(64);
+    let (server_out_tx, server_out_rx) = mpsc::channel::<ServerMessage>(64);
+    use yatamux_server::Server;
+    let logic = Server::new(server_out_tx);
+    tokio::spawn(logic.run(server_event_rx));
+    let session_c = session.clone();
+    tokio::spawn(async move {
+        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
+    let pipe = ClientOptions::new().open(&pipe_name).unwrap();
+    let (reader, mut writer) = tokio::io::split(pipe);
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    // Handshake なしで直接 ListPanes を送る（レガシーモード）
+    let msg = serde_json::to_string(&ClientMessage::ListPanes).unwrap();
+    writer
+        .write_all(format!("{}\n", msg).as_bytes())
+        .await
+        .unwrap();
+
+    // PanesListed が返ること（接続が正常に機能している）
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("timeout")
+        .expect("io error")
+        .expect("no line");
+
+    let resp: ServerMessage = serde_json::from_str(&line).unwrap();
+    assert!(
+        matches!(resp, ServerMessage::PanesListed { .. }),
+        "legacy client without Handshake should still receive PanesListed, got: {:?}",
+        resp
+    );
+}
+
 // F-5: 不正な JSON を送っても接続が維持される（次のメッセージが処理できる）
 // 現状の ipc.rs は warn ログを出して継続するため、切断されないことを確認。
 #[tokio::test]
