@@ -53,6 +53,9 @@ fn rgb_hex(v: u32) -> COLORREF {
     rgb(r, g, b)
 }
 
+/// デフォルトのアラートボーダー色（#FF6B6B: 赤橙系）
+const COLOR_ALERT_BORDER: COLORREF = COLORREF(0x00_6B_6B_FF);
+
 /// Win32 用に解決済みのテーマ色。
 #[derive(Copy, Clone)]
 pub(crate) struct WinTheme {
@@ -61,6 +64,8 @@ pub(crate) struct WinTheme {
     pub(crate) cursor: COLORREF,
     pub(crate) selection_bg: COLORREF,
     pub(crate) status_bar_bg: COLORREF,
+    /// 通知アラート時のペインボーダー色
+    pub(crate) alert_border: COLORREF,
 }
 
 impl WinTheme {
@@ -77,6 +82,10 @@ impl WinTheme {
                 .status_bar_bg
                 .map(rgb_hex)
                 .unwrap_or(COLORREF(0x00_25_18_18)),
+            alert_border: theme
+                .alert_border
+                .map(rgb_hex)
+                .unwrap_or(COLOR_ALERT_BORDER),
         }
     }
 }

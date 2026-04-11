@@ -6,6 +6,12 @@ use yatamux_terminal::Grid;
 
 use super::{LauncherState, LayoutNode, PaneRect, ThemeLauncherState};
 
+/// 点滅 1 回あたりの WM_TIMER ティック数（16ms × 16 ≈ 256ms per flip）
+pub const ALERT_TICK_DIVISOR: u8 = 16;
+/// 初期フリップ回数（ON/OFF ペア × 5 = 10 → 約 2.5 秒）
+/// 偶数からスタートし even=ON, odd=OFF なので最初は ON で始まる。
+pub const ALERT_FLIP_COUNT: u8 = 10;
+
 /// アプリ内入力欄の編集状態。
 ///
 /// 現在はレイアウト保存プロンプトで使用するが、履歴・カーソル移動・
@@ -337,6 +343,14 @@ pub struct PaneStore {
     /// `WM_TIMER` で検出し `content_bb` を破棄して全画面再描画をトリガーする。
     /// 残像（旧ペイン領域の描画残り）を防ぐために使用する。
     pub layout_changed: bool,
+    /// 通知アラート中のペイン → 残りフリップ数（0 = 非アラート）
+    ///
+    /// 偶数カウント = ボーダー ON、奇数カウント = ボーダー OFF。
+    /// `WM_TIMER` 毎に `tick_alert()` を呼び、`ALERT_TICK_DIVISOR` ティックごとに
+    /// カウントをデクリメントする。0 になったエントリは除去される。
+    pub alerting_panes: HashMap<PaneId, u8>,
+    /// 点滅タイマー用サブカウンタ（`ALERT_TICK_DIVISOR` で wrap して使用）
+    pub alert_tick: u8,
     /// マウスホバー中の URL 情報: (pane_id, row, col_start, col_end_exclusive, url)
     ///
     /// `WM_MOUSEMOVE` で更新。描画ループでアンダーラインを引くために参照する。
@@ -374,6 +388,8 @@ impl PaneStore {
             pane_aliases: HashMap::new(),
             pane_roles: HashMap::new(),
             layout_changed: false,
+            alerting_panes: HashMap::new(),
+            alert_tick: 0,
             hovered_url: None,
             news_text: String::new(),
         }
@@ -410,6 +426,45 @@ impl PaneStore {
         }
     }
 
+    /// 指定ペインの通知アラートを開始する（再トリガーするとフリップ数をリセット）。
+    pub fn trigger_alert(&mut self, pane_id: PaneId) {
+        self.alerting_panes.insert(pane_id, ALERT_FLIP_COUNT);
+    }
+
+    /// 指定ペインのアラートを即座に解除する（アクティブ化時などに使用）。
+    pub fn clear_alert(&mut self, pane_id: PaneId) {
+        self.alerting_panes.remove(&pane_id);
+    }
+
+    /// 指定ペインがアラートの点灯フェーズ（ボーダー表示）かどうかを返す。
+    ///
+    /// 偶数カウント = ON（最初のフリップは 10 = 偶数 → 即座に ON）。
+    pub fn is_alert_on(&self, pane_id: PaneId) -> bool {
+        match self.alerting_panes.get(&pane_id) {
+            Some(&count) if count > 0 => count % 2 == 0,
+            _ => false,
+        }
+    }
+
+    /// `WM_TIMER` 16ms ティックごとに呼ぶ。
+    ///
+    /// `ALERT_TICK_DIVISOR` ティックに 1 回フリップカウントをデクリメントし、
+    /// 0 になったペインを除去する。アラート中のペインが残っている間は `true` を返す。
+    pub fn tick_alert(&mut self) -> bool {
+        if self.alerting_panes.is_empty() {
+            self.alert_tick = 0;
+            return false;
+        }
+        self.alert_tick = self.alert_tick.wrapping_add(1);
+        if self.alert_tick.is_multiple_of(ALERT_TICK_DIVISOR) {
+            self.alerting_panes.retain(|_, count| {
+                *count = count.saturating_sub(1);
+                *count > 0
+            });
+        }
+        !self.alerting_panes.is_empty()
+    }
+
     pub fn push_save_prompt_history(&mut self, entry: String) {
         const HISTORY_LIMIT: usize = 20;
 
@@ -438,7 +493,7 @@ mod tests {
     use yatamux_protocol::types::PaneId;
     use yatamux_terminal::Grid;
 
-    use super::{CopyState, PaneStore, PromptState};
+    use super::{CopyState, PaneStore, PromptState, ALERT_FLIP_COUNT, ALERT_TICK_DIVISOR};
     use crate::layout::PaneRect;
 
     // TC-01: layout_changed は false で初期化される
@@ -637,5 +692,149 @@ mod tests {
         assert!(cs.is_selected(0, 4));
         assert!(cs.is_selected(8, 4));
         assert!(!cs.is_selected(9, 4));
+    }
+
+    fn make_store() -> PaneStore {
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        PaneStore::new(PaneId(1), grid)
+    }
+
+    // TC-C41-11: 初期状態で alerting_panes は空
+    #[test]
+    fn test_alert_initial_empty() {
+        let store = make_store();
+        assert!(store.alerting_panes.is_empty());
+        assert!(!store.is_alert_on(PaneId(1)));
+    }
+
+    // TC-C41-10: trigger_alert でペインが追加される
+    #[test]
+    fn test_trigger_alert_inserts_pane() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(2));
+        assert!(store.alerting_panes.contains_key(&PaneId(2)));
+        assert_eq!(store.alerting_panes[&PaneId(2)], ALERT_FLIP_COUNT);
+    }
+
+    // TC-C41-12: トリガー直後は is_alert_on が true
+    #[test]
+    fn test_is_alert_on_after_trigger() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        // ALERT_FLIP_COUNT=10 は偶数 → ON
+        assert!(store.is_alert_on(PaneId(1)));
+    }
+
+    // TC-C41-13: 登録されていないペインは false
+    #[test]
+    fn test_is_alert_on_unregistered_false() {
+        let store = make_store();
+        assert!(!store.is_alert_on(PaneId(99)));
+    }
+
+    // TC-C41-14: ALERT_TICK_DIVISOR 回 tick するとフリップ数が 1 減る
+    #[test]
+    fn test_tick_alert_decrements_flip_count() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        for _ in 0..ALERT_TICK_DIVISOR {
+            store.tick_alert();
+        }
+        assert_eq!(store.alerting_panes[&PaneId(1)], ALERT_FLIP_COUNT - 1);
+    }
+
+    // TC-C41-15: tick_alert はアラート中 true を返す
+    #[test]
+    fn test_tick_alert_returns_true_while_alerting() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        assert!(store.tick_alert());
+    }
+
+    // TC-C41-16: 全フリップ後に alerting_panes から除去される
+    #[test]
+    fn test_tick_alert_removes_pane_after_all_flips() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        let total_ticks = ALERT_TICK_DIVISOR as u32 * ALERT_FLIP_COUNT as u32;
+        for _ in 0..total_ticks {
+            store.tick_alert();
+        }
+        assert!(store.alerting_panes.is_empty());
+        assert!(!store.is_alert_on(PaneId(1)));
+    }
+
+    // TC-C41-17: 全フリップ完了後 tick_alert は false を返す
+    #[test]
+    fn test_tick_alert_returns_false_after_completion() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        let total_ticks = ALERT_TICK_DIVISOR as u32 * ALERT_FLIP_COUNT as u32;
+        for _ in 0..total_ticks {
+            store.tick_alert();
+        }
+        assert!(!store.tick_alert());
+    }
+
+    // TC-C41-18: ON/OFF フェーズが交互に切り替わる
+    #[test]
+    fn test_alert_phase_alternates() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        // 初期: count=10(偶数) → ON
+        assert!(store.is_alert_on(PaneId(1)));
+        // 1 フリップ後: count=9(奇数) → OFF
+        for _ in 0..ALERT_TICK_DIVISOR {
+            store.tick_alert();
+        }
+        assert!(!store.is_alert_on(PaneId(1)));
+        // 2 フリップ後: count=8(偶数) → ON
+        for _ in 0..ALERT_TICK_DIVISOR {
+            store.tick_alert();
+        }
+        assert!(store.is_alert_on(PaneId(1)));
+    }
+
+    // TC-C41-19: clear_alert でアラートが即座に解除される
+    #[test]
+    fn test_clear_alert_removes_pane() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        store.clear_alert(PaneId(1));
+        assert!(store.alerting_panes.is_empty());
+        assert!(!store.is_alert_on(PaneId(1)));
+    }
+
+    // TC-C41-20: 複数ペインを同時にアラートできる
+    #[test]
+    fn test_multiple_panes_alerting() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        store.trigger_alert(PaneId(2));
+        assert!(store.is_alert_on(PaneId(1)));
+        assert!(store.is_alert_on(PaneId(2)));
+    }
+
+    // TC-C41-21: clear_alert は存在しないペインにパニックしない
+    #[test]
+    fn test_clear_alert_nonexistent_no_panic() {
+        let mut store = make_store();
+        store.clear_alert(PaneId(99)); // パニックしないこと
+    }
+
+    // TC-C41-22: trigger_alert 再トリガーでフリップ数がリセットされる
+    #[test]
+    fn test_retrigger_resets_flip_count() {
+        let mut store = make_store();
+        store.trigger_alert(PaneId(1));
+        // 数フリップ進める
+        for _ in 0..(ALERT_TICK_DIVISOR as u32 * 3) {
+            store.tick_alert();
+        }
+        let count_mid = store.alerting_panes[&PaneId(1)];
+        assert!(count_mid < ALERT_FLIP_COUNT);
+        // 再トリガー
+        store.trigger_alert(PaneId(1));
+        assert_eq!(store.alerting_panes[&PaneId(1)], ALERT_FLIP_COUNT);
     }
 }

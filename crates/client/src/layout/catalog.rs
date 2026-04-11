@@ -129,6 +129,7 @@ pub fn load_theme_from_file(name: &str) -> Option<Theme> {
         status_bar_bg: parse(&ap.status_bar_bg),
         font_family: None,
         font_size: None,
+        alert_border: None,
     })
 }
 

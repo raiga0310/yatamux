@@ -300,6 +300,16 @@ pub(super) unsafe fn handle_wm_timer(
             }
         }
 
+        // ── ペインアラート（ボーダー点滅）────────────────────────────────────
+        // アクティブペインのアラートを解除し、フリップカウントを進める。
+        // アラート中のペインが残っていれば再描画を要求する。
+        let has_alerting = {
+            let mut store = state.panes.lock().unwrap();
+            let active = store.active;
+            store.clear_alert(active);
+            store.tick_alert()
+        };
+
         // カーソル行を常に dirty に（永続バックバッファ上のカーソル描画を毎フレーム更新）
         {
             let store = state.panes.lock().unwrap();
@@ -394,7 +404,7 @@ pub(super) unsafe fn handle_wm_timer(
             dirty || state.ime.state.lock().unwrap().composing
         };
 
-        if needs_content_repaint || has_active_toasts {
+        if needs_content_repaint || has_active_toasts || has_alerting {
             let content_rect = RECT {
                 left: 0,
                 top: 0,

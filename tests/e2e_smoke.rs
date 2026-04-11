@@ -610,6 +610,35 @@ fn collect_snapshot_leaves(node: &LayoutNodeDef, out: &mut Vec<SnapshotLeaf>) {
     }
 }
 
+/// 指定ペインへの `ServerMessage::Notification` を IPC ストリームから待つ。
+///
+/// 他のメッセージはスキップし、`timeout` 以内に到着しなければパニックする。
+async fn wait_for_notification(
+    conn: &mut ServerConnection,
+    target_pane: PaneId,
+    timeout: Duration,
+) -> String {
+    tokio::time::timeout(timeout, async {
+        loop {
+            match conn.rx.recv().await {
+                Some(ServerMessage::Notification { pane, body }) if pane == target_pane => {
+                    return body;
+                }
+                Some(ServerMessage::Error { message }) => {
+                    panic!(
+                        "unexpected error while waiting for notification: {}",
+                        message
+                    )
+                }
+                Some(_) => continue,
+                None => panic!("connection closed before Notification arrived"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for Notification")
+}
+
 async fn wait_for_exec_result(
     conn: &mut ServerConnection,
     request_id: &str,
@@ -1293,4 +1322,139 @@ fn e2e_self_update_smoke_preserves_session_and_relaunches() {
     );
 
     harness.wait_for_ipc_unavailable(Duration::from_secs(20));
+}
+
+// ── C-41: 通知・アラート E2E ─────────────────────────────────────────────────
+
+/// バックグラウンドペインに BEL を送ると ServerMessage::Notification が届くことを確認する。
+///
+/// 検証内容:
+/// - IPC 経由で `ServerMessage::Notification { pane: bg, body: "Bell" }` が到着する
+/// - `notify_if_inactive` 経路（bg != active）が正しく通ること
+///
+/// Win32 アラートボーダーの点滅は視覚的 E2E であり、ここでは IPC 到達を検証する。
+#[test]
+#[ignore = "starts a real yatamux GUI process"]
+fn e2e_bel_on_background_pane_triggers_notification() {
+    let _guard = lock_e2e_tests();
+    let mut harness = AppHarness::new("yatamux-e2e-alert-bel");
+    harness.spawn();
+
+    // 起動待機 — initial pane が active (pane_store.active = root)
+    let root = harness.wait_for_pane_count(1)[0].id;
+
+    // IPC 分割で bg ペインを作成。IPC 起点では pane_store.active は変わらないため
+    // bg != active となり、BEL が notify_if_inactive を通過する。
+    let bg = harness.split_pane(&root.0.to_string(), SplitDirection::Vertical, None);
+    harness.wait_for_pane_count(2);
+    // bg ペインのシェルが起動するまで待つ（コマンドを受け付けられる状態にする）
+    harness.wait_for_shell_ready(&bg.0.to_string());
+
+    harness.block_on(async {
+        let mut conn = ServerConnection::connect(&harness.session)
+            .await
+            .expect("connect for alert BEL test");
+
+        // PowerShell で BEL (0x07) を PTY 出力に書き出す。
+        // ClientMessage::Input は PTY stdin に書くため、cmd.exe がコマンドとして実行し
+        // PowerShell が [char]7 を stdout に出力 → VtProcessor が BEL を検出する。
+        conn.tx
+            .send(ClientMessage::Input {
+                pane: bg,
+                data: b"powershell -nop -c \"[Console]::Write([char]7)\"\r".to_vec(),
+            })
+            .await
+            .expect("send BEL command to bg pane");
+
+        // Notification が IPC ストリームに流れることを確認
+        let body = wait_for_notification(&mut conn, bg, Duration::from_secs(10)).await;
+        assert_eq!(
+            body, "Bell",
+            "BEL should produce Notification with body 'Bell', got: {body:?}"
+        );
+    });
+}
+
+/// バックグラウンドペインでプロセスが終了すると Notification が届くことを確認する。
+///
+/// 検証内容:
+/// - `cmd /c exit` を bg ペインで実行し PTY が閉じる
+/// - `ServerMessage::Notification { pane: bg, body: "Process exited" }` が IPC 到達する
+#[test]
+#[ignore = "starts a real yatamux GUI process"]
+fn e2e_process_exit_on_background_pane_triggers_notification() {
+    let _guard = lock_e2e_tests();
+    let mut harness = AppHarness::new("yatamux-e2e-alert-exit");
+    harness.spawn();
+
+    let root = harness.wait_for_pane_count(1)[0].id;
+
+    // bg ペイン作成（root が active のまま）
+    let bg = harness.split_pane(&root.0.to_string(), SplitDirection::Vertical, None);
+    harness.wait_for_pane_count(2);
+    // bg ペインのシェルが起動するまで待つ
+    harness.wait_for_shell_ready(&bg.0.to_string());
+
+    harness.block_on(async {
+        let mut conn = ServerConnection::connect(&harness.session)
+            .await
+            .expect("connect for alert exit test");
+
+        // bg ペインのシェル（cmd.exe）を終了させる
+        conn.tx
+            .send(ClientMessage::Input {
+                pane: bg,
+                data: b"exit\r".to_vec(),
+            })
+            .await
+            .expect("send exit to bg pane");
+
+        // PTY 終了通知が IPC に流れることを確認
+        let body = wait_for_notification(&mut conn, bg, Duration::from_secs(15)).await;
+        assert_eq!(
+            body, "Process exited",
+            "PTY exit should produce Notification 'Process exited', got: {body:?}"
+        );
+    });
+}
+
+/// OSC 9 通知文字列を bg ペインに送ると Notification が届くことを確認する。
+///
+/// 検証内容:
+/// - OSC 9 は tmux 互換の即時通知トリガー
+/// - `\x1b]9;hello\x07` → `ServerMessage::Notification { body: "hello" }`
+#[test]
+#[ignore = "starts a real yatamux GUI process"]
+fn e2e_osc9_on_background_pane_triggers_notification() {
+    let _guard = lock_e2e_tests();
+    let mut harness = AppHarness::new("yatamux-e2e-alert-osc9");
+    harness.spawn();
+
+    let root = harness.wait_for_pane_count(1)[0].id;
+    let bg = harness.split_pane(&root.0.to_string(), SplitDirection::Vertical, None);
+    harness.wait_for_pane_count(2);
+    // bg ペインのシェルが起動するまで待つ
+    harness.wait_for_shell_ready(&bg.0.to_string());
+
+    harness.block_on(async {
+        let mut conn = ServerConnection::connect(&harness.session)
+            .await
+            .expect("connect for OSC 9 test");
+
+        // PowerShell で OSC 9 シーケンス（ESC ] 9 ; <body> BEL）を PTY 出力に書き出す。
+        // [string][char]27 = ESC、[string][char]7 = BEL をシングルクォート文字列と結合する。
+        conn.tx
+            .send(ClientMessage::Input {
+                pane: bg,
+                data: b"powershell -nop -c \"[Console]::Write([string][char]27+']9;e2e-osc9-test'+[string][char]7)\"\r".to_vec(),
+            })
+            .await
+            .expect("send OSC 9 command to bg pane");
+
+        let body = wait_for_notification(&mut conn, bg, Duration::from_secs(10)).await;
+        assert_eq!(
+            body, "e2e-osc9-test",
+            "OSC 9 should produce Notification with the message body, got: {body:?}"
+        );
+    });
 }
