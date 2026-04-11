@@ -116,6 +116,18 @@ pub enum ClientMessage {
 
     /// 全ペインで実際に動いている子プロセス名を問い合わせる
     QueryAllPaneProcesses,
+
+    /// IPC 接続確立直後に送るプロトコルハンドシェイク要求
+    ///
+    /// クライアントは接続後すぐにこのメッセージを送信する。
+    /// 旧サーバーは未知メッセージとして warn して継続（後方互換）。
+    Handshake {
+        /// クライアントのプロトコルバージョン
+        protocol_version: u32,
+        /// クライアントがサポートする capabilities
+        #[serde(default)]
+        capabilities: Vec<String>,
+    },
 }
 
 /// サーバー → クライアント メッセージ
@@ -219,6 +231,19 @@ pub enum ServerMessage {
         /// 各ペインの現在の作業ディレクトリ（None = 取得不可）
         #[serde(default)]
         cwds: HashMap<String, Option<String>>,
+    },
+
+    /// ClientMessage::Handshake への応答
+    ///
+    /// サーバーのプロトコルバージョンと capabilities を伝える。
+    HandshakeAccepted {
+        /// サーバーのプロトコルバージョン
+        protocol_version: u32,
+        /// サーバーがサポートする minimum client version
+        min_client_version: u32,
+        /// サーバーの capabilities
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
 }
 
