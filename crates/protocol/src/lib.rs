@@ -48,7 +48,8 @@ pub const SERVER_CAPABILITIES: &[&str] = &[
     "session_save",
 ];
 pub use types::{
-    CursorInfo, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId,
+    CiConclusion, CiRunInfo, CiRunStatus, CursorInfo, PaneCapture, PaneId, PaneInfo,
+    SplitDirection, SurfaceId, TermSize, WorkspaceId,
 };
 
 /// ワイヤーフォーマット golden fixture テスト

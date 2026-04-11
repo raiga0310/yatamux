@@ -121,6 +121,7 @@ fn attach_parent_console() {
 }
 
 mod app;
+mod ci;
 mod cli;
 mod config;
 mod layout_config;

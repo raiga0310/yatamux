@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use yatamux_protocol::types::PaneId;
+use yatamux_protocol::CiRunInfo;
 use yatamux_terminal::Grid;
 
 use super::{LauncherState, LayoutNode, PaneRect, ThemeLauncherState};
@@ -359,6 +360,9 @@ pub struct PaneStore {
     /// ニュースティッカー本文（RSS から取得した見出しを区切り文字で連結）
     /// 空文字列 = 未取得またはティッカー無効
     pub news_text: String,
+    /// CI ステータス（GitHub Actions ポーラーが定期更新）
+    /// `None` = CI 設定なし、または未取得
+    pub ci_status: Arc<Mutex<Option<CiRunInfo>>>,
 }
 
 impl PaneStore {
@@ -392,6 +396,7 @@ impl PaneStore {
             alert_tick: 0,
             hovered_url: None,
             news_text: String::new(),
+            ci_status: Arc::new(Mutex::new(None)),
         }
     }
 

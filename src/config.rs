@@ -44,6 +44,9 @@ pub struct AppConfig {
     /// ステータスバー設定
     #[serde(default)]
     pub status_bar: StatusBarConfig,
+    /// CI ステータス監視設定
+    #[serde(default)]
+    pub ci: CiConfig,
 }
 
 /// ステータスバー設定
@@ -117,6 +120,38 @@ pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
         Some((r, g, b))
     } else {
         None
+    }
+}
+
+/// CI ステータス監視設定
+///
+/// ```toml
+/// [ci]
+/// # 監視するリポジトリ（owner/repo 形式）
+/// repo = "raiga0310/yatamux"
+/// # GitHub Personal Access Token（省略時: 未認証、60 req/h の制限あり）
+/// # token = "ghp_xxxx"
+/// # ポーリング間隔（秒、デフォルト: 60）
+/// poll_interval_secs = 60
+/// # 監視するブランチ（省略時: デフォルトブランチの最新 run）
+/// # branch = "main"
+/// ```
+#[derive(Debug, Default, Deserialize)]
+pub struct CiConfig {
+    /// 監視リポジトリ（`"owner/repo"` 形式、省略時は CI 監視無効）
+    pub repo: Option<String>,
+    /// GitHub Personal Access Token（省略時: 未認証）
+    pub token: Option<String>,
+    /// ポーリング間隔（秒、デフォルト: 60）
+    #[serde(default = "CiConfig::default_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// 監視するブランチ（省略時: デフォルトブランチの最新 run）
+    pub branch: Option<String>,
+}
+
+impl CiConfig {
+    fn default_poll_interval() -> u64 {
+        60
     }
 }
 

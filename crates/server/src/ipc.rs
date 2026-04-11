@@ -193,7 +193,7 @@ fn should_forward_message(msg: &ServerMessage, subscriptions: &HashSet<PaneId>) 
     }
 
     match msg {
-        ServerMessage::ExecResult { .. } => true,
+        ServerMessage::ExecResult { .. } | ServerMessage::CiStatus { .. } => true,
         ServerMessage::Output { pane, .. }
         | ServerMessage::TitleChanged { pane, .. }
         | ServerMessage::Notification { pane, .. }

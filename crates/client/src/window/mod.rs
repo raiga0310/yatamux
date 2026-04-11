@@ -50,7 +50,7 @@ mod win32 {
         NOTIFYICONDATAW,
     };
     use yatamux_protocol::types::{PaneId, SplitDirection, TermSize};
-    use yatamux_protocol::ClientMessage;
+    use yatamux_protocol::{CiRunInfo, ClientMessage};
     use yatamux_terminal::cell::CellContent;
     use yatamux_terminal::{Cell, Grid};
 
@@ -182,6 +182,8 @@ mod win32 {
         pub news_scroll_px_per_tick: i32,
         /// PaneStore.news_text のキャッシュ（Win32 スレッド専用 — 毎フレームの lock を省く）
         news_text_cache: std::cell::RefCell<String>,
+        /// PaneStore.ci_status のキャッシュ（Win32 スレッド専用 — 毎フレームの lock を省く）
+        ci_status_cache: std::cell::RefCell<Option<CiRunInfo>>,
         /// CPU/RAM ポーリング間引きカウンタ（60 フレームごとに更新 ≈ 1 秒）
         sysinfo_tick: std::cell::Cell<u32>,
         /// ステータスバー領域が更新されたことを示すフラグ（WM_TIMER → paint で使用）
@@ -245,6 +247,7 @@ mod win32 {
                 news_scroll_px: std::cell::Cell::new(0),
                 news_scroll_px_per_tick,
                 news_text_cache: std::cell::RefCell::new(String::new()),
+                ci_status_cache: std::cell::RefCell::new(None),
                 sysinfo_tick: std::cell::Cell::new(0),
                 status_bar_dirty: std::cell::Cell::new(false),
                 cpu_usage: std::cell::Cell::new(0.0),
@@ -1246,8 +1249,21 @@ mod win32 {
         };
         let cpu = state.cpu_usage.get();
         let mem = state.mem_usage.get();
-        let right_text =
-            format_status_bar_right_text(&cwd_str, cpu, mem, state.app_version, active_idx, total);
+        let ci_label = state
+            .ci_status_cache
+            .borrow()
+            .as_ref()
+            .map(|ci| ci.status_label().to_string())
+            .unwrap_or_default();
+        let right_text = format_status_bar_right_text(
+            &cwd_str,
+            cpu,
+            mem,
+            &ci_label,
+            state.app_version,
+            active_idx,
+            total,
+        );
         let right_wide: Vec<u16> = right_text.encode_utf16().collect();
         let mut right_size = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &right_wide, &mut right_size);
@@ -1366,19 +1382,33 @@ mod win32 {
         cwd: &str,
         cpu: f32,
         mem: f32,
+        ci_label: &str,
         app_version: &str,
         active_idx: usize,
         total: usize,
     ) -> String {
-        format!(
-            " {} C:{} M:{} v{} pane {}/{} ",
-            truncate_path_middle(cwd, 30),
-            format_usage_percent(cpu),
-            format_usage_percent(mem),
-            app_version,
-            active_idx,
-            total,
-        )
+        if ci_label.is_empty() {
+            format!(
+                " {} C:{} M:{} v{} pane {}/{} ",
+                truncate_path_middle(cwd, 30),
+                format_usage_percent(cpu),
+                format_usage_percent(mem),
+                app_version,
+                active_idx,
+                total,
+            )
+        } else {
+            format!(
+                " {} C:{} M:{} {} v{} pane {}/{} ",
+                truncate_path_middle(cwd, 30),
+                format_usage_percent(cpu),
+                format_usage_percent(mem),
+                ci_label,
+                app_version,
+                active_idx,
+                total,
+            )
+        }
     }
 
     fn format_usage_percent(value: f32) -> String {
@@ -3053,12 +3083,20 @@ mod win32 {
                 "C:\\Users\\raiga\\dev\\yatamux",
                 12.4,
                 100.0,
+                "",
                 "0.1.14",
                 2,
                 3,
             );
             assert!(text.contains("C:12% M:100%"));
             assert!(text.contains("pane 2/3"));
+        }
+
+        #[test]
+        fn test_format_status_bar_right_text_shows_ci_label() {
+            let text = format_status_bar_right_text("C:\\dev", 0.0, 0.0, "CI✓", "0.1.0", 1, 1);
+            assert!(text.contains("CI✓"));
+            assert!(text.contains("pane 1/1"));
         }
 
         // ── B-7: スクロールオフセットのクランプ / リセット ──────────────────
