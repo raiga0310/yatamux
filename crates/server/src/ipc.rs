@@ -2,18 +2,26 @@
 //!
 //! 要件定義書 §5「IPC: Windows 名前付きパイプ」に対応。
 //! パイプ名: \\.\pipe\yatamux-{session_name}
+//!
+//! ## セキュリティ
+//! - Named Pipe の DACL を現在ユーザー SID に限定し、他ユーザーからの接続を拒否する
+//! - 受信メッセージは `MAX_MESSAGE_BYTES` 超でエラーを返して切断する
+//! - broadcast lagged 発生時はクライアントを切断し、黙って継続しない
 
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use yatamux_protocol::types::PaneId;
 use yatamux_protocol::{ClientMessage, ServerMessage};
 
 /// 名前付きパイプのベース名
 pub const PIPE_PREFIX: &str = r"\\.\pipe\yatamux-";
+
+/// 1 メッセージの最大サイズ（バイト）。超過したクライアントは切断する。
+const MAX_MESSAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 
 #[cfg(windows)]
 fn create_named_pipe_server(
@@ -22,8 +30,51 @@ fn create_named_pipe_server(
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe::ServerOptions;
     use windows::Win32::Security::{
-        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
-        SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+        AddAccessAllowedAce, GetLengthSid, GetTokenInformation, InitializeAcl,
+        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser, ACE_REVISION, ACL,
+        PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // ACL_REVISION = 2, GENERIC_ALL = 0x10000000
+    const GENERIC_ALL: u32 = 0x10000000;
+
+    // sizeof(ACL) = 8, sizeof(ACCESS_ALLOWED_ACE) = 12, - sizeof(DWORD) = 4
+    const ACE_OVERHEAD: u32 = 8 + 12 - 4; // = 16
+
+    // 現在ユーザーの SID を取得し、そのユーザーのみ許可する DACL を構築する
+    let (mut acl_buf, sid_buf) = unsafe {
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .context("OpenProcessToken failed")?;
+
+        // TOKEN_USER サイズを問い合わせ
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+        let mut sid_buf = vec![0u8; needed as usize];
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(sid_buf.as_mut_ptr() as *mut _),
+            needed,
+            &mut needed,
+        )
+        .context("GetTokenInformation failed")?;
+        let _ = windows::Win32::Foundation::CloseHandle(token);
+
+        let token_user = &*(sid_buf.as_ptr() as *const TOKEN_USER);
+        let sid = token_user.User.Sid;
+        let sid_len = GetLengthSid(sid);
+
+        // ACL バッファを確保して初期化
+        let acl_size = ACE_OVERHEAD + sid_len;
+        let mut acl_buf = vec![0u8; acl_size as usize];
+        let acl_ptr = acl_buf.as_mut_ptr() as *mut ACL;
+        InitializeAcl(acl_ptr, acl_size, ACE_REVISION(2)).context("InitializeAcl failed")?;
+        AddAccessAllowedAce(acl_ptr, ACE_REVISION(2), GENERIC_ALL, sid)
+            .context("AddAccessAllowedAce failed")?;
+
+        (acl_buf, sid_buf)
     };
 
     let mut security_descriptor = SECURITY_DESCRIPTOR::default();
@@ -31,10 +82,14 @@ fn create_named_pipe_server(
     unsafe {
         InitializeSecurityDescriptor(descriptor_ptr, 1)
             .context("Failed to initialize named pipe security descriptor")?;
-        // Allow local clients to open the pipe for duplex I/O. Remote clients are
-        // still rejected by the default ServerOptions policy.
-        SetSecurityDescriptorDacl(descriptor_ptr, true, None, false)
-            .context("Failed to configure named pipe security descriptor")?;
+        // 同一ユーザー SID のみ接続を許可する明示 DACL を設定する
+        SetSecurityDescriptorDacl(
+            descriptor_ptr,
+            true,
+            Some(acl_buf.as_mut_ptr() as *mut ACL),
+            false,
+        )
+        .context("Failed to configure named pipe security descriptor")?;
     }
 
     let mut attrs = SECURITY_ATTRIBUTES {
@@ -43,11 +98,20 @@ fn create_named_pipe_server(
         bInheritHandle: false.into(),
     };
 
+    // acl_buf / sid_buf は create_with_security_attributes_raw が完了するまで有効でなければならない
     let mut options = ServerOptions::new();
     options.first_pipe_instance(first_pipe_instance);
 
-    unsafe { options.create_with_security_attributes_raw(pipe_name, &mut attrs as *mut _ as _) }
-        .with_context(|| format!("Failed to create named pipe: {}", pipe_name))
+    let result = unsafe {
+        options.create_with_security_attributes_raw(pipe_name, &mut attrs as *mut _ as _)
+    }
+    .with_context(|| format!("Failed to create named pipe: {}", pipe_name));
+
+    // バッファを明示的に保持（コンパイラに最適化で drop させない）
+    drop(acl_buf);
+    drop(sid_buf);
+
+    result
 }
 
 /// IPC サーバーを起動し、クライアント接続を受け付ける
@@ -167,6 +231,24 @@ async fn handle_client(
             result = lines.next_line() => {
                 match result {
                     Ok(Some(line)) => {
+                        // メッセージサイズ上限チェック（DoS 防止）
+                        if line.len() > MAX_MESSAGE_BYTES {
+                            error!(
+                                "IPC: oversized message ({} bytes, limit {} bytes); disconnecting client",
+                                line.len(),
+                                MAX_MESSAGE_BYTES,
+                            );
+                            let err_msg = ServerMessage::Error {
+                                message: format!(
+                                    "message too large ({} bytes); limit is {} bytes",
+                                    line.len(),
+                                    MAX_MESSAGE_BYTES,
+                                ),
+                            };
+                            let _ = write_server_message(&mut writer, &err_msg).await;
+                            break;
+                        }
+
                         match serde_json::from_str::<ClientMessage>(&line) {
                             Ok(msg) => {
                                 debug!("IPC recv: {:?}", msg);
@@ -200,18 +282,16 @@ async fn handle_client(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("IPC broadcast lagged by {} messages", n);
-                        if !subscriptions.is_empty() {
-                            let lag_msg = ServerMessage::Error {
-                                message: format!(
-                                    "subscription lagged by {} messages; stream output may be incomplete",
-                                    n
-                                ),
-                            };
-                            if write_server_message(&mut writer, &lag_msg).await.is_err() {
-                                break;
-                            }
-                        }
+                        // lagged 発生時はエラーを送信した後に切断する（黙って継続しない）
+                        error!("IPC broadcast lagged by {} messages; disconnecting client", n);
+                        let lag_msg = ServerMessage::Error {
+                            message: format!(
+                                "subscription lagged by {} messages; reconnect and use capture-pane --json to resync",
+                                n
+                            ),
+                        };
+                        let _ = write_server_message(&mut writer, &lag_msg).await;
+                        break;
                     }
                     Err(_) => break,
                 }
