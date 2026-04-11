@@ -57,12 +57,24 @@ pub enum ClientMessage {
     /// IPC クライアントに対して、指定ペインのストリームイベント購読を開始する
     ///
     /// 既存の in-process サーバー処理では no-op で、IPC 層が解釈する。
-    SubscribePane { pane: PaneId },
+    /// `request_id` を指定すると `ServerMessage::SubscribeAccepted` で確認応答を受け取れる。
+    SubscribePane {
+        pane: PaneId,
+        /// 任意のリクエスト ID（指定時は `SubscribeAccepted` で確認応答）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 
     /// IPC クライアントに対して、指定ペインのストリームイベント購読を解除する
     ///
     /// 既存の in-process サーバー処理では no-op で、IPC 層が解釈する。
-    UnsubscribePane { pane: PaneId },
+    /// `request_id` を指定すると `ServerMessage::UnsubscribeAccepted` で確認応答を受け取れる。
+    UnsubscribePane {
+        pane: PaneId,
+        /// 任意のリクエスト ID（指定時は `UnsubscribeAccepted` で確認応答）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 
     /// ペインをリサイズ
     Resize { pane: PaneId, size: TermSize },
@@ -239,6 +251,17 @@ pub enum ServerMessage {
         cwds: HashMap<String, Option<String>>,
     },
 
+    /// SubscribePane への確認応答
+    ///
+    /// `SubscribePane` に `request_id` が含まれていた場合に返される。
+    /// エージェントは `request_id` を照合して購読の開始を確認できる。
+    SubscribeAccepted { request_id: String, pane: PaneId },
+
+    /// UnsubscribePane への確認応答
+    ///
+    /// `UnsubscribePane` に `request_id` が含まれていた場合に返される。
+    UnsubscribeAccepted { request_id: String, pane: PaneId },
+
     /// ClientMessage::Handshake への応答
     ///
     /// サーバーのプロトコルバージョンと capabilities を伝える。
@@ -412,12 +435,13 @@ mod tests {
     fn test_subscribe_pane_roundtrip() {
         let msg = ClientMessage::SubscribePane {
             pane: crate::types::PaneId(12),
+            request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
         let restored: ClientMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         match restored {
-            ClientMessage::SubscribePane { pane } => {
+            ClientMessage::SubscribePane { pane, .. } => {
                 assert_eq!(pane, crate::types::PaneId(12));
             }
             _ => panic!("期待する variant でない"),
@@ -428,12 +452,13 @@ mod tests {
     fn test_unsubscribe_pane_roundtrip() {
         let msg = ClientMessage::UnsubscribePane {
             pane: crate::types::PaneId(13),
+            request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
         let restored: ClientMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         match restored {
-            ClientMessage::UnsubscribePane { pane } => {
+            ClientMessage::UnsubscribePane { pane, .. } => {
                 assert_eq!(pane, crate::types::PaneId(13));
             }
             _ => panic!("期待する variant でない"),

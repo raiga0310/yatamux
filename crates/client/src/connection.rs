@@ -103,7 +103,8 @@ impl ServerConnection {
             });
 
             // パイプ読み取り → サーバーメッセージチャネルタスク
-            // HandshakeAccepted はプロトコル層で処理済みのため上位に転送しない
+            // HandshakeAccepted はプロトコル層で処理済みのため上位に転送しない。
+            // SubscribeAccepted / UnsubscribeAccepted は IPC 確認応答として上位に転送する。
             tokio::spawn(async move {
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {

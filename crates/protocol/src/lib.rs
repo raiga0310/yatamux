@@ -122,15 +122,21 @@ mod golden {
 
     #[test]
     fn golden_subscribe_pane() {
-        let json =
-            serde_json::to_string(&ClientMessage::SubscribePane { pane: PaneId(7) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::SubscribePane {
+            pane: PaneId(7),
+            request_id: None,
+        })
+        .unwrap();
         assert_eq!(json, r#"{"type":"subscribe_pane","pane":7}"#);
     }
 
     #[test]
     fn golden_unsubscribe_pane() {
-        let json =
-            serde_json::to_string(&ClientMessage::UnsubscribePane { pane: PaneId(7) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::UnsubscribePane {
+            pane: PaneId(7),
+            request_id: None,
+        })
+        .unwrap();
         assert_eq!(json, r#"{"type":"unsubscribe_pane","pane":7}"#);
     }
 
@@ -357,6 +363,45 @@ mod golden {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"pane_meta_updated","pane":1}"#);
+    }
+
+    #[test]
+    fn golden_subscribe_accepted() {
+        let msg = ServerMessage::SubscribeAccepted {
+            request_id: "sub-1".to_string(),
+            pane: PaneId(3),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe_accepted","request_id":"sub-1","pane":3}"#
+        );
+    }
+
+    #[test]
+    fn golden_unsubscribe_accepted() {
+        let msg = ServerMessage::UnsubscribeAccepted {
+            request_id: "unsub-1".to_string(),
+            pane: PaneId(3),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"unsubscribe_accepted","request_id":"unsub-1","pane":3}"#
+        );
+    }
+
+    #[test]
+    fn golden_subscribe_pane_with_request_id() {
+        let json = serde_json::to_string(&ClientMessage::SubscribePane {
+            pane: PaneId(7),
+            request_id: Some("sub-42".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe_pane","pane":7,"request_id":"sub-42"}"#
+        );
     }
 
     #[test]

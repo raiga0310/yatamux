@@ -695,7 +695,10 @@ pub async fn subscribe_pane(session: &str, selector: &str, json: bool) -> Result
     let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::SubscribePane { pane: pane.id })
+        .send(ClientMessage::SubscribePane {
+            pane: pane.id,
+            request_id: None,
+        })
         .await?;
 
     loop {

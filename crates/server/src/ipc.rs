@@ -294,11 +294,31 @@ async fn handle_client(
                                             break;
                                         }
                                     }
-                                    ClientMessage::SubscribePane { pane } => {
+                                    ClientMessage::SubscribePane { pane, request_id } => {
                                         subscriptions.insert(pane);
+                                        if let Some(id) = request_id {
+                                            let ack = ServerMessage::SubscribeAccepted {
+                                                request_id: id,
+                                                pane,
+                                            };
+                                            if write_server_message(&mut writer, &ack).await.is_err() {
+                                                debug!("IPC: pipe write error sending SubscribeAccepted; disconnecting client");
+                                                break;
+                                            }
+                                        }
                                     }
-                                    ClientMessage::UnsubscribePane { pane } => {
+                                    ClientMessage::UnsubscribePane { pane, request_id } => {
                                         subscriptions.remove(&pane);
+                                        if let Some(id) = request_id {
+                                            let ack = ServerMessage::UnsubscribeAccepted {
+                                                request_id: id,
+                                                pane,
+                                            };
+                                            if write_server_message(&mut writer, &ack).await.is_err() {
+                                                debug!("IPC: pipe write error sending UnsubscribeAccepted; disconnecting client");
+                                                break;
+                                            }
+                                        }
                                     }
                                     other => {
                                         if server_tx.send(other).await.is_err() {
