@@ -457,10 +457,10 @@ IPC ハードニングと protocol 固定化に合わせて、使い方の一枚
 
 #### サブタスク
 
-- [ ] README か `docs/agent-operations.md` に、`list-panes --json` → `exec` / `send-keys` → `subscribe-pane --json` → `lagged` → `capture-pane --json` の標準監視フローをまとめる
-- [ ] Named Pipe IPC の信頼境界、想定するローカル脅威モデル、`C-41` 後の推奨設定を 1 か所に整理する
-- [ ] CJK 幅計算、IME、ZWJ 絵文字など「意図的な制限がある表示領域」を README / docs に明文化する
-- [ ] `config.toml` / `session.toml` / layouts / themes の保存場所と優先順位を、運用・トラブルシュート観点で整理する
+- [x] README か `docs/agent-operations.md` に、`list-panes --json` → `exec` / `send-keys` → `subscribe-pane --json` → `lagged` → `capture-pane --json` の標準監視フローをまとめる
+- [x] Named Pipe IPC の信頼境界、想定するローカル脅威モデル、`C-41` 後の推奨設定を 1 か所に整理する（`docs/agent-operations.md`）
+- [x] CJK 幅計算、IME、ZWJ 絵文字など「意図的な制限がある表示領域」を README / docs に明文化する（`docs/agent-operations.md`）
+- [x] `config.toml` / `session.toml` / layouts / themes の保存場所と優先順位を、運用・トラブルシュート観点で整理する（`docs/agent-operations.md`）
 
 ### ~~D-1: `docs/test-plan-*` と実装済み自動テストの同期~~ ✅ 対応済み 【優先度: 中】
 
