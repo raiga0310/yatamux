@@ -66,6 +66,8 @@ impl Server {
                 Ok(())
             }
             ClientMessage::QueryAllPaneProcesses => self.handle_query_all_pane_processes().await,
+            // Handshake は IPC 層で処理済みのため、ここには到達しない
+            ClientMessage::Handshake { .. } => Ok(()),
         }
     }
 

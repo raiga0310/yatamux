@@ -315,7 +315,7 @@ pub(super) unsafe fn handle_wm_timer(
         // ── sysinfo（CPU/RAM）は 60 フレームごと（≈1秒）に更新 ───────────────
         let tick = state.sysinfo_tick.get().wrapping_add(1);
         state.sysinfo_tick.set(tick);
-        let sysinfo_updated = tick % 60 == 0;
+        let sysinfo_updated = tick.is_multiple_of(60);
         if sysinfo_updated {
             // CPU 使用率（GetSystemTimes デルタ）
             let mut idle = windows::Win32::Foundation::FILETIME::default();
@@ -365,7 +365,9 @@ pub(super) unsafe fn handle_wm_timer(
             state.news_scroll_px_per_tick > 0 && !state.news_text_cache.borrow().is_empty();
         if ticker_active {
             let cur = state.news_scroll_px.get();
-            state.news_scroll_px.set(cur + state.news_scroll_px_per_tick);
+            state
+                .news_scroll_px
+                .set(cur + state.news_scroll_px_per_tick);
         }
 
         // ── ステータスバーの dirty 判定 ──────────────────────────────────────
@@ -393,11 +395,21 @@ pub(super) unsafe fn handle_wm_timer(
         };
 
         if needs_content_repaint || has_active_toasts {
-            let content_rect = RECT { left: 0, top: 0, right: win_w, bottom: bar_y.max(0) };
+            let content_rect = RECT {
+                left: 0,
+                top: 0,
+                right: win_w,
+                bottom: bar_y.max(0),
+            };
             let _ = InvalidateRect(Some(hwnd), Some(&content_rect), false);
         }
         if status_dirty || has_active_toasts {
-            let sb_rect = RECT { left: 0, top: bar_y.max(0), right: win_w, bottom: win_h };
+            let sb_rect = RECT {
+                left: 0,
+                top: bar_y.max(0),
+                right: win_w,
+                bottom: win_h,
+            };
             let _ = InvalidateRect(Some(hwnd), Some(&sb_rect), false);
         }
     }

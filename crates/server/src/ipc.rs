@@ -10,7 +10,9 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use yatamux_protocol::types::PaneId;
-use yatamux_protocol::{ClientMessage, ServerMessage};
+use yatamux_protocol::{
+    ClientMessage, ServerMessage, MIN_CLIENT_VERSION, PROTOCOL_VERSION, SERVER_CAPABILITIES,
+};
 
 /// 名前付きパイプのベース名
 pub const PIPE_PREFIX: &str = r"\\.\pipe\yatamux-";
@@ -171,6 +173,44 @@ async fn handle_client(
                             Ok(msg) => {
                                 debug!("IPC recv: {:?}", msg);
                                 match msg {
+                                    ClientMessage::Handshake {
+                                        protocol_version,
+                                        capabilities,
+                                    } => {
+                                        if protocol_version < MIN_CLIENT_VERSION {
+                                            warn!(
+                                                "IPC: client protocol version {} is below minimum {}; disconnecting",
+                                                protocol_version, MIN_CLIENT_VERSION,
+                                            );
+                                            let err_msg = ServerMessage::Error {
+                                                message: format!(
+                                                    "client protocol version {} is not supported (minimum: {}); please upgrade yatamux",
+                                                    protocol_version, MIN_CLIENT_VERSION,
+                                                ),
+                                            };
+                                            let _ =
+                                                write_server_message(&mut writer, &err_msg).await;
+                                            break;
+                                        }
+                                        info!(
+                                            "IPC: handshake from client v{}, capabilities: {:?}",
+                                            protocol_version, capabilities
+                                        );
+                                        let accepted = ServerMessage::HandshakeAccepted {
+                                            protocol_version: PROTOCOL_VERSION,
+                                            min_client_version: MIN_CLIENT_VERSION,
+                                            capabilities: SERVER_CAPABILITIES
+                                                .iter()
+                                                .map(|s| s.to_string())
+                                                .collect(),
+                                        };
+                                        if write_server_message(&mut writer, &accepted)
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
                                     ClientMessage::SubscribePane { pane } => {
                                         subscriptions.insert(pane);
                                     }

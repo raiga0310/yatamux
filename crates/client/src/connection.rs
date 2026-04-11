@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
-use yatamux_protocol::{ClientMessage, ServerMessage};
+use yatamux_protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION, SERVER_CAPABILITIES};
 
 pub struct ServerConnection {
     pub tx: mpsc::Sender<ClientMessage>,
@@ -75,6 +75,18 @@ impl ServerConnection {
             let (reader, mut writer) = tokio::io::split(pipe);
             let mut lines = BufReader::new(reader).lines();
 
+            // 接続直後にプロトコルハンドシェイクを送信する
+            // 旧サーバーは未知メッセージとして warn して継続（後方互換）
+            let handshake = ClientMessage::Handshake {
+                protocol_version: PROTOCOL_VERSION,
+                capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+            };
+            if let Ok(json) = serde_json::to_string(&handshake) {
+                let line = format!("{}\n", json);
+                // 送信失敗は致命的ではないので無視する（旧サーバーとの互換維持）
+                let _ = writer.write_all(line.as_bytes()).await;
+            }
+
             let (client_tx, mut client_rx) = mpsc::channel::<ClientMessage>(64);
             let (server_tx, server_rx) = mpsc::channel::<ServerMessage>(64);
 
@@ -91,9 +103,13 @@ impl ServerConnection {
             });
 
             // パイプ読み取り → サーバーメッセージチャネルタスク
+            // HandshakeAccepted はプロトコル層で処理済みのため上位に転送しない
             tokio::spawn(async move {
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {
+                        if matches!(msg, ServerMessage::HandshakeAccepted { .. }) {
+                            continue;
+                        }
                         if server_tx.send(msg).await.is_err() {
                             break;
                         }

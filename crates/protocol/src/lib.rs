@@ -32,6 +32,21 @@ pub mod message;
 pub mod types;
 
 pub use message::{ClientMessage, ServerMessage};
+
+/// 現在のプロトコルバージョン（サーバー側）
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// サーバーが受け入れる最小クライアントバージョン
+pub const MIN_CLIENT_VERSION: u32 = 1;
+
+/// サーバーが宣言する capabilities
+pub const SERVER_CAPABILITIES: &[&str] = &[
+    "subscribe_pane",
+    "exec",
+    "capture_pane",
+    "alias_role",
+    "session_save",
+];
 pub use types::{
     CursorInfo, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId, TermSize, WorkspaceId,
 };
@@ -83,6 +98,8 @@ mod tests {
             last_output_unix_ms: Some(1_744_000_000_000),
             active: true,
             floating: false,
+            alias: None,
+            role: None,
         };
         assert_eq!(info.id, PaneId(3));
         assert_eq!(info.cols, 120);
