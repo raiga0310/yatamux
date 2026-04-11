@@ -371,6 +371,16 @@ pub(super) unsafe fn handle_wm_timer(
             let new_text = state.panes.lock().unwrap().news_text.clone();
             *state.news_text_cache.borrow_mut() = new_text;
         }
+
+        // ── CI ステータス同期 ─────────────────────────────────────────────────
+        {
+            let ci_arc = {
+                let store = state.panes.lock().unwrap();
+                std::sync::Arc::clone(&store.ci_status)
+            };
+            let new_ci = ci_arc.lock().unwrap().clone();
+            *state.ci_status_cache.borrow_mut() = new_ci;
+        }
         let ticker_active =
             state.news_scroll_px_per_tick > 0 && !state.news_text_cache.borrow().is_empty();
         if ticker_active {

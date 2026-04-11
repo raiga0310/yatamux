@@ -1,6 +1,6 @@
 use crate::types::{
-    ExecStatus, ExecWaitCondition, PaneCapture, PaneId, PaneInfo, SplitDirection, SurfaceId,
-    TermSize, WorkspaceId,
+    CiRunInfo, ExecStatus, ExecWaitCondition, PaneCapture, PaneId, PaneInfo, SplitDirection,
+    SurfaceId, TermSize, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -128,6 +128,12 @@ pub enum ClientMessage {
         #[serde(default)]
         capabilities: Vec<String>,
     },
+
+    /// 現在の CI ステータスを問い合わせる
+    ///
+    /// サーバーは最後に取得した `CiRunInfo` を `ServerMessage::CiStatus` で返す。
+    /// CI 設定がない場合は `ServerMessage::CiStatus { info: None }` が返る。
+    QueryCiStatus,
 }
 
 /// サーバー → クライアント メッセージ
@@ -244,6 +250,17 @@ pub enum ServerMessage {
         /// サーバーの capabilities
         #[serde(default)]
         capabilities: Vec<String>,
+    },
+
+    /// CI ステータス通知
+    ///
+    /// - `QueryCiStatus` への応答として送られる
+    /// - CI ポーラーがステータスを更新するたびにブロードキャストされる
+    ///
+    /// `info` が `None` の場合は CI 設定なし、またはまだ取得前。
+    CiStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        info: Option<CiRunInfo>,
     },
 }
 

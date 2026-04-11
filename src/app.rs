@@ -60,6 +60,7 @@ use crate::app::{
     },
     layout_restore::load_initial_layout,
 };
+use crate::ci::run_ci_poller;
 use crate::config::{parse_hex_color, AppConfig, AppearanceConfig};
 
 /// `AppearanceConfig` から `Theme` を構築する
@@ -183,6 +184,7 @@ pub async fn run(
 
     let hooks = app_config.hooks;
     let theme = build_theme(&app_config.appearance);
+    let ci_ipc_tx = ipc_out_tx.clone();
     let bridge_rx = spawn_bridge_fanout(server_rx, ipc_out_tx);
     let state_sync_tx = client_tx.clone();
     spawn_server_bridge(
@@ -218,6 +220,12 @@ pub async fn run(
                 tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
             }
         });
+    }
+
+    // ── CI ステータスポーラー ─────────────────────────────────────────────
+    {
+        let ci_state = Arc::clone(&pane_store.lock().unwrap().ci_status);
+        tokio::spawn(run_ci_poller(app_config.ci, ci_state, ci_ipc_tx));
     }
 
     // ── Win32 ウィンドウ（spawn_blocking でメッセージループ実行）────────

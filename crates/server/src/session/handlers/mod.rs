@@ -68,6 +68,9 @@ impl Server {
             ClientMessage::QueryAllPaneProcesses => self.handle_query_all_pane_processes().await,
             // Handshake は IPC 層で処理済みのため、ここには到達しない
             ClientMessage::Handshake { .. } => Ok(()),
+            // QueryCiStatus は app.rs の CI ポーラーが処理する（broadcast 経由）
+            // サーバー側では何もしない
+            ClientMessage::QueryCiStatus => Ok(()),
         }
     }
 

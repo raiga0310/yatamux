@@ -73,6 +73,81 @@ pub struct PaneCapture {
     pub scrollback_tail: Vec<String>,
 }
 
+/// GitHub Actions CI ランの状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiConclusion {
+    /// 成功
+    Success,
+    /// 失敗
+    Failure,
+    /// キャンセル
+    Cancelled,
+    /// スキップ
+    Skipped,
+    /// 不明 / 未対応の値
+    Unknown,
+}
+
+/// GitHub Actions CI ランの進行状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiRunStatus {
+    /// キュー待ち / 開始待ち
+    Queued,
+    /// 実行中
+    InProgress,
+    /// 完了（conclusion を参照）
+    Completed,
+}
+
+/// GitHub Actions の最新ワークフローラン情報
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiRunInfo {
+    /// リポジトリ（owner/repo）
+    pub repo: String,
+    /// ワークフロー名
+    pub name: String,
+    /// ランの進行状態
+    pub status: CiRunStatus,
+    /// 完了時の結果（実行中は None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<CiConclusion>,
+    /// ブランチ名
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// コミット SHA（先頭 7 文字）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    /// GitHub の run URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html_url: Option<String>,
+    /// 最終更新時刻（ISO 8601）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+impl CiRunInfo {
+    /// ステータスバー表示用の短い文字列を返す
+    ///
+    /// - 実行中: `CI⟳`
+    /// - 成功: `CI✓`
+    /// - 失敗: `CI✗`
+    /// - キャンセル: `CI○`
+    /// - その他: `CI?`
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            CiRunStatus::Queued | CiRunStatus::InProgress => "CI⟳",
+            CiRunStatus::Completed => match self.conclusion {
+                Some(CiConclusion::Success) | Some(CiConclusion::Skipped) => "CI✓",
+                Some(CiConclusion::Failure) => "CI✗",
+                Some(CiConclusion::Cancelled) => "CI○",
+                _ => "CI?",
+            },
+        }
+    }
+}
+
 /// `exec` リクエストで使う待機条件
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
