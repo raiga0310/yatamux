@@ -625,7 +625,10 @@ async fn wait_for_notification(
                     return body;
                 }
                 Some(ServerMessage::Error { message }) => {
-                    panic!("unexpected error while waiting for notification: {}", message)
+                    panic!(
+                        "unexpected error while waiting for notification: {}",
+                        message
+                    )
                 }
                 Some(_) => continue,
                 None => panic!("connection closed before Notification arrived"),

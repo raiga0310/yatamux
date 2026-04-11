@@ -1246,8 +1246,12 @@ pub async fn source_config(path: &str) -> anyhow::Result<()> {
 
     // 親ディレクトリを作成
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("設定ディレクトリを作成できませんでした: {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "設定ディレクトリを作成できませんでした: {}",
+                parent.display()
+            )
+        })?;
     }
 
     // 既存 config.toml があればバックアップ

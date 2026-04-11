@@ -160,10 +160,8 @@ pub async fn run(
     let app_focused = Arc::new(AtomicBool::new(true));
     let (focus_backend, native_notif_queue) =
         FocusAwareBackend::new(Arc::clone(&app_focused), Arc::clone(&pane_store));
-    let notif_backend: Arc<dyn NotificationBackend> = Arc::new(AlertingBackend::new(
-        Arc::clone(&pane_store),
-        focus_backend,
-    ));
+    let notif_backend: Arc<dyn NotificationBackend> =
+        Arc::new(AlertingBackend::new(Arc::clone(&pane_store), focus_backend));
 
     // ── 入力・リサイズ チャネル（Window → Server）───────────────────────
     let (msg_tx, mut msg_rx) = mpsc::channel::<ClientMessage>(64);

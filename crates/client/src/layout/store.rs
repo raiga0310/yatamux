@@ -456,7 +456,7 @@ impl PaneStore {
             return false;
         }
         self.alert_tick = self.alert_tick.wrapping_add(1);
-        if self.alert_tick % ALERT_TICK_DIVISOR == 0 {
+        if self.alert_tick.is_multiple_of(ALERT_TICK_DIVISOR) {
             self.alerting_panes.retain(|_, count| {
                 *count = count.saturating_sub(1);
                 *count > 0
