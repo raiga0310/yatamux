@@ -290,6 +290,7 @@ async fn handle_client(
                                             .await
                                             .is_err()
                                         {
+                                            debug!("IPC: pipe write error sending HandshakeAccepted; disconnecting client");
                                             break;
                                         }
                                     }
@@ -301,15 +302,26 @@ async fn handle_client(
                                     }
                                     other => {
                                         if server_tx.send(other).await.is_err() {
+                                            // サーバーチャネルが閉じている（Server が停止した）
+                                            info!("IPC: server channel closed; disconnecting client");
                                             break;
                                         }
                                     }
                                 }
                             }
-                            Err(e) => warn!("Failed to parse client message: {}", e),
+                            Err(e) => warn!("IPC: failed to parse client message: {}", e),
                         }
                     }
-                    _ => break,
+                    Ok(None) => {
+                        // クライアントが接続を正常に閉じた
+                        debug!("IPC: client closed connection (EOF)");
+                        break;
+                    }
+                    Err(e) => {
+                        // パイプ IO エラー（クライアントが異常切断した場合など）
+                        debug!("IPC: pipe read error; disconnecting client: {}", e);
+                        break;
+                    }
                 }
             }
             result = bcast_rx.recv() => {
@@ -318,6 +330,7 @@ async fn handle_client(
                         if should_forward_message(&msg, &subscriptions)
                             && write_server_message(&mut writer, &msg).await.is_err()
                         {
+                            debug!("IPC: pipe write error; disconnecting client");
                             break;
                         }
                     }
@@ -333,13 +346,17 @@ async fn handle_client(
                         let _ = write_server_message(&mut writer, &lag_msg).await;
                         break;
                     }
-                    Err(_) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // サーバーの broadcast チャネルが閉じた（Server 停止）
+                        info!("IPC: broadcast channel closed; disconnecting client");
+                        break;
+                    }
                 }
             }
         }
     }
 
-    info!("Client disconnected");
+    info!("IPC: client disconnected");
 }
 
 #[cfg(all(test, windows))]
