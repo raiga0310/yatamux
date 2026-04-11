@@ -33,6 +33,10 @@ fn build_command(exe: &Path, appdata: &Path, session: &str) -> Command {
         .arg("--session")
         .arg(session)
         .env("APPDATA", appdata)
+        // ペイン内でテストを実行しても YATAMUX=1 を引き継がないようにする。
+        // is_running_inside_yatamux() が true になると update のフォールバックパスが
+        // 封じられてテストが誤って失敗するため、ここで明示的に除去する。
+        .env_remove("YATAMUX")
         .creation_flags(CREATE_NO_WINDOW);
     command
 }

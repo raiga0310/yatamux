@@ -135,7 +135,10 @@ pub const DEFAULT_SESSION: &str = "default";
 #[command(name = "yatamux", version, about)]
 struct Cli {
     /// 対象セッション名（IPC パイプ名のサフィックス）
-    #[arg(long, default_value = DEFAULT_SESSION, global = true, hide = true)]
+    ///
+    /// 省略時は `YATAMUX_SESSION` 環境変数を参照し、それも未設定なら "default" を使用する。
+    /// ペイン内から CLI サブコマンドを実行する際に自動で正しいセッションへ接続できる。
+    #[arg(long, env = "YATAMUX_SESSION", default_value = DEFAULT_SESSION, global = true, hide = true)]
     session: String,
 
     /// 起動時に適用するレイアウト名（%APPDATA%\yatamux\layouts\<NAME>.toml）
