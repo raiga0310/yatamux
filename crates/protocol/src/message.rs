@@ -80,13 +80,34 @@ pub enum ClientMessage {
     Resize { pane: PaneId, size: TermSize },
 
     /// ペインを閉じる
-    ClosePane { pane: PaneId },
+    ///
+    /// `request_id` を指定すると `ServerMessage::ControlAccepted` で受理確認を受け取れる。
+    ClosePane {
+        pane: PaneId,
+        /// 任意のリクエスト ID（指定時は `ControlAccepted` で確認応答）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 
     /// ペインに Ctrl+C を送って割り込む
-    InterruptPane { pane: PaneId },
+    ///
+    /// `request_id` を指定すると `ServerMessage::ControlAccepted` で受理確認を受け取れる。
+    InterruptPane {
+        pane: PaneId,
+        /// 任意のリクエスト ID（指定時は `ControlAccepted` で確認応答）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 
     /// ペインの子プロセスを強制終了する
-    TerminatePane { pane: PaneId },
+    ///
+    /// `request_id` を指定すると `ServerMessage::ControlAccepted` で受理確認を受け取れる。
+    TerminatePane {
+        pane: PaneId,
+        /// 任意のリクエスト ID（指定時は `ControlAccepted` で確認応答）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 
     /// ペインの alias / role メタデータを更新する
     SetPaneMeta {
@@ -139,6 +160,12 @@ pub enum ClientMessage {
         /// クライアントがサポートする capabilities
         #[serde(default)]
         capabilities: Vec<String>,
+        /// 認証トークン（`%APPDATA%\yatamux\{session}.token` から読み込む）
+        ///
+        /// サーバーが `require_auth = true` のとき、このトークンが一致しない場合は拒否される。
+        /// 省略すると旧クライアント扱いとなり、`require_auth = false` のときのみ接続できる。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
 
     /// 現在の CI ステータスを問い合わせる
@@ -215,7 +242,14 @@ pub enum ServerMessage {
     },
 
     /// エラー
-    Error { message: String },
+    ///
+    /// `request_id` が含まれる場合は特定リクエストへのエラー応答。
+    Error {
+        message: String,
+        /// 対象リクエストの ID（単発要求の失敗応答の場合のみ Some）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 
     /// ListPanes への応答
     PanesListed { panes: Vec<PaneInfo> },
@@ -261,6 +295,13 @@ pub enum ServerMessage {
     ///
     /// `UnsubscribePane` に `request_id` が含まれていた場合に返される。
     UnsubscribeAccepted { request_id: String, pane: PaneId },
+
+    /// ClosePane / InterruptPane / TerminatePane への受理確認
+    ///
+    /// `request_id` 付きの制御コマンドを受け取った場合に返される。
+    /// このメッセージはコマンドがサーバーに**受理された**（キューに積まれた）ことを示す。
+    /// 実際の完了（ペインが閉じた等）は `PaneClosed` などの後続イベントで確認すること。
+    ControlAccepted { request_id: String, pane: PaneId },
 
     /// ClientMessage::Handshake への応答
     ///
@@ -316,12 +357,13 @@ mod tests {
     fn test_interrupt_pane_roundtrip() {
         let msg = ClientMessage::InterruptPane {
             pane: crate::types::PaneId(7),
+            request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
         let restored: ClientMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         match restored {
-            ClientMessage::InterruptPane { pane } => {
+            ClientMessage::InterruptPane { pane, .. } => {
                 assert_eq!(pane, crate::types::PaneId(7));
             }
             _ => panic!("期待する variant でない"),
@@ -332,12 +374,13 @@ mod tests {
     fn test_terminate_pane_roundtrip() {
         let msg = ClientMessage::TerminatePane {
             pane: crate::types::PaneId(8),
+            request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("シリアライズに成功すること");
         let restored: ClientMessage =
             serde_json::from_str(&json).expect("デシリアライズに成功すること");
         match restored {
-            ClientMessage::TerminatePane { pane } => {
+            ClientMessage::TerminatePane { pane, .. } => {
                 assert_eq!(pane, crate::types::PaneId(8));
             }
             _ => panic!("期待する variant でない"),

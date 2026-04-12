@@ -113,7 +113,7 @@ pub async fn run(
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
     };
-    let bootstrap = bootstrap_runtime(&session_name, size).await?;
+    let bootstrap = bootstrap_runtime(&session_name, size, &app_config.ipc).await?;
     let client_tx = bootstrap.client_tx;
     let mut server_rx = bootstrap.server_rx;
     let ipc_out_tx = bootstrap.ipc_out_tx;

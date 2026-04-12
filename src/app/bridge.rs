@@ -294,7 +294,7 @@ pub(super) fn spawn_server_bridge(bridge: ServerBridge, channels: BridgeChannels
                     };
                     let remaining = pane_ids.len();
                     for id in pane_ids {
-                        let _ = client_tx.send(ClientMessage::ClosePane { pane: id }).await;
+                        let _ = client_tx.send(ClientMessage::ClosePane { pane: id, request_id: None }).await;
                     }
                     if remaining == 0 {
                         if let Some(plan) = load_layout_plan(&name) {
