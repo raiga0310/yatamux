@@ -156,6 +156,7 @@ impl Server {
                     if let Err(e) = self.handle_client_message(msg).await {
                         let _ = self.client_tx.send(ServerMessage::Error {
                             message: e.to_string(),
+                            request_id: None,
                         }).await;
                     }
                 }

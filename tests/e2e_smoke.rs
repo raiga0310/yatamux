@@ -567,7 +567,7 @@ impl AppHarness {
                 loop {
                     match conn.rx.recv().await {
                         Some(ServerMessage::SaveAndQuit) => return,
-                        Some(ServerMessage::Error { message }) => {
+                        Some(ServerMessage::Error { message, .. }) => {
                             panic!("unexpected SaveAndQuit error: {}", message)
                         }
                         Some(_) => continue,
@@ -624,7 +624,7 @@ async fn wait_for_notification(
                 Some(ServerMessage::Notification { pane, body }) if pane == target_pane => {
                     return body;
                 }
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     panic!(
                         "unexpected error while waiting for notification: {}",
                         message
@@ -653,7 +653,7 @@ async fn wait_for_exec_result(
                         ..
                     },
                 ) if result_id == request_id => return msg.clone(),
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     panic!("unexpected exec error: {}", message)
                 }
                 Some(_) => continue,
@@ -925,7 +925,10 @@ fn e2e_exec_protocol_reports_request_ids_and_statuses() {
             .await
             .expect("send pane-close exec");
         conn.tx
-            .send(ClientMessage::ClosePane { pane: aux })
+            .send(ClientMessage::ClosePane {
+                pane: aux,
+                request_id: None,
+            })
             .await
             .expect("close exec pane");
         match wait_for_exec_result(&mut conn, &request_closed, Duration::from_secs(10)).await {

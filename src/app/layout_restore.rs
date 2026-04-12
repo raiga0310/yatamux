@@ -295,7 +295,7 @@ async fn wait_for_pane_created(server_rx: &mut mpsc::Receiver<ServerMessage>) ->
     loop {
         match server_rx.recv().await {
             Some(ServerMessage::PaneCreated { id, .. }) => return Ok(id),
-            Some(ServerMessage::Error { message }) => {
+            Some(ServerMessage::Error { message, .. }) => {
                 return Err(anyhow::anyhow!("Server error: {}", message));
             }
             Some(_) => continue,

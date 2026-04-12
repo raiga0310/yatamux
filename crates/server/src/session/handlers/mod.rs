@@ -38,9 +38,9 @@ impl Server {
                     .await
             }
             ClientMessage::Resize { pane, size } => self.handle_resize(pane, size).await,
-            ClientMessage::ClosePane { pane } => self.handle_close_pane(pane).await,
-            ClientMessage::InterruptPane { pane } => self.handle_interrupt_pane(pane).await,
-            ClientMessage::TerminatePane { pane } => self.handle_terminate_pane(pane).await,
+            ClientMessage::ClosePane { pane, .. } => self.handle_close_pane(pane).await,
+            ClientMessage::InterruptPane { pane, .. } => self.handle_interrupt_pane(pane).await,
+            ClientMessage::TerminatePane { pane, .. } => self.handle_terminate_pane(pane).await,
             ClientMessage::SubscribePane { .. } | ClientMessage::UnsubscribePane { .. } => Ok(()),
             ClientMessage::SetPaneMeta { pane, alias, role } => {
                 self.handle_set_pane_meta(pane, alias, role).await
@@ -78,6 +78,7 @@ impl Server {
         self.client_tx
             .send(ServerMessage::Error {
                 message: format!("pane {} not found", pane.0),
+                request_id: None,
             })
             .await
             .context("Failed to send Error")?;

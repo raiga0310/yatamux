@@ -402,7 +402,10 @@ mod win32 {
             let active = self.panes.lock().unwrap().active;
             let _ = self
                 .msg_tx
-                .try_send(yatamux_protocol::ClientMessage::ClosePane { pane: active });
+                .try_send(yatamux_protocol::ClientMessage::ClosePane {
+                    pane: active,
+                    request_id: None,
+                });
         }
 
         /// スクロールバック + 画面内容を一時ファイルに書き出し、`$EDITOR` で開く

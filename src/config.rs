@@ -47,6 +47,28 @@ pub struct AppConfig {
     /// CI ステータス監視設定
     #[serde(default)]
     pub ci: CiConfig,
+    /// IPC セキュリティ設定
+    #[serde(default)]
+    pub ipc: IpcConfig,
+}
+
+/// IPC セキュリティ設定
+///
+/// ```toml
+/// [ipc]
+/// # true にすると handshake トークンが一致しないクライアントを拒否する
+/// # デフォルト: false（後方互換のため）
+/// require_auth = false
+/// ```
+#[derive(Debug, Default, Deserialize)]
+pub struct IpcConfig {
+    /// handshake トークン認証を強制するか
+    ///
+    /// `true` のとき、`%APPDATA%\yatamux\{session}.token` に書かれたトークンを
+    /// 知らないクライアントは接続を拒否される。
+    /// デフォルト `false`（後方互換モード）。
+    #[serde(default)]
+    pub require_auth: bool,
 }
 
 /// ステータスバー設定
