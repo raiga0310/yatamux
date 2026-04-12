@@ -291,11 +291,17 @@ pub(super) unsafe fn handle_wm_timer(
 
         // レイアウト変更（split / close）後はバックバッファを破棄して全画面再描画する。
         // これにより旧ペイン領域の残像（端数ピクセルを含む）が消える（F-5）。
+        // さらに resize_all_panes を呼び直すことで、分割後の Grid cols を
+        // compute_rects() と同じピクセル精度で再計算する（F-5 突き抜け修正）。
         {
             let mut store = state.panes.lock().unwrap();
             if store.layout_changed {
                 store.layout_changed = false;
                 drop(store);
+                let cr = state.content_rect.get();
+                if cr.w > 0 && cr.h > 0 {
+                    state.resize_all_panes(cr.w, cr.h);
+                }
                 state.content_bb.set(None);
             }
         }
