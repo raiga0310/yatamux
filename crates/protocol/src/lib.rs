@@ -76,6 +76,7 @@ mod golden {
         let msg = ClientMessage::Handshake {
             protocol_version: 1,
             capabilities: vec!["exec".to_string(), "subscribe_pane".to_string()],
+            token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(
@@ -89,6 +90,7 @@ mod golden {
         let msg = ClientMessage::Handshake {
             protocol_version: 1,
             capabilities: vec![],
+            token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(
