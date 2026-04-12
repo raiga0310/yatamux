@@ -360,7 +360,10 @@ async fn test_ipc_subscribe_pane_filters_output_to_target_pane() {
     {}
 
     conn.tx
-        .send(ClientMessage::SubscribePane { pane: pane1 })
+        .send(ClientMessage::SubscribePane {
+            pane: pane1,
+            request_id: None,
+        })
         .await
         .unwrap();
 

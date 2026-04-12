@@ -236,7 +236,7 @@ fn handle_wait_message(
             }
             WaitDecision::Continue
         }
-        ServerMessage::Error { message } => WaitDecision::Error(anyhow::anyhow!("{}", message)),
+        ServerMessage::Error { message, .. } => WaitDecision::Error(anyhow::anyhow!("{}", message)),
         _ => WaitDecision::Continue,
     }
 }
@@ -341,7 +341,7 @@ async fn wait_for_exec_result(
                         ));
                     }
                 },
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     return Err(anyhow::anyhow!("{}", message));
                 }
                 Some(_) => continue,
@@ -376,7 +376,7 @@ async fn wait_for_pane_meta_update(
                         return Ok(());
                     }
                 }
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     return Err(anyhow::anyhow!("{}", message));
                 }
                 Some(_) => continue,
@@ -405,7 +405,7 @@ async fn wait_for_input_accept(
                 }) if accepted_pane == pane => {
                     return Ok(());
                 }
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     return Err(anyhow::anyhow!("{}", message));
                 }
                 Some(_) => continue,
@@ -428,7 +428,7 @@ async fn request_panes(conn: &mut ServerConnection) -> Result<Vec<PaneInfo>> {
         loop {
             match conn.rx.recv().await {
                 Some(ServerMessage::PanesListed { panes }) => return Ok(panes),
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     return Err(anyhow::anyhow!("{}", message))
                 }
                 Some(_) => continue,
@@ -510,10 +510,10 @@ fn subscription_event_from_message(
                 pane: closed_pane,
             }))
         }
-        ServerMessage::Error { message } if message.contains("subscription lagged by") => {
+        ServerMessage::Error { message, .. } if message.contains("subscription lagged by") => {
             Ok(Some(SubscribePaneJsonEvent::Lagged { pane, message }))
         }
-        ServerMessage::Error { message } => Err(anyhow::anyhow!("{}", message)),
+        ServerMessage::Error { message, .. } => Err(anyhow::anyhow!("{}", message)),
         _ => Ok(None),
     }
 }
@@ -656,7 +656,7 @@ pub async fn capture_pane(
                     content,
                     capture,
                 }) => return Ok((pane, content, capture)),
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     return Err(anyhow::anyhow!("{}", message))
                 }
                 Some(_) => continue,
@@ -695,7 +695,10 @@ pub async fn subscribe_pane(session: &str, selector: &str, json: bool) -> Result
     let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::SubscribePane { pane: pane.id })
+        .send(ClientMessage::SubscribePane {
+            pane: pane.id,
+            request_id: None,
+        })
         .await?;
 
     loop {
@@ -796,7 +799,7 @@ pub async fn split_pane(
         loop {
             match conn.rx.recv().await {
                 Some(ServerMessage::PaneCreated { id, .. }) => return Ok(id),
-                Some(ServerMessage::Error { message }) => {
+                Some(ServerMessage::Error { message, .. }) => {
                     return Err(anyhow::anyhow!("{}", message))
                 }
                 Some(_) => continue,
@@ -953,7 +956,10 @@ pub async fn interrupt_pane(session: &str, selector: &str) -> Result<()> {
     let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::InterruptPane { pane: pane.id })
+        .send(ClientMessage::InterruptPane {
+            pane: pane.id,
+            request_id: None,
+        })
         .await?;
     println!("Interrupted pane {}", pane.id.0);
     Ok(())
@@ -968,7 +974,10 @@ pub async fn close_pane(session: &str, selector: &str) -> Result<()> {
     let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::ClosePane { pane: pane.id })
+        .send(ClientMessage::ClosePane {
+            pane: pane.id,
+            request_id: None,
+        })
         .await?;
 
     wait_for_pane_closed(&mut conn, pane.id.0).await?;
@@ -986,7 +995,10 @@ pub async fn terminate_pane(session: &str, selector: &str) -> Result<()> {
     let pane = resolve_existing_pane(&panes, selector)?;
 
     conn.tx
-        .send(ClientMessage::TerminatePane { pane: pane.id })
+        .send(ClientMessage::TerminatePane {
+            pane: pane.id,
+            request_id: None,
+        })
         .await?;
 
     wait_for_pane_closed(&mut conn, pane.id.0).await?;
@@ -1640,6 +1652,7 @@ mod tests {
         server_tx
             .send(ServerMessage::Error {
                 message: "pane 8 not found".to_string(),
+                request_id: None,
             })
             .await
             .expect("send error");
@@ -1693,6 +1706,7 @@ mod tests {
         server_tx
             .send(ServerMessage::Error {
                 message: "pane 9 not found".to_string(),
+                request_id: None,
             })
             .await
             .expect("send error");
@@ -1776,6 +1790,7 @@ mod tests {
             ServerMessage::Error {
                 message: "subscription lagged by 3 messages; stream output may be incomplete"
                     .to_string(),
+                request_id: None,
             },
         )
         .expect("lagged error should be converted")

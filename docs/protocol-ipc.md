@@ -59,7 +59,8 @@ Client                                    Server
 {
   "type": "handshake",
   "protocol_version": 1,
-  "capabilities": ["subscribe_pane", "exec"]
+  "capabilities": ["subscribe_pane", "exec"],
+  "token": "a1b2c3d4..."
 }
 ```
 
@@ -67,6 +68,22 @@ Client                                    Server
 |------------|-----|------|------|
 | `protocol_version` | `u32` | ✓ | クライアントのプロトコルバージョン |
 | `capabilities` | `string[]` | — | クライアントがサポートする機能一覧 |
+| `token` | `string` | — | 認証トークン（`%APPDATA%\yatamux\{session}.token` から読み込む） |
+
+#### トークン認証
+
+サーバーは起動時に `%APPDATA%\yatamux\{session}.token` に 64 文字の hex トークンを書き込む。
+CLI クライアントはこのファイルを読んで `token` フィールドに含める。
+
+- `require_auth = false`（デフォルト）: トークンが一致しなくても接続を許可（後方互換モード）
+- `require_auth = true`: トークンが一致しないクライアントは切断され `Error` が返る
+
+設定方法:
+```toml
+# %APPDATA%\yatamux\config.toml
+[ipc]
+require_auth = true
+```
 
 ### ListPanes
 
@@ -161,10 +178,18 @@ Client                                    Server
 ### InterruptPane / TerminatePane / ClosePane
 
 ```json
-{"type": "interrupt_pane", "pane": 1}   // Ctrl+C 送信
-{"type": "terminate_pane", "pane": 1}   // 子プロセスを kill
-{"type": "close_pane", "pane": 1}       // ペインを閉じる
+{"type": "interrupt_pane", "pane": 1}                           // Ctrl+C 送信（ack なし）
+{"type": "interrupt_pane", "pane": 1, "request_id": "intr-1"}  // Ctrl+C 送信（ControlAccepted を受け取る）
+{"type": "terminate_pane", "pane": 1}                           // 子プロセスを kill（ack なし）
+{"type": "terminate_pane", "pane": 1, "request_id": "term-1"}  // 子プロセスを kill（ControlAccepted を受け取る）
+{"type": "close_pane", "pane": 1}                               // ペインを閉じる（ack なし）
+{"type": "close_pane", "pane": 1, "request_id": "close-1"}     // ペインを閉じる（ControlAccepted を受け取る）
 ```
+
+`request_id` を指定した場合、サーバーはコマンドを受理するとすぐに `ControlAccepted` を返す。
+これはコマンドが**キューに積まれた**ことの確認であり、実際の完了は後続の `PaneClosed` などで確認すること。
+
+→ `request_id` あり: [`ControlAccepted`](#controlaccepted)、その後 `PaneClosed` が続く（ClosePane / TerminatePane の場合）
 
 ### SetPaneMeta
 
@@ -366,12 +391,23 @@ OSC 9/99/777 または BEL（`\x07`）による通知。
 }
 ```
 
+### ControlAccepted
+
+`ClosePane` / `InterruptPane` / `TerminatePane` に `request_id` を付けて送信した場合に返される即時受理確認。
+コマンドがサーバーにキューイングされたことを示す（実際の完了は後続の `PaneClosed` などで確認すること）。
+
+```json
+{"type": "control_accepted", "request_id": "close-1", "pane": 3}
+```
+
 ### Error
 
 エラーが発生した場合。切断を伴う場合もある。
+`request_id` が含まれる場合は特定リクエストへのエラー応答。
 
 ```json
 {"type": "error", "message": "pane 99 not found"}
+{"type": "error", "message": "...", "request_id": "req-7"}
 ```
 
 ---

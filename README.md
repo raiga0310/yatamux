@@ -202,6 +202,19 @@ These commands connect to the running `yatamux` instance via `\\.\pipe\yatamux-d
 
 `--pane` / `--target` accept either a numeric pane ID or an alias set by `set-pane-meta`. `list-panes --json` also includes optional `alias` / `role` fields so agents can pick panes by logical name instead of ephemeral IDs.
 
+#### IPC Security
+
+The named pipe (`\\.\pipe\yatamux-{session}`) is restricted to the **current Windows user** via DACL.
+
+For stronger authentication you can enable token verification in `%APPDATA%\yatamux\config.toml`:
+
+```toml
+[ipc]
+require_auth = true   # reject connections that don't present the session token
+```
+
+When enabled, yatamux writes a per-session token to `%APPDATA%\yatamux\{session}.token` on startup. The CLI reads this file automatically, so existing `yatamux` commands work without any changes. Third-party clients must read the token file and include it in the `Handshake` message (see [`docs/protocol-ipc.md`](docs/protocol-ipc.md)).
+
 ### Claude Code Orchestration
 
 The repository includes a Claude Code oriented orchestration bundle under `integrations/claude-code/`.
@@ -523,6 +536,19 @@ yatamux layout delete work
 `subscribe-pane` は `capture-pane` のポーリングなしでライブ監視できる購読コマンドです。既定では生の出力チャンクを stdout に流し、`--json` を付けると `output` / `notification` / `command_finished` / `pane_closed` / `lagged` の JSON Lines を出力します。
 
 `--pane` / `--target` には数値 ID だけでなく、`set-pane-meta` で付けた alias も使えます。`list-panes --json` には `alias` / `role` も含まれるので、エージェントは変動しやすい pane ID ではなく論理名で対象を選べます。
+
+#### IPC セキュリティ
+
+名前付きパイプ（`\\.\pipe\yatamux-{session}`）は DACL により **同一 Windows ユーザーのみ** 接続可能です。
+
+さらに強固な認証が必要な場合は `%APPDATA%\yatamux\config.toml` でトークン認証を有効にできます:
+
+```toml
+[ipc]
+require_auth = true   # セッショントークンを提示しないクライアントを拒否する
+```
+
+有効にすると、起動時に `%APPDATA%\yatamux\{session}.token` へセッション固有のトークンが書き込まれます。`yatamux` CLI はこのファイルを自動で読み込むため、既存のコマンドはそのまま動作します。サードパーティクライアントは `Handshake` メッセージにトークンを含める必要があります（詳細: [`docs/protocol-ipc.md`](docs/protocol-ipc.md)）。
 
 ### Claude Code 連携
 

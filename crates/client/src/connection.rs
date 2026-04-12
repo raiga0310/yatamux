@@ -77,9 +77,21 @@ impl ServerConnection {
 
             // 接続直後にプロトコルハンドシェイクを送信する
             // 旧サーバーは未知メッセージとして warn して継続（後方互換）
+            //
+            // トークンファイル（%APPDATA%\yatamux\{session}.token）が存在すれば読み込み、
+            // Handshake に含める。ファイルが存在しない場合はトークンなしで送信する。
+            let token = {
+                let token_path = std::env::var("APPDATA").ok().map(|appdata| {
+                    std::path::Path::new(&appdata)
+                        .join("yatamux")
+                        .join(format!("{}.token", session))
+                });
+                token_path.and_then(|p| std::fs::read_to_string(p).ok())
+            };
             let handshake = ClientMessage::Handshake {
                 protocol_version: PROTOCOL_VERSION,
                 capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+                token,
             };
             if let Ok(json) = serde_json::to_string(&handshake) {
                 let line = format!("{}\n", json);
@@ -103,7 +115,8 @@ impl ServerConnection {
             });
 
             // パイプ読み取り → サーバーメッセージチャネルタスク
-            // HandshakeAccepted はプロトコル層で処理済みのため上位に転送しない
+            // HandshakeAccepted はプロトコル層で処理済みのため上位に転送しない。
+            // SubscribeAccepted / UnsubscribeAccepted / ControlAccepted は IPC 確認応答として上位に転送する。
             tokio::spawn(async move {
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {

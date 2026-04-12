@@ -3,7 +3,10 @@ use tokio::sync::mpsc;
 
 use yatamux_protocol::types::{PaneId, SurfaceId, TermSize, WorkspaceId};
 use yatamux_protocol::{ClientMessage, ServerMessage};
-use yatamux_server::{ipc::run_ipc_server, Server};
+use yatamux_server::ipc::{generate_and_save_token, run_ipc_server, IpcAuthConfig};
+use yatamux_server::Server;
+
+use crate::config::IpcConfig;
 
 pub(crate) struct BootstrapHandles {
     pub(crate) client_tx: mpsc::Sender<ClientMessage>,
@@ -13,7 +16,11 @@ pub(crate) struct BootstrapHandles {
     pub(crate) pane_id: PaneId,
 }
 
-pub(crate) async fn bootstrap_runtime(session: &str, size: TermSize) -> Result<BootstrapHandles> {
+pub(crate) async fn bootstrap_runtime(
+    session: &str,
+    size: TermSize,
+    ipc_config: &IpcConfig,
+) -> Result<BootstrapHandles> {
     let (server_out_tx, server_rx) = mpsc::channel::<ServerMessage>(256);
     let (ipc_out_tx, ipc_out_rx) = mpsc::channel::<ServerMessage>(256);
 
@@ -24,9 +31,16 @@ pub(crate) async fn bootstrap_runtime(session: &str, size: TermSize) -> Result<B
     let server = Server::new(server_out_tx);
     tokio::spawn(server.run(merged_rx));
 
+    // セッション認証トークンを生成してファイルに保存する
+    let token = generate_and_save_token(session);
+    let auth = IpcAuthConfig {
+        require_auth: ipc_config.require_auth,
+        token,
+    };
+
     let session = session.to_string();
     tokio::spawn(async move {
-        if let Err(e) = run_ipc_server(&session, ipc_in_tx, ipc_out_rx).await {
+        if let Err(e) = run_ipc_server(&session, auth, ipc_in_tx, ipc_out_rx).await {
             tracing::error!("IPC server exited with error: {:#}", e);
         }
     });
@@ -78,7 +92,7 @@ async fn wait_for_workspace_created(
     loop {
         match server_rx.recv().await {
             Some(ServerMessage::WorkspaceCreated { id, .. }) => return Ok(id),
-            Some(ServerMessage::Error { message }) => {
+            Some(ServerMessage::Error { message, .. }) => {
                 return Err(anyhow::anyhow!("Server error: {}", message));
             }
             Some(_) => continue,
@@ -93,7 +107,7 @@ async fn wait_for_surface_created(
     loop {
         match server_rx.recv().await {
             Some(ServerMessage::SurfaceCreated { id, .. }) => return Ok(id),
-            Some(ServerMessage::Error { message }) => {
+            Some(ServerMessage::Error { message, .. }) => {
                 return Err(anyhow::anyhow!("Server error: {}", message));
             }
             Some(_) => continue,
@@ -106,7 +120,7 @@ async fn wait_for_pane_created(server_rx: &mut mpsc::Receiver<ServerMessage>) ->
     loop {
         match server_rx.recv().await {
             Some(ServerMessage::PaneCreated { id, .. }) => return Ok(id),
-            Some(ServerMessage::Error { message }) => {
+            Some(ServerMessage::Error { message, .. }) => {
                 return Err(anyhow::anyhow!("Server error: {}", message));
             }
             Some(_) => continue,

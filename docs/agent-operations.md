@@ -121,16 +121,37 @@ DACL で他ユーザーからの接続は OS レベルで拒否される（C-41 
 | oversized メッセージによる DoS | 1 MiB 超のメッセージはエラー応答後に切断（C-41 対応済み） |
 | broadcast lag による誤読 | lagged 発生時はエラー通知して切断（黙って継続しない） |
 | 他ユーザーからのセッション盗聴 | DACL で拒否（C-41 対応済み） |
+| 同一ユーザー内での無許可スクリプト接続 | `require_auth = true` でトークン認証を強制（オプトイン） |
 
 ### プロトコルバージョン不一致
 
 接続直後に `Handshake` メッセージを送ることで、バージョン不一致を早期検出できる（C-42）。
 旧クライアントは `Handshake` を送らなくてもレガシーモードで接続可能。
 
+### handshake token 認証
+
+`config.toml` の `[ipc]` セクションでトークン認証を有効にできる。
+
+```toml
+# %APPDATA%\yatamux\config.toml
+[ipc]
+require_auth = true   # セッショントークンを提示しないクライアントを拒否
+```
+
+有効にすると:
+- 起動時に `%APPDATA%\yatamux\{session}.token`（64 文字 hex）が生成される
+- `yatamux` CLI はこのファイルを自動で読み込み、`Handshake` に付加する
+- トークンを持たないクライアントや不一致のクライアントは接続時に `Error` を受け取り切断される
+- デフォルト `false`（後方互換モード）
+
 ### 推奨設定
 
 ```toml
 # %APPDATA%\yatamux\config.toml
+
+[ipc]
+# セキュリティ要件が高い環境では true を推奨
+# require_auth = true
 
 [appearance]
 alert_border = "#FF6B6B"   # 通知時のペインボーダー色（デフォルト）
@@ -146,6 +167,7 @@ alert_border = "#FF6B6B"   # 通知時のペインボーダー色（デフォル
 |------|------|----------------|
 | `%APPDATA%\yatamux\config.toml` | 全体設定（フォント / テーマ / フック） | 手動編集 / `yatamux source-config` |
 | `%APPDATA%\yatamux\session.toml` | セッションレイアウト（Ctrl+B → S で保存 / SaveAndQuit 時） | 自動保存 |
+| `%APPDATA%\yatamux\{session}.token` | IPC 認証トークン（64 文字 hex）。`require_auth = true` 時のみ生成 | 起動時に自動生成 |
 | `%APPDATA%\yatamux\layouts\<name>.toml` | 名前付きレイアウト定義 | 手動管理 |
 | `%APPDATA%\yatamux\themes\<name>.toml` | カラーテーマ定義 | 手動管理 |
 

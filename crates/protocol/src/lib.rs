@@ -122,35 +122,54 @@ mod golden {
 
     #[test]
     fn golden_subscribe_pane() {
-        let json =
-            serde_json::to_string(&ClientMessage::SubscribePane { pane: PaneId(7) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::SubscribePane {
+            pane: PaneId(7),
+            request_id: None,
+        })
+        .unwrap();
         assert_eq!(json, r#"{"type":"subscribe_pane","pane":7}"#);
     }
 
     #[test]
     fn golden_unsubscribe_pane() {
-        let json =
-            serde_json::to_string(&ClientMessage::UnsubscribePane { pane: PaneId(7) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::UnsubscribePane {
+            pane: PaneId(7),
+            request_id: None,
+        })
+        .unwrap();
         assert_eq!(json, r#"{"type":"unsubscribe_pane","pane":7}"#);
     }
 
     #[test]
     fn golden_interrupt_pane() {
-        let json =
-            serde_json::to_string(&ClientMessage::InterruptPane { pane: PaneId(5) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::InterruptPane {
+            pane: PaneId(5),
+            request_id: None,
+        })
+        .unwrap();
+        // request_id=None は省略（後方互換維持）
         assert_eq!(json, r#"{"type":"interrupt_pane","pane":5}"#);
     }
 
     #[test]
     fn golden_terminate_pane() {
-        let json =
-            serde_json::to_string(&ClientMessage::TerminatePane { pane: PaneId(5) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::TerminatePane {
+            pane: PaneId(5),
+            request_id: None,
+        })
+        .unwrap();
+        // request_id=None は省略（後方互換維持）
         assert_eq!(json, r#"{"type":"terminate_pane","pane":5}"#);
     }
 
     #[test]
     fn golden_close_pane() {
-        let json = serde_json::to_string(&ClientMessage::ClosePane { pane: PaneId(5) }).unwrap();
+        let json = serde_json::to_string(&ClientMessage::ClosePane {
+            pane: PaneId(5),
+            request_id: None,
+        })
+        .unwrap();
+        // request_id=None は省略（後方互換維持）
         assert_eq!(json, r#"{"type":"close_pane","pane":5}"#);
     }
 
@@ -272,8 +291,10 @@ mod golden {
     fn golden_error() {
         let msg = ServerMessage::Error {
             message: "pane 99 not found".to_string(),
+            request_id: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
+        // request_id=None は省略（後方互換維持）
         assert_eq!(json, r#"{"type":"error","message":"pane 99 not found"}"#);
     }
 
@@ -360,6 +381,45 @@ mod golden {
     }
 
     #[test]
+    fn golden_subscribe_accepted() {
+        let msg = ServerMessage::SubscribeAccepted {
+            request_id: "sub-1".to_string(),
+            pane: PaneId(3),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe_accepted","request_id":"sub-1","pane":3}"#
+        );
+    }
+
+    #[test]
+    fn golden_unsubscribe_accepted() {
+        let msg = ServerMessage::UnsubscribeAccepted {
+            request_id: "unsub-1".to_string(),
+            pane: PaneId(3),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"unsubscribe_accepted","request_id":"unsub-1","pane":3}"#
+        );
+    }
+
+    #[test]
+    fn golden_subscribe_pane_with_request_id() {
+        let json = serde_json::to_string(&ClientMessage::SubscribePane {
+            pane: PaneId(7),
+            request_id: Some("sub-42".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe_pane","pane":7,"request_id":"sub-42"}"#
+        );
+    }
+
+    #[test]
     fn golden_workspace_created() {
         let msg = ServerMessage::WorkspaceCreated {
             id: WorkspaceId(1),
@@ -393,6 +453,95 @@ mod golden {
         let json = serde_json::to_string(&msg).unwrap();
         // split_from / direction: None は省略
         assert_eq!(json, r#"{"type":"pane_created","id":1,"surface":1}"#);
+    }
+
+    // ── ControlAccepted / Error 相関 ID ──────────────────────────────────
+
+    #[test]
+    fn golden_control_accepted() {
+        let msg = ServerMessage::ControlAccepted {
+            request_id: "ctrl-1".to_string(),
+            pane: PaneId(5),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"control_accepted","request_id":"ctrl-1","pane":5}"#
+        );
+    }
+
+    #[test]
+    fn golden_error_without_request_id() {
+        let msg = ServerMessage::Error {
+            message: "pane 99 not found".to_string(),
+            request_id: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // request_id=None はシリアライズ時に省略される（後方互換維持）
+        assert_eq!(json, r#"{"type":"error","message":"pane 99 not found"}"#);
+    }
+
+    #[test]
+    fn golden_error_with_request_id() {
+        let msg = ServerMessage::Error {
+            message: "pane 42 not found".to_string(),
+            request_id: Some("req-7".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"error","message":"pane 42 not found","request_id":"req-7"}"#
+        );
+    }
+
+    #[test]
+    fn golden_close_pane_with_request_id() {
+        let msg = ClientMessage::ClosePane {
+            pane: PaneId(3),
+            request_id: Some("close-1".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"close_pane","pane":3,"request_id":"close-1"}"#
+        );
+    }
+
+    #[test]
+    fn golden_close_pane_without_request_id() {
+        let msg = ClientMessage::ClosePane {
+            pane: PaneId(3),
+            request_id: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // request_id=None は省略（後方互換維持）
+        assert_eq!(json, r#"{"type":"close_pane","pane":3}"#);
+    }
+
+    #[test]
+    fn golden_interrupt_pane_with_request_id() {
+        let msg = ClientMessage::InterruptPane {
+            pane: PaneId(2),
+            request_id: Some("intr-5".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"interrupt_pane","pane":2,"request_id":"intr-5"}"#
+        );
+    }
+
+    #[test]
+    fn golden_terminate_pane_with_request_id() {
+        let msg = ClientMessage::TerminatePane {
+            pane: PaneId(4),
+            request_id: Some("term-9".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"terminate_pane","pane":4,"request_id":"term-9"}"#
+        );
     }
 
     // ── デシリアライズ後方互換性 ──────────────────────────────────
