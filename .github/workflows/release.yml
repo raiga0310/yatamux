@@ -28,6 +28,36 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0   # changelog 生成に全履歴が必要
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          current_tag="${{ inputs.tag || github.ref_name }}"
+          # semver 順にソートされたタグ一覧から current の直前のタグを取得
+          prev_tag=$(git tag --sort=version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | awk -v cur="$current_tag" \
+                'prev!="" && $0==cur{print prev} {prev=$0}')
+          if [ -z "$prev_tag" ]; then
+            body="Initial release."
+          else
+            # prev_tag^: 前バージョン bump ブランチのベース (master 上)
+            # HEAD^    : 今バージョン bump ブランチのベース (master 上)
+            # この範囲が「前バージョン以降に master に入ったコミット」になる
+            body=$(git log --no-merges --pretty=format:"- %s" "${prev_tag}^..HEAD^" \
+              | grep -v "^- chore: bump version" \
+              | grep -v "^- docs:" \
+              || true)
+            [ -z "$body" ] && body="No notable changes."
+          fi
+          printf '%s\n' "$body"
+          {
+            printf 'body<<EOF\n'
+            printf '%s\n' "$body"
+            printf 'EOF\n'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         # actions-rust-lang/setup-rust-toolchain v1.15.0
@@ -68,6 +98,6 @@ jobs:
           files: |
             target/x86_64-pc-windows-msvc/release/yatamux.exe
             checksums.txt
-          generate_release_notes: true
+          body: ${{ steps.changelog.outputs.body }}
           draft: false
           prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}

@@ -8,6 +8,12 @@ permissions:
   contents: write
   pull-requests: write
 
+# master への連続 push で複数ジョブが並走し同バージョンの bump PR が重複するのを防ぐ。
+# cancel-in-progress: false にして最新ジョブだけ残す（キャンセルすると PR が作られない）。
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
 jobs:
   bump:
     name: Bump patch version
