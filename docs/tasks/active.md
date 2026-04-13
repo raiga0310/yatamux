@@ -421,37 +421,34 @@ yatamux ペインのシェルから `yatamux update` を実行すると exit cod
 - [x] `SaveAndQuit` 送信失敗と「yatamux ペイン内なのに IPC 接続失敗」の分岐を明示エラー化し、誤った自己置換フォールバックを止める
 - [ ] IPC 接続 / `SaveAndQuit` / `--apply-update` / ダウンロード検証のどこで落ちるかを切り分ける
 
-### B-8: `WM_SIZE` 後の再描画要求が遅延し、別イベントまで見た目が更新されない 【優先度: 高】
+### B-8: `WM_SIZE` 後の再描画要求が遅延し、別イベントまで見た目が更新されない 【修正済み】
 
 ウィンドウサイズ変更直後に描画が更新されず、別の入力やフォーカス変化まで古いフレームが残ることがある。
 
-- **現状確認（2026-04-13）**:
-  - `crates/client/src/window/win32/wndproc.rs:26` で `WM_SIZE` は `handle_wm_size` に委譲される
-  - `crates/client/src/window/win32/wndproc.rs:203-223` の `handle_wm_size()` は `content_rect` 更新、`resize_all_panes()`、`content_bb.set(None)` まで行うが `InvalidateRect` を呼んでいない
-  - 現在の再描画要求は `crates/client/src/window/win32/wndproc.rs:414-430` の `WM_TIMER` 側 `InvalidateRect` に依存している
-- **原因候補**:
-  - `WM_SIZE` パスで即時 invalidation が発行されないため、サイズ変更直後の描画更新が別イベント任せになっている
+- **修正済み（2026-04-13）**: PR #133
+- **対応内容**:
+  - `handle_wm_size` に `hwnd: HWND` パラメータを追加
+  - `content_bb.set(None)` の直後に `InvalidateRect(Some(hwnd), None, false)` を追加
+  - `WM_SIZE` から即時再描画要求が発行されるようになり、WM_TIMER 依存の遅延が解消
 
 #### サブタスク
 
-- [ ] `WM_SIZE` 直後にコンテンツ領域を `InvalidateRect` するか、同等の即時再描画要求を入れる
-- [ ] `WM_SIZE` 直後にフォーカス変更なしでも画面更新されることを確認するテストケースを追加する
+- [x] `WM_SIZE` 直後にコンテンツ領域を `InvalidateRect` するか、同等の即時再描画要求を入れる
+- [x] `WM_SIZE` 直後にフォーカス変更なしでも画面更新されることを確認するテストケースを追加する（TC-B8 in `layout/store.rs`）
 
-### B-9: ペイン幅が広がった領域が dirty 行なしで描き直されず、旧フレームが残る 【優先度: 高】
+### B-9: ペイン幅が広がった領域が dirty 行なしで描き直されず、旧フレームが残る 【修正済み】
 
 ペイン境界を動かして幅が広がったとき、新たに露出した領域に現在のアプリ描画が出ず、以前のバックバッファ内容が残ることがある。
 
-- **現状確認（2026-04-13）**:
-  - `crates/client/src/window/mod.rs:595-629` の `paint()` は永続バックバッファを再利用し、サイズ不一致時以外は既存内容を保持する
-  - `crates/client/src/window/mod.rs:735-738` で `grid.take_dirty_rows()` の結果が空なら、そのペインの描画処理を `continue` で丸ごとスキップする
-  - ペイン境界調整は `crates/client/src/window/win32/modes.rs:350-355` と `crates/client/src/window/win32/modes.rs:366-371` で `layout.adjust_ratio_for_dir(...)` の後に `InvalidateRect` するだけで、全行 dirty 化や `content_bb` 破棄をしていない
-- **原因候補**:
-  - レイアウト矩形だけが変わっても `dirty_rows` が空なら拡張領域が塗り直されず、永続バックバッファ上の古い描画が残る
+- **修正済み（2026-04-13）**: PR #133
+- **対応内容**:
+  - `handle_pane_mode` の `<`/`>` および `+`/`-` 比率調整ブロックで `adjust_ratio_for_dir()` 後に `resize_all_panes(cr.w, cr.h)` と `content_bb.set(None)` を追加
+  - `grid.resize()` が全行 dirty をセットし、次の `WM_PAINT` で全ペインが新しい矩形で再描画される
 
 #### サブタスク
 
-- [ ] ペイン矩形が変わったフレームは当該ペインを全行 dirty にするか、ペイン矩形全体を背景込みで再描画する
-- [ ] 境界調整後に広がった領域へ現行フレームが描かれることを確認するテストケースを追加する
+- [x] ペイン矩形が変わったフレームは当該ペインを全行 dirty にするか、ペイン矩形全体を背景込みで再描画する
+- [x] 境界調整後に広がった領域へ現行フレームが描かれることを確認するテストケースを追加する（TC-B9 in `layout/store.rs`）
 
 ### C-41: 通知時のペインボーダーアクセントカラー + 点滅 【優先度: 中】
 
