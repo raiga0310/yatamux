@@ -1169,22 +1169,39 @@ pub async fn update(session: &str) -> anyhow::Result<()> {
             Ok(())
         }
         Err(err) => {
-            if is_running_inside_yatamux() {
+            // エラーチェーンに NotFound (os error 2) が含まれる場合、
+            // 名前付きパイプ自体が存在しない = yatamux プロセスは起動していない。
+            // YATAMUX=1 が環境に残留していても安全にフォールバックできる。
+            let pipe_not_found = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<std::io::Error>())
+                .map(|e| e.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false);
+
+            if is_running_inside_yatamux() && !pipe_not_found {
+                // パイプは存在するが接続拒否など → 本当にペイン内なので中断
                 Err(anyhow::anyhow!(
                     "セッション '{}' の IPC に接続できませんでした。yatamux ペイン内からの update では SaveAndQuit に失敗したまま自己置換へフォールバックできないため、中断します: {:#}",
                     session,
                     err
                 ))
             } else {
-                // GUI が起動していない → ヘルパーを起動して自プロセス終了後に rename させる
+                // GUI が起動していない（パイプ不在）→ ヘルパーで直接置換
                 // （Windows では実行中の exe を rename できないため self PID を渡して待機）
-                eprintln!(
-                    "セッション '{}' の IPC に接続できませんでした: {:#}",
-                    session, err
-                );
-                eprintln!(
-                    "実行中の yatamux インスタンスが見つかりません。ヘルパーでバイナリを置換します。"
-                );
+                if pipe_not_found && is_running_inside_yatamux() {
+                    eprintln!(
+                        "警告: YATAMUX=1 が設定されていますがセッション '{}' のパイプが見つかりません。yatamux が終了済みとみなしてバイナリを置換します。",
+                        session
+                    );
+                } else {
+                    eprintln!(
+                        "セッション '{}' の IPC に接続できませんでした: {:#}",
+                        session, err
+                    );
+                    eprintln!(
+                        "実行中の yatamux インスタンスが見つかりません。ヘルパーでバイナリを置換します。"
+                    );
+                }
                 let self_pid = std::process::id();
                 spawn_apply_update_helper(&exe, self_pid, &new_path, false)?;
                 eprintln!("ヘルパーを起動しました。このプロセスを終了します。");
