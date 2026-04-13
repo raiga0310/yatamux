@@ -352,6 +352,14 @@ impl ClientState {
                 delta,
                 SplitDirection::Vertical,
             );
+            // B-9: 比率変更でペイン幅が変わるため resize_all_panes を呼んで
+            // 各 Grid を新サイズに合わせ dirty 化する。
+            // content_bb も破棄して全領域を再描画させる。
+            let cr = state.content_rect.get();
+            if cr.w > 0 && cr.h > 0 {
+                state.resize_all_panes(cr.w, cr.h);
+            }
+            state.content_bb.set(None);
             let _ = InvalidateRect(Some(hwnd), None, false);
             return KeyConsumed::Yes;
         }
@@ -368,6 +376,13 @@ impl ClientState {
                 delta,
                 SplitDirection::Horizontal,
             );
+            // B-9: 比率変更でペイン高さが変わるため resize_all_panes を呼んで
+            // 各 Grid を新サイズに合わせ dirty 化する。
+            let cr = state.content_rect.get();
+            if cr.w > 0 && cr.h > 0 {
+                state.resize_all_panes(cr.w, cr.h);
+            }
+            state.content_bb.set(None);
             let _ = InvalidateRect(Some(hwnd), None, false);
             return KeyConsumed::Yes;
         }

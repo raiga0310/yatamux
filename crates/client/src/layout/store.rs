@@ -636,6 +636,93 @@ mod tests {
         assert_eq!(ids, vec![PaneId(1)]);
     }
 
+    // TC-B8: WM_SIZE 相当 — grid.resize() で全行 dirty になる（B-8 回帰確認）
+    //
+    // `handle_wm_size` は resize_all_panes() を呼び、その中で grid.resize() を呼ぶ。
+    // grid.resize() が dirty を全行セットすることで WM_TIMER / InvalidateRect
+    // 経由の再描画が確実に走ることを検証する。
+    #[test]
+    fn test_b8_resize_marks_all_dirty() {
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        // 一度 dirty をクリア（ウィンドウが安定している状態を模倣）
+        let _ = grid.lock().unwrap().take_dirty_rows();
+        assert!(
+            !grid.lock().unwrap().has_dirty_rows(),
+            "precondition: dirty cleared"
+        );
+
+        // WM_SIZE 後の resize_all_panes() が呼ぶ grid.resize() を直接呼ぶ
+        grid.lock().unwrap().resize(80, 24); // 同サイズでもリセットされる
+        assert!(
+            grid.lock().unwrap().has_dirty_rows(),
+            "grid.resize() must mark all rows dirty so WM_TIMER → InvalidateRect fires"
+        );
+    }
+
+    // TC-B9: ペイン比率変更後のリサイズで全グリッドが dirty になる（B-9 回帰確認）
+    //
+    // adjust_ratio_for_dir() でレイアウト矩形が変わった後、
+    // resize_all_panes() 相当の grid.resize() を呼ぶと dirty が立つことを確認する。
+    // dirty がなければ paint() の dirty_rows.is_empty() で continue → 描画されないため。
+    #[test]
+    fn test_b9_ratio_adjust_then_resize_marks_dirty() {
+        use crate::layout::{LayoutNode, PaneRect};
+        use yatamux_protocol::types::SplitDirection;
+
+        let grid1 = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        let grid2 = Arc::new(Mutex::new(Grid::new(80, 24, Default::default())));
+        let pane1 = PaneId(1);
+        let pane2 = PaneId(2);
+
+        let mut store = PaneStore::new(pane1, grid1.clone());
+        store.grids.insert(pane2, grid2.clone());
+        store.layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(pane1)),
+            second: Box::new(LayoutNode::Leaf(pane2)),
+        };
+
+        // 安定状態に戻す（dirty クリア）
+        let _ = grid1.lock().unwrap().take_dirty_rows();
+        let _ = grid2.lock().unwrap().take_dirty_rows();
+        assert!(!grid1.lock().unwrap().has_dirty_rows());
+        assert!(!grid2.lock().unwrap().has_dirty_rows());
+
+        // 比率変更（< キー相当）
+        store
+            .layout
+            .adjust_ratio_for_dir(pane1, 0.1, SplitDirection::Vertical);
+
+        // 比率変更後の compute_rects → grid.resize（resize_all_panes 相当）
+        let total = PaneRect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 600,
+        };
+        let rects = store.layout.compute_rects(total);
+        let cell_w = 10;
+        let cell_h = 20;
+        for (pane_id, rect) in &rects {
+            let cols = (rect.w / cell_w).max(1) as u16;
+            let rows = (rect.h / cell_h).max(1) as u16;
+            if let Some(g) = store.grids.get(pane_id) {
+                g.lock().unwrap().resize(cols, rows);
+            }
+        }
+
+        // 両グリッドとも dirty でなければ paint() が新しい矩形に描き直さない
+        assert!(
+            grid1.lock().unwrap().has_dirty_rows(),
+            "grid1 must be dirty after ratio adjustment + resize"
+        );
+        assert!(
+            grid2.lock().unwrap().has_dirty_rows(),
+            "grid2 must be dirty after ratio adjustment + resize"
+        );
+    }
+
     #[test]
     fn test_copy_state_init() {
         let cs = CopyState::new(0, 0);

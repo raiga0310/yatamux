@@ -23,7 +23,7 @@ pub(super) unsafe extern "system" fn wnd_proc(
         WM_IME_ENDCOMPOSITION => handle_ime_end(state_ptr, hwnd, msg, wparam, lparam),
         WM_CHAR => handle_wm_char(state_ptr, hwnd, wparam),
         WM_KEYDOWN => handle_wm_keydown(state_ptr, hwnd, wparam, lparam, msg),
-        WM_SIZE => handle_wm_size(state_ptr, lparam),
+        WM_SIZE => handle_wm_size(state_ptr, hwnd, lparam),
         WM_MOUSEWHEEL => handle_wm_mousewheel(state_ptr, hwnd, wparam),
         WM_TIMER => handle_wm_timer(state_ptr, hwnd, wparam),
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP | WM_MOUSEMOVE => {
@@ -200,7 +200,7 @@ pub(super) unsafe fn handle_wm_keydown(
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-unsafe fn handle_wm_size(state_ptr: *mut ClientState, lparam: LPARAM) -> LRESULT {
+unsafe fn handle_wm_size(state_ptr: *mut ClientState, hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if !state_ptr.is_null() {
         let state = &*state_ptr;
         let width = (lparam.0 & 0xFFFF) as i32;
@@ -218,6 +218,10 @@ unsafe fn handle_wm_size(state_ptr: *mut ClientState, lparam: LPARAM) -> LRESULT
             state.resize_all_panes(content_w, content_h);
             // バックバッファを無効化（次の WM_PAINT で再作成される）
             state.content_bb.set(None);
+            // B-8: resize 直後に即時再描画要求を発行する。
+            // resize_all_panes() が grid.resize() を呼ぶため dirty 行は立つが、
+            // WM_TIMER を待たずに InvalidateRect することで次の WM_PAINT で確実に更新する。
+            let _ = InvalidateRect(Some(hwnd), None, false);
         }
     }
     LRESULT(0)
