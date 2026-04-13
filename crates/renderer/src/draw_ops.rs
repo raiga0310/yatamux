@@ -22,12 +22,14 @@
 //! `SetBkColor` は Blank/Grapheme どちらでも背景色が変わると発生する。
 //! `SetTextColor` は Grapheme のみ（Blank はテキスト描画がないため）。
 
-use yatamux_terminal::cell::{CellContent, Color};
+use yatamux_terminal::cell::{Cell, CellContent, CellStyle, Color};
 use yatamux_terminal::Grid;
 
 /// デフォルトテーマ色（Catppuccin Mocha — `render.rs` の定数と合わせる）
 const DEFAULT_FG: (u8, u8, u8) = (0xCD, 0xD6, 0xF4);
 const DEFAULT_BG: (u8, u8, u8) = (0x1E, 0x1E, 0x2E);
+const DEFAULT_FG_KEY: u32 = pack_rgb(DEFAULT_FG);
+const DEFAULT_BG_KEY: u32 = pack_rgb(DEFAULT_BG);
 
 /// 1フレームの描画操作カウント
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +68,51 @@ impl std::fmt::Display for DrawOpStats {
     }
 }
 
+#[inline(always)]
 fn resolve_color(opt: Option<Color>, default: (u8, u8, u8)) -> (u8, u8, u8) {
     opt.map(|c| (c.r, c.g, c.b)).unwrap_or(default)
+}
+
+#[inline(always)]
+const fn pack_rgb(rgb: (u8, u8, u8)) -> u32 {
+    ((rgb.0 as u32) << 16) | ((rgb.1 as u32) << 8) | (rgb.2 as u32)
+}
+
+#[inline(always)]
+const fn pack_color(color: Color) -> u32 {
+    ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)
+}
+
+#[inline(always)]
+fn resolve_color_key(opt: Option<Color>, default_key: u32) -> u32 {
+    match opt {
+        Some(color) => pack_color(color),
+        None => default_key,
+    }
+}
+
+#[inline(always)]
+fn resolve_effective_colors(style: &CellStyle) -> (u32, u32) {
+    let fg = resolve_color_key(style.fg, DEFAULT_FG_KEY);
+    let bg = resolve_color_key(style.bg, DEFAULT_BG_KEY);
+    if style.reverse {
+        (bg, fg)
+    } else {
+        (fg, bg)
+    }
+}
+
+#[inline(always)]
+fn is_single_ascii(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 1 && bytes[0].is_ascii()
+}
+
+#[cold]
+fn is_box_drawing(text: &str) -> bool {
+    let mut utf16 = text.encode_utf16();
+    let first_u16 = utf16.next().unwrap_or_default();
+    utf16.next().is_none() && (0x2500..=0x259F).contains(&first_u16)
 }
 
 /// グリッド 1 枚分の描画操作数を推定する（ランバッチング**なし**）。
@@ -151,14 +196,113 @@ pub fn count_draw_ops(
     stats
 }
 
-/// グリッド 1 枚分の描画操作数を推定する（ランバッチング**あり**、B 案）。
+fn count_draw_ops_batched_row(cells: &[Cell], display_cols: usize, stats: &mut DrawOpStats) {
+    let cells = &cells[..display_cols.min(cells.len())];
+    let mut row_runs: u32 = 0;
+    let mut row_text_runs: u32 = 0;
+    let mut index = 0;
+
+    stats.rows_rendered += 1;
+
+    while index < cells.len() {
+        let cell = &cells[index];
+        match &cell.content {
+            CellContent::Continuation => {
+                index += 1;
+            }
+            CellContent::Blank => {
+                stats.cells_processed += 1;
+                let mut raw_bg = cell.style.bg;
+                let run_bg = resolve_color_key(raw_bg, DEFAULT_BG_KEY);
+                index += 1;
+
+                while index < cells.len() {
+                    let next = &cells[index];
+                    match &next.content {
+                        CellContent::Blank => {
+                            if next.style.bg != raw_bg
+                                && resolve_color_key(next.style.bg, DEFAULT_BG_KEY) != run_bg
+                            {
+                                break;
+                            }
+                            raw_bg = next.style.bg;
+                            stats.cells_processed += 1;
+                            index += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                row_runs += 1;
+            }
+            CellContent::Grapheme { text, .. } => {
+                stats.cells_processed += 1;
+
+                if is_single_ascii(text) {
+                    let mut raw_fg = cell.style.fg;
+                    let mut raw_bg = cell.style.bg;
+                    let mut raw_reverse = cell.style.reverse;
+                    let (run_fg, run_bg) = resolve_effective_colors(&cell.style);
+                    index += 1;
+
+                    while index < cells.len() {
+                        let next = &cells[index];
+                        let next_text = match &next.content {
+                            CellContent::Grapheme { text, .. } => text,
+                            _ => break,
+                        };
+                        if !is_single_ascii(next_text) {
+                            break;
+                        }
+                        if next.style.reverse == raw_reverse
+                            && next.style.fg == raw_fg
+                            && next.style.bg == raw_bg
+                        {
+                            stats.cells_processed += 1;
+                            index += 1;
+                            continue;
+                        }
+
+                        let (next_fg, next_bg) = resolve_effective_colors(&next.style);
+                        if next_fg != run_fg || next_bg != run_bg {
+                            break;
+                        }
+
+                        raw_fg = next.style.fg;
+                        raw_bg = next.style.bg;
+                        raw_reverse = next.style.reverse;
+                        stats.cells_processed += 1;
+                        index += 1;
+                    }
+
+                    row_runs += 1;
+                    row_text_runs += 1;
+                    continue;
+                }
+
+                index += 1;
+                row_runs += 1;
+                if !is_box_drawing(text) {
+                    row_text_runs += 1;
+                }
+            }
+        }
+    }
+
+    stats.set_bk_color_calls += row_runs;
+    stats.set_text_color_calls += row_text_runs;
+    stats.ext_text_out_calls += row_runs + row_text_runs;
+}
+
+/// グリッド 1 枚分の描画操作数を推定する（ランバッチング**あり**）。
 ///
-/// 同一 (fg, bg) の連続セルをまとめて 1 スパンとして処理する。
-/// - Blank セルは bg 一致で延長（テキスト描画なし）
-/// - Grapheme セルは (fg, bg) 一致・ASCII 1 コードユニットのみでラン延長
-/// - ランごとに ExtTextOutW × 1（背景）+ 最大 × 1（テキスト）
+/// 同一 (fg, bg) の連続 ASCII セルをまとめて 1 スパンとして処理する。
+/// ランは行をまたがない。行末で `flush_run` して `stats` に加算する。
 ///
-/// ボックス文字・サロゲートペア・ZWJ・選択セルはランを分断して個別描画（各 2 コール）。
+/// - ASCII Grapheme（1 byte < 0x80）のみランを延長する
+/// - Blank はランを分断して個別の背景塗りランとして処理する
+/// - ボックス文字・非 ASCII は個別描画（各 2 GDI コール）
+/// - ランごとに ExtTextOutW × 1（背景）+ テキストランは × 1（テキスト）を加算
 pub fn count_draw_ops_batched(
     grid: &Grid,
     cols: Option<usize>,
@@ -167,115 +311,20 @@ pub fn count_draw_ops_batched(
     let display_cols = cols.unwrap_or(grid.cols() as usize);
     let mut stats = DrawOpStats::default();
 
-    // ラン状態
-    #[derive(Default, Clone, Copy, PartialEq)]
-    enum RunKind {
-        #[default]
-        None,
-        Blank,
-        Text,
-    }
-
-    struct Run {
-        kind: RunKind,
-        bg: (u8, u8, u8),
-        fg: (u8, u8, u8),
-        has_text: bool,
-    }
-    let mut run: Option<Run> = None;
-
-    // ランフラッシュ: ExtTextOutW × 1（背景）+ 条件付き × 1（テキスト）
-    // ※ SetBkColor / SetTextColor はランごとに各 1 回としてカウント（worst case 近似）
-    let flush = |run: &mut Option<Run>, stats: &mut DrawOpStats| {
-        if let Some(r) = run.take() {
-            stats.set_bk_color_calls += 1;
-            stats.ext_text_out_calls += 1; // 背景 ETO_OPAQUE
-            if r.has_text {
-                stats.set_text_color_calls += 1;
-                stats.ext_text_out_calls += 1; // テキスト ETO_CLIPPED
-            }
-        }
-    };
-
-    for row in 0..grid.rows() {
-        if let Some(dr) = dirty_rows {
-            if !dr.contains(&row) {
+    if let Some(rows) = dirty_rows {
+        for &row in rows {
+            let Some(cells) = grid.row(row) else {
                 continue;
-            }
+            };
+            count_draw_ops_batched_row(cells, display_cols, &mut stats);
         }
-        let cells = match grid.row(row) {
-            Some(c) => c,
-            None => continue,
-        };
-        stats.rows_rendered += 1;
-
-        for cell in cells.iter().take(display_cols) {
-            match &cell.content {
-                CellContent::Continuation => {}
-                CellContent::Blank => {
-                    stats.cells_processed += 1;
-                    let bg = resolve_color(cell.style.bg, DEFAULT_BG);
-                    if let Some(ref r) = run {
-                        if r.kind == RunKind::Blank && r.bg == bg {
-                            // 延長（フラッシュなし）
-                            continue;
-                        }
-                    }
-                    flush(&mut run, &mut stats);
-                    run = Some(Run {
-                        kind: RunKind::Blank,
-                        bg,
-                        fg: DEFAULT_FG,
-                        has_text: false,
-                    });
-                }
-                CellContent::Grapheme { text, .. } => {
-                    stats.cells_processed += 1;
-                    let (raw_fg, raw_bg) = {
-                        let fg = resolve_color(cell.style.fg, DEFAULT_FG);
-                        let bg = resolve_color(cell.style.bg, DEFAULT_BG);
-                        if cell.style.reverse {
-                            (bg, fg)
-                        } else {
-                            (fg, bg)
-                        }
-                    };
-
-                    let first_cp = text.chars().next().map(|c| c as u32).unwrap_or(0);
-                    let is_box = (0x2500..=0x259F).contains(&first_cp);
-                    let utf16_len = text.encode_utf16().count();
-
-                    if is_box || utf16_len != 1 {
-                        // 個別描画（ランを分断）
-                        flush(&mut run, &mut stats);
-                        // 背景 + テキスト各 1 回
-                        stats.set_bk_color_calls += 1;
-                        stats.ext_text_out_calls += 1;
-                        if !is_box {
-                            stats.set_text_color_calls += 1;
-                            stats.ext_text_out_calls += 1;
-                        }
-                    } else {
-                        // ランに追加できるか
-                        let can_extend = run.as_ref().is_some_and(|r| {
-                            r.kind == RunKind::Text && r.fg == raw_fg && r.bg == raw_bg
-                        });
-                        if !can_extend {
-                            flush(&mut run, &mut stats);
-                            run = Some(Run {
-                                kind: RunKind::Text,
-                                bg: raw_bg,
-                                fg: raw_fg,
-                                has_text: true,
-                            });
-                        }
-                        // 延長（bg スパンにテキストを追加するだけ）
-                    }
-                }
-            }
+    } else {
+        for row in 0..grid.rows() {
+            let Some(cells) = grid.row(row) else {
+                continue;
+            };
+            count_draw_ops_batched_row(cells, display_cols, &mut stats);
         }
-        // 行末でランをフラッシュ
-        flush(&mut run, &mut stats);
     }
 
     stats
@@ -284,7 +333,6 @@ pub fn count_draw_ops_batched(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yatamux_terminal::cell::CellStyle;
     use yatamux_terminal::CjkWidthConfig;
 
     fn ascii_style(fg: Color, bg: Color) -> CellStyle {
@@ -299,22 +347,208 @@ mod tests {
         Grid::new(cols, rows, CjkWidthConfig::default())
     }
 
+    fn default_fg() -> Color {
+        Color {
+            r: 0xCD,
+            g: 0xD6,
+            b: 0xF4,
+        }
+    }
+
+    fn default_bg() -> Color {
+        Color {
+            r: 0x1E,
+            g: 0x1E,
+            b: 0x2E,
+        }
+    }
+
+    #[test]
+    fn batched_collapses_dense_ascii_into_one_text_run_per_row() {
+        let fg = default_fg();
+        let bg = default_bg();
+        let style = ascii_style(fg, bg);
+
+        let mut dense = make_grid(12, 4);
+        for row in 0..4 {
+            for c in 0..12 {
+                let ch = (b'a' + (c % 26) as u8) as char;
+                dense.write_char(&ch.to_string(), style);
+            }
+            if row < 3 {
+                dense.carriage_return();
+                dense.line_feed();
+            }
+        }
+
+        assert_eq!(
+            count_draw_ops_batched(&dense, None, None),
+            DrawOpStats {
+                ext_text_out_calls: 8,
+                set_bk_color_calls: 4,
+                set_text_color_calls: 4,
+                rows_rendered: 4,
+                cells_processed: 48,
+            }
+        );
+    }
+
+    #[test]
+    fn batched_collapses_dense_ascii_80x24_into_24_text_runs() {
+        let fg = default_fg();
+        let bg = default_bg();
+        let style = ascii_style(fg, bg);
+
+        let mut dense = make_grid(80, 24);
+        for row in 0..24 {
+            for c in 0..80 {
+                let ch = (b'a' + (c % 26) as u8) as char;
+                dense.write_char(&ch.to_string(), style);
+            }
+            if row < 23 {
+                dense.carriage_return();
+                dense.line_feed();
+            }
+        }
+
+        assert_eq!(
+            count_draw_ops_batched(&dense, None, None),
+            DrawOpStats {
+                ext_text_out_calls: 48,
+                set_bk_color_calls: 24,
+                set_text_color_calls: 24,
+                rows_rendered: 24,
+                cells_processed: 80 * 24,
+            }
+        );
+    }
+
+    #[test]
+    fn batched_merges_implicit_and_explicit_default_colors_into_one_text_run() {
+        let explicit_defaults = ascii_style(default_fg(), default_bg());
+        let implicit_defaults = CellStyle::default();
+        let mut grid = make_grid(4, 1);
+        for (index, ch) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+            let style = if index % 2 == 0 {
+                implicit_defaults
+            } else {
+                explicit_defaults
+            };
+            grid.write_char(&ch.to_string(), style);
+        }
+
+        assert_eq!(
+            count_draw_ops_batched(&grid, None, None),
+            DrawOpStats {
+                ext_text_out_calls: 2,
+                set_bk_color_calls: 1,
+                set_text_color_calls: 1,
+                rows_rendered: 1,
+                cells_processed: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn batched_splits_multicolor_ascii_runs_on_fg_changes() {
+        let bg = default_bg();
+        let palette: [Color; 4] = [
+            Color {
+                r: 0xF3,
+                g: 0x8B,
+                b: 0xA8,
+            },
+            Color {
+                r: 0xA6,
+                g: 0xE3,
+                b: 0xA1,
+            },
+            Color {
+                r: 0xF9,
+                g: 0xE2,
+                b: 0xAF,
+            },
+            Color {
+                r: 0x89,
+                g: 0xB4,
+                b: 0xFA,
+            },
+        ];
+
+        let mut grid = make_grid(4, 2);
+        for row in 0..2 {
+            for col in 0..4 {
+                let fg = palette[(col as usize) % palette.len()];
+                let ch = (b'a' + (col % 26) as u8) as char;
+                grid.write_char(&ch.to_string(), ascii_style(fg, bg));
+            }
+            if row == 0 {
+                grid.carriage_return();
+                grid.line_feed();
+            }
+        }
+
+        assert_eq!(
+            count_draw_ops_batched(&grid, None, None),
+            DrawOpStats {
+                ext_text_out_calls: 16,
+                set_bk_color_calls: 8,
+                set_text_color_calls: 8,
+                rows_rendered: 2,
+                cells_processed: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn batched_counts_idle_prompt_when_only_prompt_row_is_dirty() {
+        let style = ascii_style(default_fg(), default_bg());
+        let mut grid = make_grid(10, 3);
+        for ch in "$ ".chars() {
+            grid.write_char(&ch.to_string(), style);
+        }
+        let dirty_rows = std::collections::HashSet::from([0u16]);
+
+        assert_eq!(
+            count_draw_ops_batched(&grid, None, Some(&dirty_rows)),
+            DrawOpStats {
+                ext_text_out_calls: 3,
+                set_bk_color_calls: 2,
+                set_text_color_calls: 1,
+                rows_rendered: 1,
+                cells_processed: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn batched_keeps_box_and_non_ascii_as_individual_draws_with_dirty_rows() {
+        let style = ascii_style(default_fg(), default_bg());
+        let mut grid = make_grid(6, 2);
+        grid.line_feed();
+        for ch in ["─", "é", "🙂", "x"] {
+            grid.write_char(ch, style);
+        }
+        let dirty_rows = std::collections::HashSet::from([1u16]);
+
+        assert_eq!(
+            count_draw_ops_batched(&grid, None, Some(&dirty_rows)),
+            DrawOpStats {
+                ext_text_out_calls: 8,
+                set_bk_color_calls: 5,
+                set_text_color_calls: 3,
+                rows_rendered: 1,
+                cells_processed: 5,
+            }
+        );
+    }
+
     /// 各シナリオの DrawOpStats をビフォーアフターで表示する。
     /// `cargo test -p yatamux-renderer -- print_op_counts --nocapture`
     #[test]
     fn print_op_counts() {
-        use super::count_draw_ops_batched;
-
-        let fg = Color {
-            r: 0xCD,
-            g: 0xD6,
-            b: 0xF4,
-        };
-        let bg = Color {
-            r: 0x1E,
-            g: 0x1E,
-            b: 0x2E,
-        };
+        let fg = default_fg();
+        let bg = default_bg();
         let style = ascii_style(fg, bg);
 
         macro_rules! show {
@@ -328,7 +562,7 @@ mod tests {
                     0
                 };
                 println!(
-                    "[{:30}] before={:5}  after={:5}  {:+}%",
+                    "[{:30}] before={:5}  batched={:5}  {:+}%",
                     $label,
                     b.total_gdi_calls(),
                     a.total_gdi_calls(),
@@ -350,7 +584,9 @@ mod tests {
         for ch in "$ ".chars() {
             g.write_char(&ch.to_string(), style);
         }
+        let one_row: std::collections::HashSet<u16> = [0].into();
         show!("idle_prompt 200x50 ALL", g, None);
+        show!("idle_prompt 200x50 1row", g, Some(&one_row));
 
         // S-2: dense_ascii (同色全埋め)
         for (cols, rows) in [(80u16, 24u16), (200u16, 50u16)] {

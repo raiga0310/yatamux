@@ -6,8 +6,10 @@
 //! HTML レポート:
 //!   target/criterion/render_ops/*/report/index.html
 
+use std::collections::HashSet;
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use yatamux_renderer::draw_ops::{count_draw_ops, DrawOpStats};
+use yatamux_renderer::draw_ops::{count_draw_ops, count_draw_ops_batched, DrawOpStats};
 use yatamux_terminal::cell::{CellStyle, Color};
 use yatamux_terminal::{CjkWidthConfig, Grid};
 
@@ -155,16 +157,36 @@ fn print_stats(label: &str, stats: DrawOpStats) {
     println!("[{label}] {stats}");
 }
 
+struct RenderBenchCase {
+    label: String,
+    grid: Grid,
+    dirty_rows: Option<HashSet<u16>>,
+}
+
 fn bench_idle_prompt(c: &mut Criterion) {
-    let grids = [(80u16, 24u16), (200u16, 50u16)];
+    let mut cases = Vec::new();
+    for (cols, rows) in [(80u16, 24u16), (200u16, 50u16)] {
+        cases.push(RenderBenchCase {
+            label: format!("{cols}x{rows}"),
+            grid: grid_idle_prompt(cols, rows),
+            dirty_rows: None,
+        });
+        cases.push(RenderBenchCase {
+            label: format!("{cols}x{rows}-dirty1"),
+            grid: grid_idle_prompt(cols, rows),
+            dirty_rows: Some(HashSet::from([0u16])),
+        });
+    }
     let mut group = c.benchmark_group("idle_prompt");
-    for (cols, rows) in grids {
-        let grid = grid_idle_prompt(cols, rows);
+    for case in &cases {
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{cols}x{rows}")),
-            &grid,
-            |b, g| b.iter(|| count_draw_ops(g, None, None)),
+            BenchmarkId::new("baseline", &case.label),
+            case,
+            |b, case| b.iter(|| count_draw_ops(&case.grid, None, case.dirty_rows.as_ref())),
         );
+        group.bench_with_input(BenchmarkId::new("batched", &case.label), case, |b, case| {
+            b.iter(|| count_draw_ops_batched(&case.grid, None, case.dirty_rows.as_ref()))
+        });
     }
     group.finish();
 }
@@ -175,9 +197,14 @@ fn bench_dense_ascii(c: &mut Criterion) {
     for (cols, rows) in grids {
         let grid = grid_dense_ascii(cols, rows);
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{cols}x{rows}")),
+            BenchmarkId::new("baseline", format!("{cols}x{rows}")),
             &grid,
             |b, g| b.iter(|| count_draw_ops(g, None, None)),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("batched", format!("{cols}x{rows}")),
+            &grid,
+            |b, g| b.iter(|| count_draw_ops_batched(g, None, None)),
         );
     }
     group.finish();
@@ -189,9 +216,14 @@ fn bench_multicolor(c: &mut Criterion) {
     for (cols, rows) in grids {
         let grid = grid_multicolor(cols, rows);
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{cols}x{rows}")),
+            BenchmarkId::new("baseline", format!("{cols}x{rows}")),
             &grid,
             |b, g| b.iter(|| count_draw_ops(g, None, None)),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("batched", format!("{cols}x{rows}")),
+            &grid,
+            |b, g| b.iter(|| count_draw_ops_batched(g, None, None)),
         );
     }
     group.finish();
@@ -203,9 +235,14 @@ fn bench_vim_style(c: &mut Criterion) {
     for (cols, rows) in grids {
         let grid = grid_vim_style(cols, rows);
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{cols}x{rows}")),
+            BenchmarkId::new("baseline", format!("{cols}x{rows}")),
             &grid,
             |b, g| b.iter(|| count_draw_ops(g, None, None)),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("batched", format!("{cols}x{rows}")),
+            &grid,
+            |b, g| b.iter(|| count_draw_ops_batched(g, None, None)),
         );
     }
     group.finish();
