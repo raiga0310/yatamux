@@ -18,9 +18,13 @@ jobs:
   bump:
     name: Bump patch version
     runs-on: ubuntu-latest
-    # バージョンバンプ / docs / ci のコミット自身はスキップして無限ループを防止
+    # バンプ PR のマージを検出してカスケードを防止。
+    # squash merge → "chore: bump version to X.X.X" で始まる
+    # merge commit → "Merge pull request #N from .../chore/bump-version-..." を含む
+    # どちらも除外しないとバンプ PR マージ → 新バンプ起動の無限ループになる。
     if: |
       !startsWith(github.event.head_commit.message, 'chore: bump version') &&
+      !contains(github.event.head_commit.message, 'chore/bump-version') &&
       !startsWith(github.event.head_commit.message, 'docs:') &&
       !startsWith(github.event.head_commit.message, 'ci:')
     outputs:
