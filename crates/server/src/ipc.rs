@@ -492,7 +492,16 @@ async fn handle_client(
                                     }
                                 }
                             }
-                            Err(e) => warn!("IPC: failed to parse client message: {}", e),
+                            Err(e) => {
+                                warn!("IPC: failed to parse client message: {}", e);
+                                let err_msg = ServerMessage::Error {
+                                    message: format!("invalid JSON message: {}", e),
+                                    request_id: None,
+                                };
+                                if write_server_message(&mut writer, &err_msg).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Ok(None) => {

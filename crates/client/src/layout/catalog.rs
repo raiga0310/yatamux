@@ -103,6 +103,7 @@ pub fn load_theme_from_file(name: &str) -> Option<Theme> {
         cursor: Option<String>,
         selection_bg: Option<String>,
         status_bar_bg: Option<String>,
+        alert_border: Option<String>,
     }
 
     #[derive(serde::Deserialize, Default)]
@@ -129,7 +130,7 @@ pub fn load_theme_from_file(name: &str) -> Option<Theme> {
         status_bar_bg: parse(&ap.status_bar_bg),
         font_family: None,
         font_size: None,
-        alert_border: None,
+        alert_border: parse(&ap.alert_border),
     })
 }
 

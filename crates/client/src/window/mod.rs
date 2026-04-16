@@ -37,6 +37,7 @@ mod win32 {
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::Foundation::GlobalFree;
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     use windows::Win32::System::Threading::GetSystemTimes;
@@ -285,9 +286,12 @@ mod win32 {
         /// サーバーへ入力バイト列を送信（アクティブペイン）
         fn send_input(&self, data: Vec<u8>) {
             let active = self.panes.lock().unwrap().active;
-            let _ = self
+            if let Err(e) = self
                 .msg_tx
-                .try_send(ClientMessage::Input { pane: active, data });
+                .try_send(ClientMessage::Input { pane: active, data })
+            {
+                tracing::warn!("send_input: channel full or closed, keystroke dropped: {}", e);
+            }
         }
 
         fn sync_pane_state(&self) {
@@ -326,10 +330,12 @@ mod win32 {
                 if let Some(g) = store.grids.get(pane_id) {
                     g.lock().unwrap().resize(cols, rows);
                 }
-                let _ = self.msg_tx.try_send(ClientMessage::Resize {
+                if let Err(e) = self.msg_tx.try_send(ClientMessage::Resize {
                     pane: *pane_id,
                     size: TermSize { cols, rows },
-                });
+                }) {
+                    tracing::warn!("resize_all_panes: Resize message dropped for pane {:?}: {}", pane_id, e);
+                }
             }
             // リサイズ後、アクティブペインの scrollback_len に合わせてオフセットをクランプ（B-7）
             let active = store.active;
@@ -2756,9 +2762,14 @@ mod win32 {
             if !ptr.is_null() {
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
                 let _ = GlobalUnlock(hglobal);
-                // SetClipboardData takes ownership of hglobal on success;
-                // on failure we should free it, but for simplicity we skip that here.
-                let _ = SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(hglobal.0)));
+                // SetClipboardData takes ownership of hglobal on success.
+                // On failure the handle remains ours and must be freed to avoid a heap leak.
+                if SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(hglobal.0))).is_err() {
+                    let _ = GlobalFree(Some(hglobal));
+                }
+            } else {
+                // GlobalLock failed; free the handle we allocated.
+                let _ = GlobalFree(Some(hglobal));
             }
         }
         let _ = CloseClipboard();
