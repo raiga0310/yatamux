@@ -230,13 +230,21 @@ pub enum ServerMessage {
         exit_code: Option<i32>,
     },
 
-    /// Exec への応答
+    /// `Exec` への応答
+    ///
+    /// `request_id` で対応するリクエストと照合する。
+    /// `status` が `Completed` かつ待機条件が `Exit` の場合のみ `exit_code` が設定される。
     ExecResult {
+        /// 対応する `Exec` リクエストの `request_id`
         request_id: String,
+        /// コマンドを実行したペイン ID
         pane: PaneId,
+        /// 完了ステータス
         status: ExecStatus,
+        /// 子プロセスの終了コード（`Exit` 待機かつプロセス終了が確認できた場合のみ）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// エラー詳細メッセージ（`status = error` の場合のみ）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
@@ -251,13 +259,19 @@ pub enum ServerMessage {
         request_id: Option<String>,
     },
 
-    /// ListPanes への応答
+    /// `ListPanes` への応答
     PanesListed { panes: Vec<PaneInfo> },
 
-    /// CapturePane への応答
+    /// `CapturePane` への応答
+    ///
+    /// `content` は常に含まれる（プレーンテキスト or VT シーケンスつき文字列）。
+    /// `--json` フラグ付きの場合は `capture` に構造化データも含まれる。
     PaneContent {
+        /// ペイン ID
         pane: PaneId,
+        /// テキストコンテンツ（`plain_text = true` なら ANSI 除去済み）
         content: String,
+        /// 構造化キャプチャ（`--json` 要求時のみ Some）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capture: Option<PaneCapture>,
     },

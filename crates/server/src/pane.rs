@@ -8,9 +8,19 @@
 use anyhow::Result;
 use portable_pty::ChildKiller;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
+
+/// プロセスメタデータ（コマンド名・cwd）のキャッシュエントリ
+struct MetaCache {
+    command: Option<String>,
+    cwd: Option<String>,
+    refreshed_at: Instant,
+}
+
+/// OS プロセス走査の最小間隔（list-panes の連打による負荷を抑える）
+const META_CACHE_TTL: Duration = Duration::from_millis(500);
 
 use yatamux_protocol::types::{PaneId, TermSize};
 use yatamux_terminal::{CjkWidthConfig, Grid};
@@ -66,6 +76,8 @@ pub struct Pane {
     busy: Arc<std::sync::Mutex<bool>>,
     /// 最後に出力を受け取った時刻（Unix epoch ms）
     last_output_unix_ms: Arc<std::sync::Mutex<Option<u64>>>,
+    /// プロセスメタデータキャッシュ（command / cwd）。OS 走査コストを抑えるための TTL 付きキャッシュ。
+    meta_cache: Arc<std::sync::Mutex<Option<MetaCache>>>,
 }
 
 impl Drop for Pane {
@@ -205,6 +217,7 @@ impl Pane {
             role,
             busy,
             last_output_unix_ms,
+            meta_cache: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -253,6 +266,53 @@ impl Pane {
 
     pub fn last_output_unix_ms(&self) -> Option<u64> {
         *self.last_output_unix_ms.lock().unwrap()
+    }
+
+    /// 子プロセスのアクティブコマンド名を TTL キャッシュ経由で取得する。
+    /// OS プロセス走査は `META_CACHE_TTL` 間隔でのみ実行される。
+    pub fn get_active_command_cached(&self) -> Option<String> {
+        let mut cache = self.meta_cache.lock().unwrap();
+        let needs_refresh = cache
+            .as_ref()
+            .map(|c| c.refreshed_at.elapsed() > META_CACHE_TTL)
+            .unwrap_or(true);
+        if needs_refresh {
+            let command = self
+                .child_pid
+                .and_then(yatamux_terminal::process::find_active_command);
+            let cwd = self
+                .child_pid
+                .and_then(yatamux_terminal::process::find_process_cwd);
+            *cache = Some(MetaCache {
+                command,
+                cwd,
+                refreshed_at: Instant::now(),
+            });
+        }
+        cache.as_ref().and_then(|c| c.command.clone())
+    }
+
+    /// 子プロセスの cwd を TTL キャッシュ経由で取得する。
+    pub fn get_cwd_cached(&self) -> Option<String> {
+        let mut cache = self.meta_cache.lock().unwrap();
+        let needs_refresh = cache
+            .as_ref()
+            .map(|c| c.refreshed_at.elapsed() > META_CACHE_TTL)
+            .unwrap_or(true);
+        if needs_refresh {
+            let command = self
+                .child_pid
+                .and_then(yatamux_terminal::process::find_active_command);
+            let cwd = self
+                .child_pid
+                .and_then(yatamux_terminal::process::find_process_cwd);
+            *cache = Some(MetaCache {
+                command,
+                cwd,
+                refreshed_at: Instant::now(),
+            });
+        }
+        cache.as_ref().and_then(|c| c.cwd.clone())
     }
 
     pub fn terminate(&self) -> Result<()> {

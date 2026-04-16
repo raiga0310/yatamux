@@ -9,9 +9,11 @@
 //! - broadcast lagged 発生時はクライアントを切断し、黙って継続しない
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use std::collections::HashSet;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufWriter;
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tracing::{debug, error, info, warn};
 
 use yatamux_protocol::types::PaneId;
@@ -37,6 +39,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// IPC 認証設定（`run_ipc_server` に渡す）
+#[derive(Default)]
 pub struct IpcAuthConfig {
     /// handshake トークン認証を強制するか
     pub require_auth: bool,
@@ -63,30 +66,16 @@ pub fn token_file_path(session: &str) -> Option<std::path::PathBuf> {
 pub fn generate_and_save_token(session: &str) -> Option<String> {
     use std::io::Write;
 
-    // 疑似ランダムトークン: UNIX timestamp(ns) + pid の組み合わせを複数ラウンドで混ぜる
-    // 本格的なセキュリティが必要な場合は `rand` クレートを追加すること。
-    // 現時点では同一ユーザー DACL による保護が主な防衛線なので、
-    // この程度のエントロピーで実用上十分と判断する。
-    let pid = std::process::id() as u64;
-    let time_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    // 簡単な混合（XOR + 乗算ハッシュの反復）で 32 バイト相当のトークンを生成
-    let mut state = [0u64; 4];
-    state[0] = pid ^ 0xdeadbeef_cafebabe;
-    state[1] = time_ns ^ 0x01234567_89abcdef;
-    state[2] = pid.wrapping_mul(0x6c62272e_07bb0142).wrapping_add(time_ns);
-    state[3] = time_ns.wrapping_mul(0x517cc1b7_27220a95).wrapping_add(pid);
-    for _ in 0..8 {
-        for i in 0..4 {
-            state[i] =
-                state[i].wrapping_mul(0x9e3779b9_7f4a7c15).rotate_left(31) ^ state[(i + 1) % 4];
-        }
+    // OS CSPRNG（Windows: BCryptGenRandom）から 32 バイトのランダムデータを生成する。
+    // getrandom は Windows 7+ / Linux / macOS で OS 提供のエントロピーソースを使用する。
+    let mut bytes = [0u8; 32];
+    if let Err(e) = getrandom::getrandom(&mut bytes) {
+        warn!("IPC: getrandom 失敗、トークン生成をスキップ: {}", e);
+        return None;
     }
-    let token = state
+    let token = bytes
         .iter()
-        .map(|v| format!("{:016x}", v))
+        .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
     let path = token_file_path(session)?;
@@ -304,14 +293,16 @@ fn should_forward_message(msg: &ServerMessage, subscriptions: &HashSet<PaneId>) 
 
 #[cfg(windows)]
 async fn write_server_message(
-    writer: &mut tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>,
+    writer: &mut BufWriter<tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>>,
     msg: &ServerMessage,
 ) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
     let json = serde_json::to_string(msg).map_err(|err| {
         std::io::Error::other(format!("failed to serialize server message: {}", err))
     })?;
     let line = format!("{}\n", json);
-    writer.write_all(line.as_bytes()).await
+    writer.write_all(line.as_bytes()).await?;
+    writer.flush().await
 }
 
 #[cfg(windows)]
@@ -322,36 +313,20 @@ async fn handle_client(
     require_auth: bool,
     expected_token: Option<String>,
 ) {
-    let (reader, mut writer) = tokio::io::split(pipe);
-    let mut lines = BufReader::new(reader).lines();
+    let (reader, raw_writer) = tokio::io::split(pipe);
+    // LinesCodec::new_with_max_length により、改行前に MAX_MESSAGE_BYTES を超えた時点で
+    // LinesCodecError::MaxLineLengthExceeded が返り、巨大 String の確保を防ぐ（IMP-11）
+    let mut framed = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_MESSAGE_BYTES));
+    let mut writer = BufWriter::new(raw_writer);
     let mut subscriptions = HashSet::<PaneId>::new();
     // 認証済みかどうか（require_auth=false なら最初から true）
     let mut authenticated = !require_auth;
 
     loop {
         tokio::select! {
-            result = lines.next_line() => {
+            result = framed.next() => {
                 match result {
-                    Ok(Some(line)) => {
-                        // メッセージサイズ上限チェック（DoS 防止）
-                        if line.len() > MAX_MESSAGE_BYTES {
-                            error!(
-                                "IPC: oversized message ({} bytes, limit {} bytes); disconnecting client",
-                                line.len(),
-                                MAX_MESSAGE_BYTES,
-                            );
-                            let err_msg = ServerMessage::Error {
-                                message: format!(
-                                    "message too large ({} bytes); limit is {} bytes",
-                                    line.len(),
-                                    MAX_MESSAGE_BYTES,
-                                ),
-                                request_id: None,
-                            };
-                            let _ = write_server_message(&mut writer, &err_msg).await;
-                            break;
-                        }
-
+                    Some(Ok(line)) => {
                         match serde_json::from_str::<ClientMessage>(&line) {
                             Ok(msg) => {
                                 debug!("IPC recv: {:?}", msg);
@@ -492,15 +467,39 @@ async fn handle_client(
                                     }
                                 }
                             }
-                            Err(e) => warn!("IPC: failed to parse client message: {}", e),
+                            Err(e) => {
+                                warn!("IPC: failed to parse client message: {}", e);
+                                let err_msg = ServerMessage::Error {
+                                    message: format!("invalid JSON message: {}", e),
+                                    request_id: None,
+                                };
+                                if write_server_message(&mut writer, &err_msg).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
-                    Ok(None) => {
-                        // クライアントが接続を正常に閉じた
+                    None => {
+                        // クライアントが接続を正常に閉じた (EOF)
                         debug!("IPC: client closed connection (EOF)");
                         break;
                     }
-                    Err(e) => {
+                    Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+                        error!(
+                            "IPC: oversized message (limit {} bytes); disconnecting client",
+                            MAX_MESSAGE_BYTES,
+                        );
+                        let err_msg = ServerMessage::Error {
+                            message: format!(
+                                "message too large; limit is {} bytes",
+                                MAX_MESSAGE_BYTES,
+                            ),
+                            request_id: None,
+                        };
+                        let _ = write_server_message(&mut writer, &err_msg).await;
+                        break;
+                    }
+                    Some(Err(LinesCodecError::Io(e))) => {
                         // パイプ IO エラー（クライアントが異常切断した場合など）
                         debug!("IPC: pipe read error; disconnecting client: {}", e);
                         break;
@@ -510,6 +509,10 @@ async fn handle_client(
             result = bcast_rx.recv() => {
                 match result {
                     Ok(msg) => {
+                        // 未認証クライアントにはサーバー出力を一切送信しない
+                        if !authenticated {
+                            continue;
+                        }
                         if should_forward_message(&msg, &subscriptions)
                             && write_server_message(&mut writer, &msg).await.is_err()
                         {

@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use yatamux_client::connection::ServerConnection;
 use yatamux_protocol::{ClientMessage, ServerMessage};
-use yatamux_server::ipc::run_ipc_server;
+use yatamux_server::ipc::{run_ipc_server, IpcAuthConfig};
 
 /// テストごとにユニークなセッション名を生成する
 fn unique_session() -> String {
@@ -40,7 +40,7 @@ fn start_ipc_server(session: &str) -> (mpsc::Sender<ClientMessage>, mpsc::Receiv
 
     // IPC がクライアントから受け取ったメッセージをロジックサーバーに転送
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_owned, ipc_client_tx, ipc_client_rx).await;
+        let _ = run_ipc_server(&session_owned, IpcAuthConfig::default(), ipc_client_tx, ipc_client_rx).await;
     });
 
     // ※ run_ipc_server は ipc 内部チャネルを使う。
@@ -62,7 +62,7 @@ async fn test_ipc_server_accepts_connection() {
 
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
 
     // サーバー起動を少し待つ
@@ -89,7 +89,7 @@ async fn test_ipc_send_receive_message() {
 
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -131,7 +131,7 @@ async fn test_ipc_multiple_clients() {
 
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -188,7 +188,7 @@ async fn test_ipc_list_panes_returns_panes_listed() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -217,7 +217,7 @@ async fn test_ipc_send_keys_routes_to_pane() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -272,7 +272,7 @@ async fn test_ipc_send_keys_routes_to_pane() {
         loop {
             match conn.rx.recv().await.unwrap() {
                 ServerMessage::Output { pane, .. } if pane == pane_id => return true,
-                ServerMessage::Error { message } => panic!("server error: {}", message),
+                ServerMessage::Error { message, .. } => panic!("server error: {}", message),
                 _ => continue,
             }
         }
@@ -295,7 +295,7 @@ async fn test_ipc_subscribe_pane_filters_output_to_target_pane() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -401,7 +401,7 @@ async fn test_ipc_subscribe_pane_filters_output_to_target_pane() {
         loop {
             match conn.rx.recv().await.unwrap() {
                 ServerMessage::Output { pane, .. } if pane == pane1 => return true,
-                ServerMessage::Error { message } => panic!("server error: {}", message),
+                ServerMessage::Error { message, .. } => panic!("server error: {}", message),
                 _ => continue,
             }
         }
@@ -424,7 +424,7 @@ async fn test_ipc_send_keys_to_unknown_pane_returns_error() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -440,7 +440,7 @@ async fn test_ipc_send_keys_to_unknown_pane_returns_error() {
 
     let err = tokio::time::timeout(std::time::Duration::from_millis(500), async {
         loop {
-            if let ServerMessage::Error { message } = conn.rx.recv().await.unwrap() {
+            if let ServerMessage::Error { message, .. } = conn.rx.recv().await.unwrap() {
                 return message;
             }
         }
@@ -468,7 +468,7 @@ async fn test_ipc_handshake_returns_accepted() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -481,6 +481,7 @@ async fn test_ipc_handshake_returns_accepted() {
     let hs = serde_json::to_string(&ClientMessage::Handshake {
         protocol_version: PROTOCOL_VERSION,
         capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
+        token: None,
     })
     .unwrap();
     writer
@@ -537,7 +538,7 @@ async fn test_ipc_handshake_old_version_rejected() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -552,6 +553,7 @@ async fn test_ipc_handshake_old_version_rejected() {
     let hs = serde_json::to_string(&ClientMessage::Handshake {
         protocol_version: old_version,
         capabilities: vec![],
+        token: None,
     })
     .unwrap();
     writer
@@ -568,7 +570,7 @@ async fn test_ipc_handshake_old_version_rejected() {
 
     let msg: ServerMessage = serde_json::from_str(&line).unwrap();
     match msg {
-        ServerMessage::Error { message } => {
+        ServerMessage::Error { message, .. } => {
             assert!(
                 message.contains("not supported") || message.contains("minimum"),
                 "error should mention version mismatch: {}",
@@ -603,7 +605,7 @@ async fn test_ipc_legacy_client_without_handshake_still_works() {
     tokio::spawn(logic.run(server_event_rx));
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -634,11 +636,11 @@ async fn test_ipc_legacy_client_without_handshake_still_works() {
     );
 }
 
-// F-5: 不正な JSON を送っても接続が維持される（次のメッセージが処理できる）
-// 現状の ipc.rs は warn ログを出して継続するため、切断されないことを確認。
+// F-5: 不正な JSON を送ると Error が返り、接続が切断される（IMP-05）
+// ipc.rs は不正 JSON に対して ServerMessage::Error を返してから切断する。
 #[tokio::test]
-async fn test_ipc_invalid_json_does_not_drop_connection() {
-    use tokio::io::AsyncWriteExt;
+async fn test_ipc_invalid_json_returns_error() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     let session = unique_session();
@@ -652,32 +654,20 @@ async fn test_ipc_invalid_json_does_not_drop_connection() {
 
     let session_c = session.clone();
     tokio::spawn(async move {
-        let _ = run_ipc_server(&session_c, server_cmd_tx, server_out_rx).await;
+        let _ = run_ipc_server(&session_c, IpcAuthConfig::default(), server_cmd_tx, server_out_rx).await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pipe_name = format!(r"\\.\pipe\yatamux-{}", session);
-    let mut pipe = ClientOptions::new().open(&pipe_name).unwrap();
+    let pipe = ClientOptions::new().open(&pipe_name).unwrap();
+    let (reader, mut writer) = tokio::io::split(pipe);
+    let mut lines = tokio::io::BufReader::new(reader).lines();
 
     // 不正 JSON を送信
-    pipe.write_all(b"this is not valid json\n").await.unwrap();
+    writer.write_all(b"this is not valid json\n").await.unwrap();
 
-    // 少し待ってから正常なメッセージを送信
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let valid = serde_json::to_string(&ClientMessage::CreateWorkspace {
-        name: Some("after-invalid".to_string()),
-    })
-    .unwrap();
-    pipe.write_all(format!("{}\n", valid).as_bytes())
-        .await
-        .unwrap();
-
-    // ServerConnection で読むのでなく、直接 BufReader で読む
-    use tokio::io::AsyncBufReadExt;
-    let mut lines = tokio::io::BufReader::new(pipe).lines();
-
+    // Error レスポンスが返ることを確認
     let resp_line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
         .await
         .expect("timeout")
@@ -686,9 +676,13 @@ async fn test_ipc_invalid_json_does_not_drop_connection() {
 
     let msg: ServerMessage = serde_json::from_str(&resp_line).unwrap();
     match msg {
-        ServerMessage::WorkspaceCreated { name, .. } => {
-            assert_eq!(name, "after-invalid");
+        ServerMessage::Error { message, .. } => {
+            assert!(
+                message.contains("invalid JSON"),
+                "error message should mention invalid JSON, got: {}",
+                message
+            );
         }
-        other => panic!("unexpected: {:?}", other),
+        other => panic!("expected Error for invalid JSON, got: {:?}", other),
     }
 }

@@ -124,31 +124,44 @@ pub fn find_process_cwd(pid: u32) -> Option<String> {
     }
 }
 
+/// `NtQueryInformationProcess` の型エイリアス。`OnceLock` の型パラメータに使用。
+#[cfg(windows)]
+type FnNtQuery = unsafe extern "system" fn(
+    windows::Win32::Foundation::HANDLE,
+    u32,
+    *mut std::ffi::c_void,
+    u32,
+    *mut u32,
+) -> i32;
+
+/// `NtQueryInformationProcess` 関数ポインタのキャッシュ（IMP-15）。
+/// `LoadLibraryA` + `GetProcAddress` を初回のみ実行し、以降はキャッシュを返す。
+#[cfg(windows)]
+static NT_QUERY_PROC: std::sync::OnceLock<Option<FnNtQuery>> = std::sync::OnceLock::new();
+
 /// ハンドルを受け取り cwd を読み取る内部実装（ハンドルのクローズは呼び出し元が行う）
 #[cfg(windows)]
 unsafe fn read_process_cwd_inner(handle: windows::Win32::Foundation::HANDLE) -> Option<String> {
     use windows::core::s;
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
-    type FnNtQueryInformationProcess = unsafe extern "system" fn(
-        process_handle: windows::Win32::Foundation::HANDLE,
-        process_information_class: u32,
-        process_information: *mut std::ffi::c_void,
-        process_information_length: u32,
-        return_length: *mut u32,
-    ) -> i32;
-
-    // ntdll から NtQueryInformationProcess をロード
-    let ntdll = LoadLibraryA(s!("ntdll.dll")).ok()?;
-    let fn_ptr = GetProcAddress(ntdll, s!("NtQueryInformationProcess"))?;
-    let nt_query: FnNtQueryInformationProcess = std::mem::transmute(fn_ptr);
+    // NtQueryInformationProcess の関数ポインタを OnceLock でキャッシュする（IMP-15）。
+    let nt_query = NT_QUERY_PROC
+        .get_or_init(|| {
+            use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+            let ntdll = LoadLibraryA(s!("ntdll.dll")).ok()?;
+            let fn_ptr = GetProcAddress(ntdll, s!("NtQueryInformationProcess"))?;
+            #[allow(clippy::missing_transmute_annotations)]
+            let f: FnNtQuery = std::mem::transmute(fn_ptr);
+            Some(f)
+        })
+        .as_ref()?;
 
     // ProcessBasicInformation (class=0)
     // x64 レイアウト: NTSTATUS(4)+pad(4)+PEB*(8)+AffinityMask(8)+BasePriority(8)+UniqueProcessId(8)+InheritedFrom(8) = 48 bytes
     let mut pbi = [0u8; 48];
     let mut ret_len = 0u32;
-    let status = nt_query(
+    let status = (*nt_query)(
         handle,
         0,
         pbi.as_mut_ptr() as *mut std::ffi::c_void,

@@ -76,7 +76,6 @@ impl ServerConnection {
             let mut lines = BufReader::new(reader).lines();
 
             // 接続直後にプロトコルハンドシェイクを送信する
-            // 旧サーバーは未知メッセージとして warn して継続（後方互換）
             //
             // トークンファイル（%APPDATA%\yatamux\{session}.token）が存在すれば読み込み、
             // Handshake に含める。ファイルが存在しない場合はトークンなしで送信する。
@@ -93,10 +92,70 @@ impl ServerConnection {
                 capabilities: SERVER_CAPABILITIES.iter().map(|s| s.to_string()).collect(),
                 token,
             };
-            if let Ok(json) = serde_json::to_string(&handshake) {
-                let line = format!("{}\n", json);
-                // 送信失敗は致命的ではないので無視する（旧サーバーとの互換維持）
-                let _ = writer.write_all(line.as_bytes()).await;
+            let handshake_json = serde_json::to_string(&handshake)
+                .context("failed to serialize Handshake message")?;
+            writer
+                .write_all(format!("{}\n", handshake_json).as_bytes())
+                .await
+                .context("failed to send Handshake to server")?;
+
+            // サーバーからの最初の応答を確認する（HandshakeAccepted or Error）。
+            // 旧サーバー（handshake 未対応）は最初に別メッセージを返すことがあるため、
+            // タイムアウト付きで待機し、応答なし・旧形式は後方互換として通過させる。
+            use tokio::time::timeout;
+            let first_response = timeout(Duration::from_secs(3), lines.next_line()).await;
+            let first_line = match first_response {
+                Ok(Ok(Some(line))) => Some(line),
+                Ok(Ok(None)) => anyhow::bail!("server closed connection before handshake response"),
+                Ok(Err(e)) => anyhow::bail!("pipe read error during handshake: {}", e),
+                Err(_) => None, // タイムアウト: 旧サーバーと判断して続行
+            };
+
+            if let Some(line) = first_line {
+                if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {
+                    match msg {
+                        ServerMessage::HandshakeAccepted { .. } => {
+                            // 正常: 続行
+                        }
+                        ServerMessage::Error { message, .. } => {
+                            anyhow::bail!("server rejected handshake: {}", message);
+                        }
+                        other => {
+                            // 旧サーバー or 想定外メッセージ: チャネルに転送して続行
+                            // （後方互換のため切断しない）
+                            let (client_tx, mut client_rx) = mpsc::channel::<ClientMessage>(64);
+                            let (server_tx, server_rx) = mpsc::channel::<ServerMessage>(64);
+                            // 先読みしたメッセージをチャネルに送り込む
+                            let _ = server_tx.try_send(other);
+                            tokio::spawn(async move {
+                                while let Some(msg) = client_rx.recv().await {
+                                    if let Ok(json) = serde_json::to_string(&msg) {
+                                        if writer.write_all(format!("{}\n", json).as_bytes()).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                            tokio::spawn(async move {
+                                while let Ok(Some(line)) = lines.next_line().await {
+                                    if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {
+                                        if matches!(msg, ServerMessage::HandshakeAccepted { .. }) {
+                                            continue;
+                                        }
+                                        if server_tx.send(msg).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                            return Ok(Self {
+                                tx: client_tx,
+                                rx: server_rx,
+                                server_pid,
+                            });
+                        }
+                    }
+                }
             }
 
             let (client_tx, mut client_rx) = mpsc::channel::<ClientMessage>(64);

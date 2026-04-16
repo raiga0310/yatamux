@@ -467,7 +467,7 @@ mod tests {
             loop {
                 match recv_one(rx).await {
                     ServerMessage::PanesListed { panes } => return panes,
-                    ServerMessage::Error { message } => panic!("unexpected error: {}", message),
+                    ServerMessage::Error { message, .. } => panic!("unexpected error: {}", message),
                     _ => continue,
                 }
             }
@@ -730,7 +730,7 @@ mod tests {
                 loop {
                     match recv_one(&mut rx).await {
                         ServerMessage::InputAccepted { pane } if pane == pane_id => return true,
-                        ServerMessage::Error { message } => {
+                        ServerMessage::Error { message, .. } => {
                             panic!("unexpected error after Input: {}", message)
                         }
                         _ => continue,
@@ -777,7 +777,7 @@ mod tests {
                 ServerMessage::PaneCreated { id, .. } => id,
                 _ => panic!(),
             };
-            tx.send(ClientMessage::ClosePane { pane: pane_id })
+            tx.send(ClientMessage::ClosePane { pane: pane_id, request_id: None })
                 .await
                 .unwrap();
             let closed = tokio::time::timeout(Duration::from_secs(2), async {
@@ -1400,7 +1400,7 @@ mod tests {
                 other => panic!("expected PaneCreated, got {:?}", other),
             };
 
-            tx.send(ClientMessage::InterruptPane { pane: pane_id })
+            tx.send(ClientMessage::InterruptPane { pane: pane_id, request_id: None })
                 .await
                 .unwrap();
 
@@ -1424,13 +1424,13 @@ mod tests {
     async fn test_interrupt_pane_unknown_pane_returns_error() {
         with_timeout(async {
             let (tx, mut rx) = start_server();
-            tx.send(ClientMessage::InterruptPane { pane: PaneId(9999) })
+            tx.send(ClientMessage::InterruptPane { pane: PaneId(9999), request_id: None })
                 .await
                 .unwrap();
 
             let msg = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::Error { message } = recv_one(&mut rx).await {
+                    if let ServerMessage::Error { message, .. } = recv_one(&mut rx).await {
                         return message;
                     }
                 }
@@ -1449,13 +1449,13 @@ mod tests {
     async fn test_terminate_pane_unknown_pane_returns_error() {
         with_timeout(async {
             let (tx, mut rx) = start_server();
-            tx.send(ClientMessage::TerminatePane { pane: PaneId(9999) })
+            tx.send(ClientMessage::TerminatePane { pane: PaneId(9999), request_id: None })
                 .await
                 .unwrap();
 
             let msg = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::Error { message } = recv_one(&mut rx).await {
+                    if let ServerMessage::Error { message, .. } = recv_one(&mut rx).await {
                         return message;
                     }
                 }
@@ -1503,7 +1503,7 @@ mod tests {
                 other => panic!("expected PaneCreated, got {:?}", other),
             };
 
-            tx.send(ClientMessage::TerminatePane { pane: pane_id })
+            tx.send(ClientMessage::TerminatePane { pane: pane_id, request_id: None })
                 .await
                 .unwrap();
 
@@ -1511,7 +1511,7 @@ mod tests {
                 loop {
                     match recv_one(&mut rx).await {
                         ServerMessage::PaneClosed { pane } if pane == pane_id => return pane,
-                        ServerMessage::Error { message } => panic!("unexpected error: {}", message),
+                        ServerMessage::Error { message, .. } => panic!("unexpected error: {}", message),
                         _ => continue,
                     }
                 }
@@ -1537,7 +1537,7 @@ mod tests {
             .unwrap();
             let msg = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    if let ServerMessage::Error { message } = recv_one(&mut rx).await {
+                    if let ServerMessage::Error { message, .. } = recv_one(&mut rx).await {
                         return message;
                     }
                 }
@@ -1733,7 +1733,7 @@ mod tests {
                 loop {
                     match recv_one(&mut rx).await {
                         ServerMessage::PaneCreated { id, .. } => return Ok(id),
-                        ServerMessage::Error { message } => return Err(message),
+                        ServerMessage::Error { message, .. } => return Err(message),
                         _ => continue,
                     }
                 }
@@ -1820,9 +1820,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    let message = recv_one(&mut rx).await;
+                    // recv_one は 1 秒タイムアウトなので、外側の 5 秒タイムアウトに
+                    // 任せるため直接 rx.recv() を使う
+                    let message = rx.recv().await.expect("server channel closed");
                     match &message {
                         ServerMessage::ExecResult { request_id, .. }
                             if request_id == "req-exit" =>
@@ -1872,9 +1874,9 @@ mod tests {
             .await
             .unwrap();
 
-            let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    let message = recv_one(&mut rx).await;
+                    let message = rx.recv().await.expect("server channel closed");
                     match &message {
                         ServerMessage::ExecResult { request_id, .. }
                             if request_id == "req-timeout" =>

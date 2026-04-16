@@ -572,7 +572,12 @@ async fn handle_layout_switch_pane_created(
             prev,
             active,
         } => {
-            let launch = queue.pop_front().expect("queue should be non-empty");
+            let Some(launch) = queue.pop_front() else {
+                // State inconsistency: queue exhausted while still in Applying phase.
+                // Abort the layout switch gracefully rather than panicking.
+                tracing::error!("layout switch queue unexpectedly empty in Applying phase; aborting");
+                return None;
+            };
             let new_sink = TerminalSink::new(size.cols, size.rows);
             let new_grid = Arc::clone(&new_sink.grid);
             sinks.insert(new_id, new_sink);
@@ -613,10 +618,10 @@ async fn request_next_layout_pane(
     split_from: PaneId,
     queue: &VecDeque<PaneLaunchPlan>,
 ) {
-    let next_direction = queue
-        .front()
-        .map(|launch| launch.split)
-        .expect("queue should be non-empty");
+    let Some(next_direction) = queue.front().map(|launch| launch.split) else {
+        tracing::error!("request_next_layout_pane called with empty queue; skipping CreatePane");
+        return;
+    };
     let _ = client_tx
         .send(ClientMessage::CreatePane {
             surface: surf_id,
