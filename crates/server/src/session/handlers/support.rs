@@ -36,12 +36,8 @@ pub(super) fn pane_info(
     let (cols, rows) = (size.cols, size.rows);
     drop(size);
     let title = pane.title.lock().unwrap().to_string();
-    let command = pane
-        .child_pid
-        .and_then(yatamux_terminal::process::find_active_command);
-    let cwd = pane
-        .child_pid
-        .and_then(yatamux_terminal::process::find_process_cwd);
+    let command = pane.get_active_command_cached();
+    let cwd = pane.get_cwd_cached();
 
     PaneInfo {
         id,

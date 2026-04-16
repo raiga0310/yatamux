@@ -42,14 +42,9 @@ impl Server {
         let mut cwds: HashMap<String, Option<String>> = HashMap::new();
         for (&pane_id, pane) in &self.panes {
             let key = pane_id.0.to_string();
-            let cmd = pane
-                .child_pid
-                .and_then(yatamux_terminal::process::find_active_command);
+            let cmd = pane.get_active_command_cached();
             commands.insert(key.clone(), cmd);
-            // child_pid (cmd.exe 等) の cwd を取得する
-            let cwd = pane
-                .child_pid
-                .and_then(yatamux_terminal::process::find_process_cwd);
+            let cwd = pane.get_cwd_cached();
             cwds.insert(key, cwd);
         }
         self.client_tx
