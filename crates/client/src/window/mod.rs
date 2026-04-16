@@ -738,8 +738,8 @@ mod win32 {
                 // dirty 行のみ再描画。空なら非アクティブペインはスキップ。
                 // アクティブペインは WM_TIMER でカーソル行が常に dirty なので
                 // ここには必ず入る。
-                let dirty_rows: std::collections::HashSet<u16> =
-                    grid.take_dirty_rows().into_iter().collect();
+                // take_dirty_rows() は昇順 Vec<u16> を返すので HashSet 化不要（IMP-02）。
+                let dirty_rows = grid.take_dirty_rows();
                 if dirty_rows.is_empty() {
                     continue;
                 }
@@ -756,10 +756,7 @@ mod win32 {
                 // 表示開始位置（スクロールバック+グリッド結合バッファ上のインデックス）
                 let view_start = sb_len.saturating_sub(effective_offset);
 
-                for row in 0..grid.rows() {
-                    if !dirty_rows.contains(&row) {
-                        continue;
-                    }
+                for &row in &dirty_rows {
                     let combined_idx = view_start + row as usize;
                     let cells: &[Cell] = if combined_idx < sb_len {
                         match grid.scrollback_row(combined_idx) {
