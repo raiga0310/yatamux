@@ -151,7 +151,9 @@ unsafe fn read_process_cwd_inner(handle: windows::Win32::Foundation::HANDLE) -> 
             use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
             let ntdll = LoadLibraryA(s!("ntdll.dll")).ok()?;
             let fn_ptr = GetProcAddress(ntdll, s!("NtQueryInformationProcess"))?;
-            Some(std::mem::transmute::<_, FnNtQuery>(fn_ptr))
+            #[allow(clippy::missing_transmute_annotations)]
+            let f: FnNtQuery = std::mem::transmute(fn_ptr);
+            Some(f)
         })
         .as_ref()?;
 
