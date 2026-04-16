@@ -39,6 +39,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// IPC 認証設定（`run_ipc_server` に渡す）
+#[derive(Default)]
 pub struct IpcAuthConfig {
     /// handshake トークン認証を強制するか
     pub require_auth: bool,

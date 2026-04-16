@@ -20,7 +20,7 @@ struct MetaCache {
 }
 
 /// OS プロセス走査の最小間隔（list-panes の連打による負荷を抑える）
-const META_CACHE_TTL: Duration = Duration::from_secs(2);
+const META_CACHE_TTL: Duration = Duration::from_millis(500);
 
 use yatamux_protocol::types::{PaneId, TermSize};
 use yatamux_terminal::{CjkWidthConfig, Grid};
